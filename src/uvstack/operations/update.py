@@ -7,6 +7,7 @@ the command plan, and returns without touching the env or the lock.
 
 from __future__ import annotations
 
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -130,9 +131,11 @@ def update_env(
 
     # Compile to a temp lock, then atomically replace, so a failed compile never
     # corrupts an existing lockfile.
-    tmp_lock = Path(
-        tempfile.mkstemp(dir=lock.parent, prefix=lock.name + ".", suffix=".tmp")[1]
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        dir=lock.parent, prefix=lock.name + ".", suffix=".tmp"
     )
+    os.close(tmp_fd)
+    tmp_lock = Path(tmp_name)
     try:
         runner.run(
             uv_pip_compile(
