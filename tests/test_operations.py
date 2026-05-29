@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from uvstack.commands import micromamba_create, micromamba_python_path, micromamba_remove
+from uvstack.commands import micromamba_create, micromamba_remove
 from uvstack.config import ConfigRoot
-from uvstack.errors import EnvError
+from uvstack.errors import ConfigError, EnvError
 from uvstack.operations.create import ensure_env, env_micromamba_exists
+from uvstack.operations.project import ProjectOptions, init_project
+from uvstack.operations.update import UpdateOptions, update_env
 from uvstack.runner import Command, CommandResult, RecordingRunner
 
 
@@ -70,8 +72,6 @@ def test_ensure_env_existing_no_flags_is_noop(config_tree: ConfigRoot):
 # update operation tests
 # ============================================================================
 
-from uvstack.operations.update import UpdateOptions, update_env
-
 
 def test_update_writes_generated_files_and_runs_sequence(config_tree: ConfigRoot):
     rec = RecordingRunner(responder=_existing_env_responder)
@@ -121,3 +121,56 @@ def test_update_dry_run_writes_files_but_runs_nothing(config_tree: ConfigRoot):
     assert any("compile" in c.args for c in result.planned)
     # Dry run never wrote a lock file.
     assert not config_tree.env_lock("main").is_file()
+
+
+# ============================================================================
+# project init operation tests
+# ============================================================================
+
+
+def test_init_project_runs_init_add_sync(config_tree: ConfigRoot, tmp_path):
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    rec = RecordingRunner()
+    init_project(
+        config_tree, rec, ["standard"], ProjectOptions(python="3.12"), cwd=project_dir
+    )
+    argv = [" ".join(c.args) for c in rec.commands]
+    assert any("uv init --bare" in a for a in argv)
+    assert any("uv add --no-sync" in a for a in argv)
+    assert any(a == "uv sync" for a in argv)
+
+
+def test_init_project_no_sync_skips_sync(config_tree: ConfigRoot, tmp_path):
+    project_dir = tmp_path / "proj2"
+    project_dir.mkdir()
+    rec = RecordingRunner()
+    init_project(
+        config_tree, rec, ["ds"], ProjectOptions(no_sync=True), cwd=project_dir
+    )
+    argv = [" ".join(c.args) for c in rec.commands]
+    assert all(a != "uv sync" for a in argv)
+
+
+def test_init_project_existing_pyproject_without_force_raises(
+    config_tree: ConfigRoot, tmp_path
+):
+    project_dir = tmp_path / "proj3"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text("[project]\nname='x'\n")
+    rec = RecordingRunner()
+    with pytest.raises(ConfigError):
+        init_project(config_tree, rec, ["ds"], ProjectOptions(), cwd=project_dir)
+
+
+def test_init_project_existing_pyproject_with_force_skips_init(
+    config_tree: ConfigRoot, tmp_path
+):
+    project_dir = tmp_path / "proj4"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text("[project]\nname='x'\n")
+    rec = RecordingRunner()
+    init_project(config_tree, rec, ["ds"], ProjectOptions(force=True), cwd=project_dir)
+    argv = [" ".join(c.args) for c in rec.commands]
+    assert not any("uv init" in a for a in argv)
+    assert any("uv add --no-sync" in a for a in argv)
