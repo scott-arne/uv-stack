@@ -22,6 +22,12 @@ def atomic_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w") as handle:
             handle.write(text)
+        # mkstemp creates the file 0600; relax it to the conventional file mode
+        # (honoring the process umask) so generated config files are readable
+        # like the hand-authored sources alongside them.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp_name, 0o666 & ~umask)
         os.replace(tmp_name, path)
     except BaseException:
         if os.path.exists(tmp_name):
