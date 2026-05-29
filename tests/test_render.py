@@ -25,7 +25,10 @@ def test_render_requirements_in_omits_missing_local(config_tree: ConfigRoot):
     config_tree.env_local_path("main").unlink()
     stack = ResolvedStack(profiles=["ds"])
     text = render_requirements_in(stack, config_tree, "main")
-    assert "requirements.local.in" not in text
+    # The static header always names requirements.local.in, but when the file is
+    # absent there must be no -r reference to it and no local-additions section.
+    assert "# Environment-local additions" not in text
+    assert f"-r {config_tree.env_local_path('main')}" not in text
 
 
 def test_render_requirements_flat_expands_profiles(config_tree: ConfigRoot):
