@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import sys
+
 import rich_click as click
 
-from uvstack.cli._render import console, echo, render_list
+from uvstack.cli._render import console, echo, render_error, render_list
 from uvstack.config import ConfigRoot
+from uvstack.errors import UvstackError
 from uvstack.operations.update import UpdateOptions, update_env
 from uvstack.render import render_requirements_in
 from uvstack.resolver import Resolver
@@ -17,16 +20,62 @@ def env() -> None:
     """Manage named micromamba + uv environments."""
 
 
-def _run_update(config: ConfigRoot, names: list[str], options: UpdateOptions) -> None:
+def _run_update(
+    config: ConfigRoot,
+    names: list[str],
+    options: UpdateOptions,
+    *,
+    stop_on_error: bool = False,
+) -> None:
+    """Update each environment, continuing past failures by default.
+
+    Each environment's outcome is recorded and printed in a final summary table.
+    With ``stop_on_error`` the batch aborts at the first failing environment.
+    A non-empty failure set exits the process with status 1.
+
+    :param config: Configuration root.
+    :param names: Environment names to update.
+    :param options: Update options.
+    :param stop_on_error: Abort the batch on the first failure.
+    """
     runner = SubprocessRunner()
+    failed: list[str] = []
+
     for name in names:
         console.rule(f"Updating {name}")
-        result = update_env(config, runner, name, options)
+        try:
+            result = update_env(config, runner, name, options)
+        except UvstackError as error:
+            render_error(error)
+            failed.append(name)
+            if stop_on_error:
+                break
+            continue
         if options.dry_run:
             echo("Planned commands:")
             for command in result.planned:
                 echo("  " + " ".join(command.args))
-    if not options.dry_run:
+
+    if options.dry_run:
+        return
+
+    _print_summary(names, failed)
+    if failed:
+        sys.exit(1)
+
+
+def _print_summary(names: list[str], failed: list[str]) -> None:
+    """Print a per-environment ✓/✗ summary of an update batch."""
+    failed_set = set(failed)
+    console.rule("Summary")
+    for name in names:
+        if name in failed_set:
+            console.print(f"  [red]✗[/red] {name}")
+        else:
+            console.print(f"  [green]✓[/green] {name}")
+    if failed:
+        console.print(f"[red]{len(failed)} of {len(names)} environment(s) failed.[/red]")
+    else:
         console.print("[green]All requested environments updated.[/green]")
 
 
@@ -36,6 +85,11 @@ def _run_update(config: ConfigRoot, names: list[str], options: UpdateOptions) ->
 @click.option("--create", is_flag=True, help="Create the env if it is missing.")
 @click.option("--recreate", is_flag=True, help="Remove and recreate the env first.")
 @click.option("--dry-run", is_flag=True, help="Print the command plan; change nothing.")
+@click.option(
+    "--stop-on-error",
+    is_flag=True,
+    help="Abort the batch at the first failing environment.",
+)
 @click.option("--no-upgrade", is_flag=True, help="Recompile without forcing upgrades.")
 @click.option(
     "--upgrade-package",
@@ -51,13 +105,16 @@ def env_update(
     create: bool,
     recreate: bool,
     dry_run: bool,
+    stop_on_error: bool,
     no_upgrade: bool,
     upgrade_packages: tuple[str, ...],
 ) -> None:
     """Render, compile, install, and check one or more environments.
 
     With no NAMES, all discovered environments are updated (with confirmation
-    unless -y is given).
+    unless -y is given). By default the batch continues past a failing
+    environment and reports a ``✓``/``✗`` summary; ``--stop-on-error`` aborts at
+    the first failure.
     """
     options = UpdateOptions(
         create=create,
@@ -78,7 +135,7 @@ def env_update(
         if not yes and not click.confirm("Update all of these?"):
             echo("Aborted.")
             return
-    _run_update(config, targets, options)
+    _run_update(config, targets, options, stop_on_error=stop_on_error)
 
 
 @env.command("create")

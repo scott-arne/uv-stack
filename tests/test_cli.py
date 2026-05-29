@@ -95,3 +95,50 @@ def test_project_init_dry_invocation():
     assert result.exit_code == 0
     assert "--python" in result.output
     assert "--no-sync" in result.output
+
+
+def _two_failing_envs_root(tmp_path: Path) -> Path:
+    """A config root with two envs whose stacks fail at resolution.
+
+    Each stack references an explicit, missing profile, so ``update`` raises a
+    ResolutionError during the pure resolve step before any subprocess call —
+    keeping the batch-behavior tests hermetic.
+    """
+    from uvstack.config import ConfigRoot
+    from uvstack.operations.init import seed_defaults
+
+    root = tmp_path / "python-envs"
+    cfg = ConfigRoot(root)
+    seed_defaults(cfg)
+    for name in ("alpha", "beta"):
+        env_dir = cfg.env_dir(name)
+        env_dir.mkdir(parents=True)
+        (env_dir / "python.txt").write_text("3.12\n")
+        (env_dir / "stack.txt").write_text("profile:ghost\n")
+    return root
+
+
+def test_env_update_batch_continues_on_failure_and_summarizes(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "env", "update", "alpha", "beta"]
+    )
+    # Non-empty failures exit 1.
+    assert result.exit_code == 1
+    # By default the batch continues: the second env was still attempted.
+    assert "Updating alpha" in result.output
+    assert "Updating beta" in result.output
+    # A summary marks both as failed.
+    assert "Summary" in result.output
+    assert "2 of 2 environment(s) failed." in result.output
+
+
+def test_env_update_stop_on_error_aborts_after_first(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "env", "update", "--stop-on-error", "alpha", "beta"]
+    )
+    assert result.exit_code == 1
+    # The batch aborted at the first failure: beta was never attempted.
+    assert "Updating alpha" in result.output
+    assert "Updating beta" not in result.output
