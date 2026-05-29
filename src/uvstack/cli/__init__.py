@@ -16,7 +16,7 @@ from uvstack.cli._render import render_error
 from uvstack.config import ConfigRoot
 from uvstack.errors import UvstackError
 
-click.rich_click.USE_RICH_MARKUP = True
+click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.SHOW_ARGUMENTS = True
 
 

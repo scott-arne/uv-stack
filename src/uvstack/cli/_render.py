@@ -20,7 +20,7 @@ def render_error(error: UvstackError) -> None:
     body = error.message
     if error.hint:
         body += f"\n\n[dim]Hint:[/dim] {error.hint}"
-    console.print(Panel(body, title="uvstack error", border_style="red"))
+    error_console.print(Panel(body, title="uvstack error", border_style="red"))
 
 
 def render_list(title: str, items: Iterable[str]) -> None:
