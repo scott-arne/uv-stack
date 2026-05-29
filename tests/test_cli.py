@@ -87,3 +87,11 @@ def test_env_update_dry_run(tmp_path: Path):
     cfg = ConfigRoot(root)
     assert cfg.env_requirements_in("main").is_file()
     assert not cfg.env_lock("main").is_file()
+
+
+def test_project_init_dry_invocation():
+    # Verify the command wires up and --help lists its options.
+    result = CliRunner().invoke(cli, ["project", "init", "--help"])
+    assert result.exit_code == 0
+    assert "--python" in result.output
+    assert "--no-sync" in result.output
