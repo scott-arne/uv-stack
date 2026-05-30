@@ -156,3 +156,50 @@ def test_update_dry_run(tmp_path: Path):
     cfg = ConfigRoot(root)
     assert cfg.env_requirements_in("main").is_file()
     assert not cfg.env_lock("main").is_file()
+
+
+def test_create_env_passes_create_option(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)
+    captured: dict = {}
+
+    def fake_run_update(config, names, options, *, stop_on_error=False):
+        captured["names"] = names
+        captured["options"] = options
+
+    monkeypatch.setattr("uv_stack.cli.create._run_update", fake_run_update)
+    result = CliRunner().invoke(cli, ["--root", str(root), "create", "env", "main"])
+    assert result.exit_code == 0
+    assert captured["names"] == ["main"]
+    assert captured["options"].create is True
+    assert captured["options"].recreate is False
+
+
+def test_create_env_recreate_passes_recreate_option(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)
+    captured: dict = {}
+
+    def fake_run_update(config, names, options, *, stop_on_error=False):
+        captured["options"] = options
+
+    monkeypatch.setattr("uv_stack.cli.create._run_update", fake_run_update)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "create", "env", "main", "--recreate"]
+    )
+    assert result.exit_code == 0
+    assert captured["options"].recreate is True
+    assert captured["options"].create is False
+
+
+def test_create_no_subcommand_shows_help():
+    result = CliRunner().invoke(cli, ["create"])
+    # Click exits 2 and lists the subcommands when a group is invoked bare.
+    assert result.exit_code == 2
+    assert "env" in result.output
+    assert "project" in result.output
+
+
+def test_create_project_help():
+    result = CliRunner().invoke(cli, ["create", "project", "--help"])
+    assert result.exit_code == 0
+    assert "--python" in result.output
+    assert "--no-sync" in result.output
