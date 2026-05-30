@@ -2,81 +2,19 @@
 
 from __future__ import annotations
 
-import sys
-
 import rich_click as click
 
-from uv_stack.cli._render import console, echo, render_error, render_list
+from uv_stack.cli._render import console, echo, render_list
+from uv_stack.cli.update import _run_update
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import UvStackError
-from uv_stack.operations.update import UpdateOptions, update_env
+from uv_stack.operations.update import UpdateOptions
 from uv_stack.render import render_requirements_in
 from uv_stack.resolver import Resolver
-from uv_stack.runner import SubprocessRunner
 
 
 @click.group()
 def env() -> None:
     """Manage named micromamba + uv environments."""
-
-
-def _run_update(
-    config: ConfigRoot,
-    names: list[str],
-    options: UpdateOptions,
-    *,
-    stop_on_error: bool = False,
-) -> None:
-    """Update each environment, continuing past failures by default.
-
-    Each environment's outcome is recorded and printed in a final summary table.
-    With ``stop_on_error`` the batch aborts at the first failing environment.
-    A non-empty failure set exits the process with status 1.
-
-    :param config: Configuration root.
-    :param names: Environment names to update.
-    :param options: Update options.
-    :param stop_on_error: Abort the batch on the first failure.
-    """
-    runner = SubprocessRunner()
-    failed: list[str] = []
-
-    for name in names:
-        console.rule(f"Updating {name}")
-        try:
-            result = update_env(config, runner, name, options)
-        except UvStackError as error:
-            render_error(error)
-            failed.append(name)
-            if stop_on_error:
-                break
-            continue
-        if options.dry_run:
-            echo("Planned commands:")
-            for command in result.planned:
-                echo("  " + " ".join(command.args))
-
-    if options.dry_run:
-        return
-
-    _print_summary(names, failed)
-    if failed:
-        sys.exit(1)
-
-
-def _print_summary(names: list[str], failed: list[str]) -> None:
-    """Print a per-environment ✓/✗ summary of an update batch."""
-    failed_set = set(failed)
-    console.rule("Summary")
-    for name in names:
-        if name in failed_set:
-            console.print(f"  [red]✗[/red] {name}")
-        else:
-            console.print(f"  [green]✓[/green] {name}")
-    if failed:
-        console.print(f"[red]{len(failed)} of {len(names)} environment(s) failed.[/red]")
-    else:
-        console.print("[green]All requested environments updated.[/green]")
 
 
 @env.command("update")

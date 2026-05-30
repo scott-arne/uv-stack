@@ -142,3 +142,17 @@ def test_env_update_stop_on_error_aborts_after_first(tmp_path: Path):
     # The batch aborted at the first failure: beta was never attempted.
     assert "Updating alpha" in result.output
     assert "Updating beta" not in result.output
+
+
+def test_update_dry_run(tmp_path: Path):
+    root = _env_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "update", "--dry-run", "main"]
+    )
+    assert result.exit_code == 0
+    assert "compile" in result.output
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    assert cfg.env_requirements_in("main").is_file()
+    assert not cfg.env_lock("main").is_file()

@@ -97,6 +97,9 @@ def _register() -> None:
     from uv_stack.cli import project
 
     cli.add_command(project.project)
+    from uv_stack.cli import update
+
+    cli.add_command(update.update)
 
 
 _register()
