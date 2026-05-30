@@ -56,7 +56,7 @@ click.rich_click.COMMAND_GROUPS = {
     "stack": [
         {"name": "Package", "commands": ["profile", "bundle", "resolve", "list", "show"]},
         {"name": "Environment", "commands": ["env", "project", "update", "create"]},
-        {"name": "Configuration", "commands": ["config"]},
+        {"name": "Configuration", "commands": ["config", "doctor"]},
     ]
 }
 
@@ -109,6 +109,9 @@ def _register() -> None:
     from uv_stack.cli import show
 
     cli.add_command(show.show)
+    from uv_stack.cli import doctor
+
+    cli.add_command(doctor.doctor)
 
 
 _register()

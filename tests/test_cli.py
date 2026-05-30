@@ -280,3 +280,18 @@ def test_show_missing_env_errors(tmp_path: Path):
     result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "ghost"])
     assert result.exit_code == 1
     assert "ghost" in result.output
+
+
+def test_doctor_clean(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "doctor"])
+    assert result.exit_code == 0
+    assert "No problems detected" in result.output
+
+
+def test_doctor_reports_missing_dirs(tmp_path: Path):
+    root = tmp_path / "empty"
+    root.mkdir()
+    result = CliRunner().invoke(cli, ["--root", str(root), "doctor"])
+    assert result.exit_code == 0
+    assert "Missing" in result.output

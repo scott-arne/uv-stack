@@ -1,18 +1,17 @@
-"""``stack config`` commands (init / doctor)."""
+"""``stack config`` commands (init)."""
 
 from __future__ import annotations
 
 import rich_click as click
 
-from uv_stack.cli._render import console, echo
+from uv_stack.cli._render import echo
 from uv_stack.config import ConfigRoot
-from uv_stack.operations.doctor import diagnose
 from uv_stack.operations.init import seed_defaults
 
 
 @click.group()
 def config() -> None:
-    """Initialize or diagnose the config tree."""
+    """Initialize the config tree."""
 
 
 @config.command("init")
@@ -26,18 +25,3 @@ def config_init(config_root: ConfigRoot) -> None:
     echo(f"Wrote {len(written)} files under {config_root.root}:")
     for path in written:
         echo(f"  {path}")
-
-
-@config.command("doctor")
-@click.pass_obj
-def config_doctor(config_root: ConfigRoot) -> None:
-    """Detect layout/config problems and print suggested fixes."""
-    findings = diagnose(config_root)
-    if not findings:
-        console.print("[green]No problems detected.[/green]")
-        return
-    for finding in findings:
-        color = "red" if finding.level == "error" else "yellow"
-        console.print(f"[{color}]{finding.level.upper()}[/{color}] {finding.message}")
-        if finding.fix:
-            console.print(f"    [dim]fix:[/dim] {finding.fix}")
