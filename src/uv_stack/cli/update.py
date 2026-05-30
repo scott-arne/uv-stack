@@ -22,7 +22,7 @@ def _run_update(
 ) -> None:
     """Update each environment, continuing past failures by default.
 
-    Each environment's outcome is recorded and printed in a final summary table.
+    Each environment's outcome is recorded and printed in a final summary.
     With ``stop_on_error`` the batch aborts at the first failing environment.
     A non-empty failure set exits the process with status 1.
 

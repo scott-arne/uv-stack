@@ -55,7 +55,7 @@ click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.COMMAND_GROUPS = {
     "stack": [
         {"name": "Package", "commands": ["profile", "bundle", "resolve"]},
-        {"name": "Environment", "commands": ["env", "project"]},
+        {"name": "Environment", "commands": ["env", "project", "update"]},
         {"name": "Configuration", "commands": ["config"]},
     ]
 }
