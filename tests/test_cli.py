@@ -231,3 +231,52 @@ def test_list_bad_kind(tmp_path: Path):
     result = CliRunner().invoke(cli, ["--root", str(root), "list", "widget"])
     assert result.exit_code == 2
     assert "widget" in result.output
+
+
+def test_show_env(tmp_path: Path):
+    root = _env_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "main"])
+    assert result.exit_code == 0
+    assert "Environment: main" in result.output
+
+
+def test_show_env_defaults_to_main(tmp_path: Path):
+    root = _env_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "env"])
+    assert result.exit_code == 0
+    assert "Environment: main" in result.output
+
+
+def test_show_profile(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "profile", "ds"])
+    assert result.exit_code == 0
+    assert "Profile: ds" in result.output
+
+
+def test_show_bundle(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "bundle", "standard"])
+    assert result.exit_code == 0
+    assert "Bundle: standard" in result.output
+
+
+def test_show_profile_requires_name(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "profile"])
+    assert result.exit_code == 2
+    assert "NAME" in result.output
+
+
+def test_show_bad_kind(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "widget", "x"])
+    assert result.exit_code == 2
+    assert "widget" in result.output
+
+
+def test_show_missing_env_errors(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "ghost"])
+    assert result.exit_code == 1
+    assert "ghost" in result.output
