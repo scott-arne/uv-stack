@@ -203,3 +203,31 @@ def test_create_project_help():
     assert result.exit_code == 0
     assert "--python" in result.output
     assert "--no-sync" in result.output
+
+
+def test_list_env(tmp_path: Path):
+    root = _env_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "list", "env"])
+    assert result.exit_code == 0
+    assert "main" in result.output
+
+
+def test_list_profile(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "list", "profile"])
+    assert result.exit_code == 0
+    assert "ds" in result.output
+
+
+def test_list_bundle(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "list", "bundle"])
+    assert result.exit_code == 0
+    assert "standard" in result.output
+
+
+def test_list_bad_kind(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "list", "widget"])
+    assert result.exit_code == 2
+    assert "widget" in result.output

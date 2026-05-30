@@ -54,7 +54,7 @@ click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.COMMAND_GROUPS = {
     "stack": [
-        {"name": "Package", "commands": ["profile", "bundle", "resolve"]},
+        {"name": "Package", "commands": ["profile", "bundle", "resolve", "list"]},
         {"name": "Environment", "commands": ["env", "project", "update", "create"]},
         {"name": "Configuration", "commands": ["config"]},
     ]
@@ -103,6 +103,9 @@ def _register() -> None:
     from uv_stack.cli import create
 
     cli.add_command(create.create)
+    from uv_stack.cli import list_cmd
+
+    cli.add_command(list_cmd.list_resources)
 
 
 _register()
