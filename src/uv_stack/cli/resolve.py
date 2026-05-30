@@ -1,12 +1,12 @@
-"""``uvstack resolve`` command (resolver debugging)."""
+"""``stack resolve`` command (resolver debugging)."""
 
 from __future__ import annotations
 
 import rich_click as click
 
-from uvstack.cli._render import echo
-from uvstack.config import ConfigRoot
-from uvstack.resolver import Resolver
+from uv_stack.cli._render import echo
+from uv_stack.config import ConfigRoot
+from uv_stack.resolver import Resolver
 
 
 @click.command()

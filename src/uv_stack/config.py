@@ -1,8 +1,8 @@
-"""Filesystem layout and loaders for a uvstack config root.
+"""Filesystem layout and loaders for a uv-stack config root.
 
 A config root contains ``profiles/``, ``bundles/``, and ``envs/`` directories.
 ``ConfigRoot`` centralizes path construction, existence checks, enumeration, and
-loading of :mod:`uvstack.models` objects. It performs the only config-file I/O
+loading of :mod:`uv_stack.models` objects. It performs the only config-file I/O
 in the pure layer.
 """
 
@@ -11,15 +11,15 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from uvstack.errors import ConfigError
-from uvstack.models import Bundle, EnvConfig, Profile
-from uvstack.parse import first_clean_line, read_clean_lines
+from uv_stack.errors import ConfigError
+from uv_stack.models import Bundle, EnvConfig, Profile
+from uv_stack.parse import first_clean_line, read_clean_lines
 
 DEFAULT_ROOT = Path.home() / ".config" / "python-envs"
 
 
 class ConfigRoot:
-    """Resolves and reads a uvstack configuration tree.
+    """Resolves and reads a uv-stack configuration tree.
 
     :param root: The base directory containing ``profiles/``, ``bundles/``,
         and ``envs/``.

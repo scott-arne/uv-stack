@@ -23,9 +23,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from uvstack.config import ConfigRoot
-from uvstack.errors import ResolutionError
-from uvstack.models import ResolvedStack
+from uv_stack.config import ConfigRoot
+from uv_stack.errors import ResolutionError
+from uv_stack.models import ResolvedStack
 
 
 class Resolver:

@@ -11,12 +11,12 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from uvstack.commands import uv_add, uv_init, uv_sync
-from uvstack.config import ConfigRoot
-from uvstack.errors import ConfigError
-from uvstack.render import render_requirements_flat
-from uvstack.resolver import Resolver
-from uvstack.runner import Command, Runner
+from uv_stack.commands import uv_add, uv_init, uv_sync
+from uv_stack.config import ConfigRoot
+from uv_stack.errors import ConfigError
+from uv_stack.render import render_requirements_flat
+from uv_stack.resolver import Resolver
+from uv_stack.runner import Command, Runner
 
 
 @dataclass
@@ -62,7 +62,7 @@ def init_project(
     stack = Resolver(config).resolve(tokens)
     flat = render_requirements_flat(stack, config)
 
-    fd, tmp_name = tempfile.mkstemp(prefix="uvstack-stack.", suffix=".txt")
+    fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-stack.", suffix=".txt")
     tmp_req = Path(tmp_name)
     try:
         with open(fd, "w") as handle:

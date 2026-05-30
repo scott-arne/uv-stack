@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from uvstack.config import ConfigRoot
-from uvstack.operations.doctor import diagnose
+from uv_stack.config import ConfigRoot
+from uv_stack.operations.doctor import diagnose
 
 
 def test_clean_tree_has_no_errors(config_tree: ConfigRoot):

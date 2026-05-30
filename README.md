@@ -1,4 +1,4 @@
-# uvstack
+# uv-stack
 
 A command-line interface and library that formalizes a `uv` + `micromamba`
 Python environment workflow built around profiles, bundles, stacks, and named

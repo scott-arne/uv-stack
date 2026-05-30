@@ -4,7 +4,7 @@ import os
 import stat
 from pathlib import Path
 
-from uvstack.fsutil import atomic_write
+from uv_stack.fsutil import atomic_write
 
 
 def test_atomic_write_creates_file(tmp_path: Path):

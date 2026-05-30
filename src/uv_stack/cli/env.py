@@ -1,4 +1,4 @@
-"""``uvstack env`` commands: update, show, create, recreate, list."""
+"""``stack env`` commands: update, show, create, recreate, list."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ import sys
 
 import rich_click as click
 
-from uvstack.cli._render import console, echo, render_error, render_list
-from uvstack.config import ConfigRoot
-from uvstack.errors import UvstackError
-from uvstack.operations.update import UpdateOptions, update_env
-from uvstack.render import render_requirements_in
-from uvstack.resolver import Resolver
-from uvstack.runner import SubprocessRunner
+from uv_stack.cli._render import console, echo, render_error, render_list
+from uv_stack.config import ConfigRoot
+from uv_stack.errors import UvStackError
+from uv_stack.operations.update import UpdateOptions, update_env
+from uv_stack.render import render_requirements_in
+from uv_stack.resolver import Resolver
+from uv_stack.runner import SubprocessRunner
 
 
 @click.group()
@@ -45,7 +45,7 @@ def _run_update(
         console.rule(f"Updating {name}")
         try:
             result = update_env(config, runner, name, options)
-        except UvstackError as error:
+        except UvStackError as error:
             render_error(error)
             failed.append(name)
             if stop_on_error:

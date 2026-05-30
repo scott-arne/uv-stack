@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from uvstack.config import ConfigRoot
-from uvstack.errors import ConfigError
+from uv_stack.config import ConfigRoot
+from uv_stack.errors import ConfigError
 
 
 def test_discover_precedence_explicit_over_env(monkeypatch, tmp_path: Path):

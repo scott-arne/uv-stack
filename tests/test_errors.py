@@ -1,24 +1,24 @@
-from uvstack.errors import (
+from uv_stack.errors import (
     ConfigError,
     EnvError,
     ResolutionError,
     ToolError,
-    UvstackError,
+    UvStackError,
 )
 
 
-def test_uvstack_error_carries_message_and_hint():
-    err = UvstackError("boom", hint="try this")
+def test_uv_stack_error_carries_message_and_hint():
+    err = UvStackError("boom", hint="try this")
     assert err.message == "boom"
     assert err.hint == "try this"
     assert str(err) == "boom"
 
 
-def test_subclasses_are_uvstack_errors():
-    assert issubclass(ConfigError, UvstackError)
-    assert issubclass(ResolutionError, UvstackError)
-    assert issubclass(EnvError, UvstackError)
-    assert issubclass(ToolError, UvstackError)
+def test_subclasses_are_uv_stack_errors():
+    assert issubclass(ConfigError, UvStackError)
+    assert issubclass(ResolutionError, UvStackError)
+    assert issubclass(EnvError, UvStackError)
+    assert issubclass(ToolError, UvStackError)
 
 
 def test_tool_error_records_command_and_returncode():

@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from uvstack.commands import (
+from uv_stack.commands import (
     micromamba_create,
     micromamba_python_path,
     micromamba_remove,
@@ -20,13 +20,13 @@ from uvstack.commands import (
     uv_pip_compile,
     uv_pip_install,
 )
-from uvstack.config import ConfigRoot
-from uvstack.errors import EnvError
-from uvstack.fsutil import atomic_write
-from uvstack.operations.create import ensure_env
-from uvstack.render import render_environment_yml, render_requirements_in
-from uvstack.resolver import Resolver
-from uvstack.runner import Command, Runner
+from uv_stack.config import ConfigRoot
+from uv_stack.errors import EnvError
+from uv_stack.fsutil import atomic_write
+from uv_stack.operations.create import ensure_env
+from uv_stack.render import render_environment_yml, render_requirements_in
+from uv_stack.resolver import Resolver
+from uv_stack.runner import Command, Runner
 
 _DRY_RUN_PYTHON = "<env-python>"
 

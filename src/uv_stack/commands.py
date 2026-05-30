@@ -1,4 +1,4 @@
-"""Pure builders for the ``uv`` and ``micromamba`` commands uvstack runs.
+"""Pure builders for the ``uv`` and ``micromamba`` commands uv-stack runs.
 
 Keeping command construction in one place (free of side effects) lets both the
 real execution path and the ``--dry-run`` plan share identical argv lists, and
@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from uvstack.runner import Command
+from uv_stack.runner import Command
 
 _PYTHON_PATH_SNIPPET = "import sys; print(sys.executable)"
 

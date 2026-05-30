@@ -1,13 +1,13 @@
-"""``uvstack config`` commands (init / doctor)."""
+"""``stack config`` commands (init / doctor)."""
 
 from __future__ import annotations
 
 import rich_click as click
 
-from uvstack.cli._render import console, echo
-from uvstack.config import ConfigRoot
-from uvstack.operations.doctor import diagnose
-from uvstack.operations.init import seed_defaults
+from uv_stack.cli._render import console, echo
+from uv_stack.config import ConfigRoot
+from uv_stack.operations.doctor import diagnose
+from uv_stack.operations.init import seed_defaults
 
 
 @click.group()

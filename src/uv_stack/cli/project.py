@@ -1,4 +1,4 @@
-"""``uvstack project`` commands: init a local uv project from a stack."""
+"""``stack project`` commands: init a local uv project from a stack."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from pathlib import Path
 
 import rich_click as click
 
-from uvstack.cli._render import console
-from uvstack.config import ConfigRoot
-from uvstack.operations.project import ProjectOptions, init_project
-from uvstack.runner import SubprocessRunner
+from uv_stack.cli._render import console
+from uv_stack.config import ConfigRoot
+from uv_stack.operations.project import ProjectOptions, init_project
+from uv_stack.runner import SubprocessRunner
 
 
 @click.group()

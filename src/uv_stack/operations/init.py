@@ -1,6 +1,6 @@
 """The ``config init`` operation: seed default profiles and bundles.
 
-Writes the contents from :mod:`uvstack.defaults` into the config tree, creating
+Writes the contents from :mod:`uv_stack.defaults` into the config tree, creating
 ``profiles/``, ``bundles/``, and ``envs/`` as needed. Existing files are never
 overwritten; only absent files are written.
 """
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from uvstack.config import ConfigRoot
-from uvstack.defaults import DEFAULT_BUNDLES, DEFAULT_PROFILES
+from uv_stack.config import ConfigRoot
+from uv_stack.defaults import DEFAULT_BUNDLES, DEFAULT_PROFILES
 
 
 def seed_defaults(config: ConfigRoot) -> list[Path]:

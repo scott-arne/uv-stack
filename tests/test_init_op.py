@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from uvstack.config import ConfigRoot
-from uvstack.operations.init import seed_defaults
+from uv_stack.config import ConfigRoot
+from uv_stack.operations.init import seed_defaults
 
 
 def test_seed_creates_profiles_and_bundles(tmp_path: Path):

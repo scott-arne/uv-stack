@@ -1,4 +1,4 @@
-"""Detect-only diagnostics for a uvstack config tree.
+"""Detect-only diagnostics for a uv-stack config tree.
 
 ``diagnose`` never mutates the filesystem; it returns a list of findings the CLI
 prints with suggested fixes. It flags missing directories, legacy names
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from uvstack.config import ConfigRoot
+from uv_stack.config import ConfigRoot
 
 _KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib"}
 
@@ -42,7 +42,7 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
             Finding(
                 "error",
                 f"Config root does not exist: {config.root}",
-                fix=f"Run 'uvstack config init' or create {config.root}.",
+                fix=f"Run 'stack config init' or create {config.root}.",
             )
         )
         return findings
@@ -57,7 +57,7 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                 Finding(
                     "error",
                     f"Missing {name} directory: {directory}",
-                    fix=f"Create {directory} (or run 'uvstack config init').",
+                    fix=f"Create {directory} (or run 'stack config init').",
                 )
             )
 

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from uvstack.parse import clean_line, first_clean_line, read_clean_lines
+from uv_stack.parse import clean_line, first_clean_line, read_clean_lines
 
 
 def test_clean_line_strips_comment_and_whitespace():

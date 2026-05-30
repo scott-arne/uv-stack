@@ -1,6 +1,6 @@
-"""Exception hierarchy for uvstack.
+"""Exception hierarchy for uv-stack.
 
-All recoverable, user-facing failures are :class:`UvstackError` subclasses so
+All recoverable, user-facing failures are :class:`UvStackError` subclasses so
 the CLI edge can render them as panels with a remediation hint. Anything else
 propagates as an ordinary exception (a real bug) with a full traceback.
 """
@@ -8,8 +8,8 @@ propagates as an ordinary exception (a real bug) with a full traceback.
 from __future__ import annotations
 
 
-class UvstackError(Exception):
-    """Base class for user-facing uvstack errors.
+class UvStackError(Exception):
+    """Base class for user-facing uv-stack errors.
 
     :param message: Human-readable description of what went wrong.
     :param hint: Optional remediation hint shown alongside the message.
@@ -21,19 +21,19 @@ class UvstackError(Exception):
         self.hint = hint
 
 
-class ConfigError(UvstackError):
+class ConfigError(UvStackError):
     """A config file or directory is missing or invalid."""
 
 
-class ResolutionError(UvstackError):
+class ResolutionError(UvStackError):
     """A stack token could not be resolved (bad token, missing profile/bundle, cycle)."""
 
 
-class EnvError(UvstackError):
+class EnvError(UvStackError):
     """A micromamba environment is missing and creation was not requested."""
 
 
-class ToolError(UvstackError):
+class ToolError(UvStackError):
     """An external ``uv`` or ``micromamba`` command exited non-zero.
 
     :param command: The argv list of the command that failed.

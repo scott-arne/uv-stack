@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from uvstack.config import ConfigRoot
+from uv_stack.config import ConfigRoot
 
 
 @pytest.fixture

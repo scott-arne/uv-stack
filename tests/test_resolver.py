@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from uvstack.config import ConfigRoot
-from uvstack.errors import ResolutionError
-from uvstack.resolver import Resolver
+from uv_stack.config import ConfigRoot
+from uv_stack.errors import ResolutionError
+from uv_stack.resolver import Resolver
 
 
 def test_unqualified_profile_then_bundle_then_literal(config_tree: ConfigRoot):

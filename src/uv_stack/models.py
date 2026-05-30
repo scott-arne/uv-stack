@@ -1,4 +1,4 @@
-"""Pydantic data models for uvstack config objects.
+"""Pydantic data models for uv-stack config objects.
 
 Models are pure data: they hold no filesystem or subprocess knowledge. The
 ``from_lines`` constructors accept raw file lines and clean them, so callers may
@@ -11,7 +11,7 @@ from collections.abc import Iterable
 
 from pydantic import BaseModel, Field
 
-from uvstack.parse import clean_line
+from uv_stack.parse import clean_line
 
 
 def _clean(lines: Iterable[str]) -> list[str]:

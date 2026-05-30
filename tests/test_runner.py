@@ -4,8 +4,8 @@ import sys
 
 import pytest
 
-from uvstack.errors import ToolError
-from uvstack.runner import Command, CommandResult, RecordingRunner, SubprocessRunner
+from uv_stack.errors import ToolError
+from uv_stack.runner import Command, CommandResult, RecordingRunner, SubprocessRunner
 
 
 def test_command_equality():

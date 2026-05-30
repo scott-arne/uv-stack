@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from uvstack.commands import micromamba_create, micromamba_remove
-from uvstack.config import ConfigRoot
-from uvstack.errors import ConfigError, EnvError
-from uvstack.operations.create import ensure_env, env_micromamba_exists
-from uvstack.operations.project import ProjectOptions, init_project
-from uvstack.operations.update import UpdateOptions, update_env
-from uvstack.runner import Command, CommandResult, RecordingRunner
+from uv_stack.commands import micromamba_create, micromamba_remove
+from uv_stack.config import ConfigRoot
+from uv_stack.errors import ConfigError, EnvError
+from uv_stack.operations.create import ensure_env, env_micromamba_exists
+from uv_stack.operations.project import ProjectOptions, init_project
+from uv_stack.operations.update import UpdateOptions, update_env
+from uv_stack.runner import Command, CommandResult, RecordingRunner
 
 
 def _missing_env_responder(cmd: Command) -> CommandResult:

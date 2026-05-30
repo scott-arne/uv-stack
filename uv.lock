@@ -435,7 +435,7 @@ wheels = [
 ]
 
 [[package]]
-name = "uvstack"
+name = "uv-stack"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

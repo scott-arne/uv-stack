@@ -1,4 +1,4 @@
-from uvstack.models import Bundle, EnvConfig, Profile, ResolvedStack
+from uv_stack.models import Bundle, EnvConfig, Profile, ResolvedStack
 
 
 def test_profile_from_lines_cleans_input():

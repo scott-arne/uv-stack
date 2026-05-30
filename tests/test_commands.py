@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from uvstack.commands import (
+from uv_stack.commands import (
     micromamba_create,
     micromamba_python_path,
     micromamba_remove,

@@ -9,18 +9,18 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from uvstack.errors import UvstackError
+from uv_stack.errors import UvStackError
 
 console = Console()
 error_console = Console(stderr=True)
 
 
-def render_error(error: UvstackError) -> None:
-    """Print a :class:`UvstackError` as a red panel with an optional hint."""
+def render_error(error: UvStackError) -> None:
+    """Print a :class:`UvStackError` as a red panel with an optional hint."""
     body = error.message
     if error.hint:
         body += f"\n\n[dim]Hint:[/dim] {error.hint}"
-    error_console.print(Panel(body, title="uvstack error", border_style="red"))
+    error_console.print(Panel(body, title="uv-stack error", border_style="red"))
 
 
 def render_list(title: str, items: Iterable[str]) -> None:

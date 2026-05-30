@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from uvstack.defaults import DEFAULT_BUNDLES, DEFAULT_PROFILES
+from uv_stack.defaults import DEFAULT_BUNDLES, DEFAULT_PROFILES
 
 
 def test_expected_profiles_present():

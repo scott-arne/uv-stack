@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from uvstack.errors import ToolError
+from uv_stack.errors import ToolError
 
 
 @dataclass

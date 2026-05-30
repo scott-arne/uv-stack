@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from uvstack.commands import micromamba_create, micromamba_python_path, micromamba_remove
-from uvstack.config import ConfigRoot
-from uvstack.errors import EnvError
-from uvstack.runner import Runner
+from uv_stack.commands import micromamba_create, micromamba_python_path, micromamba_remove
+from uv_stack.config import ConfigRoot
+from uv_stack.errors import EnvError
+from uv_stack.runner import Runner
 
 
 def env_micromamba_exists(config: ConfigRoot, runner: Runner, env_name: str) -> bool:

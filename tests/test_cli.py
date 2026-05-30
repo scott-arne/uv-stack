@@ -4,12 +4,12 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from uvstack.cli import cli
+from uv_stack.cli import cli
 
 
 def _seeded_root(tmp_path: Path) -> Path:
-    from uvstack.config import ConfigRoot
-    from uvstack.operations.init import seed_defaults
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import seed_defaults
 
     root = tmp_path / "python-envs"
     seed_defaults(ConfigRoot(root))
@@ -53,8 +53,8 @@ def test_bundle_show(tmp_path: Path):
 
 
 def _env_root(tmp_path: Path):
-    from uvstack.config import ConfigRoot
-    from uvstack.operations.init import seed_defaults
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import seed_defaults
 
     root = tmp_path / "python-envs"
     cfg = ConfigRoot(root)
@@ -82,7 +82,7 @@ def test_env_update_dry_run(tmp_path: Path):
     assert result.exit_code == 0
     assert "compile" in result.output
     # Dry run wrote requirements.in but not the lock.
-    from uvstack.config import ConfigRoot
+    from uv_stack.config import ConfigRoot
 
     cfg = ConfigRoot(root)
     assert cfg.env_requirements_in("main").is_file()
@@ -104,8 +104,8 @@ def _two_failing_envs_root(tmp_path: Path) -> Path:
     ResolutionError during the pure resolve step before any subprocess call —
     keeping the batch-behavior tests hermetic.
     """
-    from uvstack.config import ConfigRoot
-    from uvstack.operations.init import seed_defaults
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import seed_defaults
 
     root = tmp_path / "python-envs"
     cfg = ConfigRoot(root)

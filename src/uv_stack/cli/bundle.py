@@ -1,11 +1,11 @@
-"""``uvstack bundle`` commands."""
+"""``stack bundle`` commands."""
 
 from __future__ import annotations
 
 import rich_click as click
 
-from uvstack.cli._render import echo, render_list
-from uvstack.config import ConfigRoot
+from uv_stack.cli._render import echo, render_list
+from uv_stack.config import ConfigRoot
 
 
 @click.group()

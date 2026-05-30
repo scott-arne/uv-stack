@@ -1,4 +1,4 @@
-"""Default profile and bundle contents seeded by ``uvstack config init``.
+"""Default profile and bundle contents seeded by ``stack config init``.
 
 Each value is the full file text. Contents mirror the original workflow
 specification. ``config init`` writes only files that do not already exist.
