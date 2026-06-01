@@ -57,5 +57,5 @@ def ensure_env(
             return
         raise EnvError(
             f"Micromamba environment '{env_name}' does not exist.",
-            hint=f"Use --create to create it from {environment_yml}.",
+            hint=f"Run 'stack create env {env_name}' to create it.",
         )

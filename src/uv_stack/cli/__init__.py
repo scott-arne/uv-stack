@@ -54,9 +54,9 @@ click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.COMMAND_GROUPS = {
     "stack": [
-        {"name": "Package", "commands": ["profile", "bundle", "resolve", "list", "show"]},
-        {"name": "Environment", "commands": ["env", "project", "update", "create"]},
-        {"name": "Configuration", "commands": ["config", "doctor"]},
+        {"name": "Environments", "commands": ["update", "create"]},
+        {"name": "Inspection", "commands": ["list", "show", "resolve"]},
+        {"name": "Maintenance", "commands": ["doctor", "config"]},
     ]
 }
 
@@ -87,31 +87,23 @@ def cli(ctx: click.Context, root: str | None) -> None:
 
 
 def _register() -> None:
-    from uv_stack.cli import bundle, config_cmd, env, profile, resolve
-
-    cli.add_command(env.env)
-    cli.add_command(profile.profile)
-    cli.add_command(bundle.bundle)
-    cli.add_command(resolve.resolve)
-    cli.add_command(config_cmd.config)
-    from uv_stack.cli import project
-
-    cli.add_command(project.project)
-    from uv_stack.cli import update
+    from uv_stack.cli import (
+        config_cmd,
+        create,
+        doctor,
+        list_cmd,
+        resolve,
+        show,
+        update,
+    )
 
     cli.add_command(update.update)
-    from uv_stack.cli import create
-
     cli.add_command(create.create)
-    from uv_stack.cli import list_cmd
-
     cli.add_command(list_cmd.list_resources)
-    from uv_stack.cli import show
-
     cli.add_command(show.show)
-    from uv_stack.cli import doctor
-
+    cli.add_command(resolve.resolve)
     cli.add_command(doctor.doctor)
+    cli.add_command(config_cmd.config)
 
 
 _register()
