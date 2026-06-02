@@ -1,4 +1,4 @@
-"""The ``env update`` operation: render → compile → install → check.
+"""The ``upgrade`` operation: render → compile → install → check.
 
 Filesystem writes (``requirements.in``, ``environment.yml``, the lock) are
 guarded explicitly; ``--dry-run`` renders the two safe generated files, builds
@@ -32,8 +32,8 @@ _DRY_RUN_PYTHON = "<env-python>"
 
 
 @dataclass
-class UpdateOptions:
-    """Options controlling an environment update.
+class UpgradeOptions:
+    """Options controlling an environment upgrade.
 
     :param create: Create the micromamba env if missing.
     :param recreate: Remove and recreate the env first.
@@ -50,10 +50,10 @@ class UpdateOptions:
 
 
 @dataclass
-class UpdateResult:
-    """Outcome of :func:`update_env`.
+class UpgradeResult:
+    """Outcome of :func:`upgrade_env`.
 
-    :param env_name: The environment that was updated.
+    :param env_name: The environment that was upgraded.
     :param planned: The commands that would run (populated for dry runs).
     """
 
@@ -61,23 +61,23 @@ class UpdateResult:
     planned: list[Command] = field(default_factory=list)
 
 
-def _should_upgrade_all(options: UpdateOptions) -> bool:
+def _should_upgrade_all(options: UpgradeOptions) -> bool:
     return not options.no_upgrade and not options.upgrade_packages
 
 
-def update_env(
+def upgrade_env(
     config: ConfigRoot,
     runner: Runner,
     env_name: str,
-    options: UpdateOptions,
-) -> UpdateResult:
+    options: UpgradeOptions,
+) -> UpgradeResult:
     """Render config, then compile, install, and check an environment.
 
     :param config: Configuration root.
     :param runner: Command runner.
     :param env_name: Environment name.
-    :param options: Update options.
-    :returns: An :class:`UpdateResult`.
+    :param options: Upgrade options.
+    :returns: An :class:`UpgradeResult`.
     :raises ConfigError: If the environment config is missing or invalid.
     :raises EnvError: If the env is missing and creation was not requested.
     :raises ToolError: If a uv/micromamba command fails.
@@ -116,7 +116,7 @@ def update_env(
         )
         planned.append(uv_pip_install(_DRY_RUN_PYTHON, lock))
         planned.append(uv_pip_check(_DRY_RUN_PYTHON))
-        return UpdateResult(env_name=env_name, planned=planned)
+        return UpgradeResult(env_name=env_name, planned=planned)
 
     ensure_env(
         config, runner, env_name, create=options.create, recreate=options.recreate
@@ -155,4 +155,4 @@ def update_env(
     runner.run(uv_pip_install(python, lock))
     runner.run(uv_pip_check(python))
 
-    return UpdateResult(env_name=env_name)
+    return UpgradeResult(env_name=env_name)

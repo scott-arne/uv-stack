@@ -7,10 +7,10 @@ from pathlib import Path
 import rich_click as click
 
 from uv_stack.cli._render import console
-from uv_stack.cli.update import _run_update
+from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
 from uv_stack.operations.project import ProjectOptions, init_project
-from uv_stack.operations.update import UpdateOptions
+from uv_stack.operations.upgrade import UpgradeOptions
 from uv_stack.runner import SubprocessRunner
 
 
@@ -24,9 +24,9 @@ def create() -> None:
 @click.option("--recreate", is_flag=True, help="Remove and recreate the env first.")
 @click.pass_obj
 def create_env(config: ConfigRoot, name: str, recreate: bool) -> None:
-    """Create environment NAME, then update it (``--recreate`` wipes it first)."""
-    options = UpdateOptions(recreate=True) if recreate else UpdateOptions(create=True)
-    _run_update(config, [name], options)
+    """Create environment NAME, then upgrade it (``--recreate`` wipes it first)."""
+    options = UpgradeOptions(recreate=True) if recreate else UpgradeOptions(create=True)
+    _run_upgrade(config, [name], options)
 
 
 @create.command("project")

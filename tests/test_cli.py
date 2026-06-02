@@ -44,7 +44,7 @@ def _env_root(tmp_path: Path) -> Path:
 def _two_failing_envs_root(tmp_path: Path) -> Path:
     """A config root with two envs whose stacks fail at resolution.
 
-    Each stack references an explicit, missing profile, so ``update`` raises a
+    Each stack references an explicit, missing profile, so ``upgrade`` raises a
     ResolutionError during the pure resolve step before any subprocess call —
     keeping the batch-behavior tests hermetic.
     """
@@ -74,14 +74,14 @@ def test_version():
 
 
 # ---------------------------------------------------------------------------
-# update
+# upgrade
 # ---------------------------------------------------------------------------
 
 
-def test_update_dry_run(tmp_path: Path):
+def test_upgrade_dry_run(tmp_path: Path):
     root = _env_root(tmp_path)
     result = CliRunner().invoke(
-        cli, ["--root", str(root), "update", "--dry-run", "main"]
+        cli, ["--root", str(root), "upgrade", "--dry-run", "main"]
     )
     assert result.exit_code == 0
     assert "compile" in result.output
@@ -92,24 +92,24 @@ def test_update_dry_run(tmp_path: Path):
     assert not cfg.env_lock("main").is_file()
 
 
-def test_update_batch_continues_on_failure_and_summarizes(tmp_path: Path):
+def test_upgrade_batch_continues_on_failure_and_summarizes(tmp_path: Path):
     root = _two_failing_envs_root(tmp_path)
-    result = CliRunner().invoke(cli, ["--root", str(root), "update", "alpha", "beta"])
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "alpha", "beta"])
     assert result.exit_code == 1
-    assert "Updating alpha" in result.output
-    assert "Updating beta" in result.output
+    assert "Upgrading alpha" in result.output
+    assert "Upgrading beta" in result.output
     assert "Summary" in result.output
     assert "2 of 2 environment(s) failed." in result.output
 
 
-def test_update_stop_on_error_aborts_after_first(tmp_path: Path):
+def test_upgrade_stop_on_error_aborts_after_first(tmp_path: Path):
     root = _two_failing_envs_root(tmp_path)
     result = CliRunner().invoke(
-        cli, ["--root", str(root), "update", "--stop-on-error", "alpha", "beta"]
+        cli, ["--root", str(root), "upgrade", "--stop-on-error", "alpha", "beta"]
     )
     assert result.exit_code == 1
-    assert "Updating alpha" in result.output
-    assert "Updating beta" not in result.output
+    assert "Upgrading alpha" in result.output
+    assert "Upgrading beta" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -121,11 +121,11 @@ def test_create_env_passes_create_option(tmp_path: Path, monkeypatch):
     root = _env_root(tmp_path)
     captured: dict = {}
 
-    def fake_run_update(config, names, options, *, stop_on_error=False):
+    def fake_run_upgrade(config, names, options, *, stop_on_error=False):
         captured["names"] = names
         captured["options"] = options
 
-    monkeypatch.setattr("uv_stack.cli.create._run_update", fake_run_update)
+    monkeypatch.setattr("uv_stack.cli.create._run_upgrade", fake_run_upgrade)
     result = CliRunner().invoke(cli, ["--root", str(root), "create", "env", "main"])
     assert result.exit_code == 0
     assert captured["names"] == ["main"]
@@ -137,10 +137,10 @@ def test_create_env_recreate_passes_recreate_option(tmp_path: Path, monkeypatch)
     root = _env_root(tmp_path)
     captured: dict = {}
 
-    def fake_run_update(config, names, options, *, stop_on_error=False):
+    def fake_run_upgrade(config, names, options, *, stop_on_error=False):
         captured["options"] = options
 
-    monkeypatch.setattr("uv_stack.cli.create._run_update", fake_run_update)
+    monkeypatch.setattr("uv_stack.cli.create._run_upgrade", fake_run_upgrade)
     result = CliRunner().invoke(
         cli, ["--root", str(root), "create", "env", "main", "--recreate"]
     )
@@ -302,7 +302,7 @@ def test_doctor_reports_missing_dirs(tmp_path: Path):
 
 
 def test_old_env_group_is_gone():
-    result = CliRunner().invoke(cli, ["env", "update", "main"])
+    result = CliRunner().invoke(cli, ["env", "upgrade", "main"])
     assert result.exit_code == 2
     assert "No such command" in result.output
 

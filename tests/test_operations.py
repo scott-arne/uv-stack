@@ -7,7 +7,7 @@ from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError
 from uv_stack.operations.create import ensure_env, env_micromamba_exists
 from uv_stack.operations.project import ProjectOptions, init_project
-from uv_stack.operations.update import UpdateOptions, update_env
+from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
 from uv_stack.runner import Command, CommandResult, RecordingRunner
 
 
@@ -73,9 +73,9 @@ def test_ensure_env_existing_no_flags_is_noop(config_tree: ConfigRoot):
 # ============================================================================
 
 
-def test_update_writes_generated_files_and_runs_sequence(config_tree: ConfigRoot):
+def test_upgrade_writes_generated_files_and_runs_sequence(config_tree: ConfigRoot):
     rec = RecordingRunner(responder=_existing_env_responder)
-    result = update_env(config_tree, rec, "main", UpdateOptions())
+    result = upgrade_env(config_tree, rec, "main", UpgradeOptions())
 
     # Generated files are written.
     assert config_tree.env_requirements_in("main").is_file()
@@ -93,25 +93,25 @@ def test_update_writes_generated_files_and_runs_sequence(config_tree: ConfigRoot
     assert result.env_name == "main"
 
 
-def test_update_no_upgrade_omits_flag(config_tree: ConfigRoot):
+def test_upgrade_no_upgrade_omits_flag(config_tree: ConfigRoot):
     rec = RecordingRunner(responder=_existing_env_responder)
-    update_env(config_tree, rec, "main", UpdateOptions(no_upgrade=True))
+    upgrade_env(config_tree, rec, "main", UpgradeOptions(no_upgrade=True))
     compile_cmd = next(c for c in rec.commands if "compile" in c.args)
     assert "--upgrade" not in compile_cmd.args
 
 
-def test_update_upgrade_packages(config_tree: ConfigRoot):
+def test_upgrade_upgrade_packages(config_tree: ConfigRoot):
     rec = RecordingRunner(responder=_existing_env_responder)
-    update_env(config_tree, rec, "main", UpdateOptions(upgrade_packages=["pandas"]))
+    upgrade_env(config_tree, rec, "main", UpgradeOptions(upgrade_packages=["pandas"]))
     compile_cmd = next(c for c in rec.commands if "compile" in c.args)
     assert "--upgrade" not in compile_cmd.args
     assert "--upgrade-package" in compile_cmd.args
     assert "pandas" in compile_cmd.args
 
 
-def test_update_dry_run_writes_files_but_runs_nothing(config_tree: ConfigRoot):
+def test_upgrade_dry_run_writes_files_but_runs_nothing(config_tree: ConfigRoot):
     rec = RecordingRunner(responder=_existing_env_responder)
-    result = update_env(config_tree, rec, "main", UpdateOptions(dry_run=True))
+    result = upgrade_env(config_tree, rec, "main", UpgradeOptions(dry_run=True))
     assert config_tree.env_requirements_in("main").is_file()
     assert config_tree.env_environment_yml("main").is_file()
     # No commands executed.

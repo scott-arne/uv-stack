@@ -54,7 +54,7 @@ click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.COMMAND_GROUPS = {
     "stack": [
-        {"name": "Environments", "commands": ["update", "create"]},
+        {"name": "Environments", "commands": ["upgrade", "create"]},
         {"name": "Inspection", "commands": ["list", "show", "resolve"]},
         {"name": "Maintenance", "commands": ["doctor", "config"]},
     ]
@@ -94,10 +94,10 @@ def _register() -> None:
         list_cmd,
         resolve,
         show,
-        update,
+        upgrade,
     )
 
-    cli.add_command(update.update)
+    cli.add_command(upgrade.upgrade)
     cli.add_command(create.create)
     cli.add_command(list_cmd.list_resources)
     cli.add_command(show.show)
