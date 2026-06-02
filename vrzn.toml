@@ -1,0 +1,7 @@
+[[locations]]
+file = "pyproject.toml"
+type = "pyproject-version"
+
+[[locations]]
+file = "src/uv_stack/__init__.py"
+type = "python-dunder"

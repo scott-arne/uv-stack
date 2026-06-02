@@ -436,7 +436,7 @@ wheels = [
 
 [[package]]
 name = "uv-stack"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -448,6 +448,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "vrzn" },
 ]
 
 [package.metadata]
@@ -461,4 +462,16 @@ dev = [
     { name = "mypy" },
     { name = "pytest", specifier = ">=8" },
     { name = "ruff" },
+    { name = "vrzn", specifier = ">=0.2.2" },
+]
+
+[[package]]
+name = "vrzn"
+version = "0.2.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "rich-click" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/7c/2b4b918e14223c46b607ecd8d8e4960ee5e5b56295c305ca83351fd2dc08/vrzn-0.2.2-py3-none-any.whl", hash = "sha256:924088e0395c2dc61db9425fec42a06881277667366a65a2fbf6ccf705c76e79", size = 18137, upload-time = "2026-05-12T15:45:22.098Z" },
 ]

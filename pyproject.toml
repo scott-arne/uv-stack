@@ -1,6 +1,6 @@
 [project]
 name = "uv-stack"
-version = "0.1.1"
+version = "0.1.2"
 description = "Formalized uv + micromamba Python environment management"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -24,6 +24,7 @@ dev = [
     "pytest>=8",
     "ruff",
     "mypy",
+    "vrzn>=0.2.2",
 ]
 
 [tool.ruff]
