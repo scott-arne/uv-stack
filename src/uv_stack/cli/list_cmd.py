@@ -16,8 +16,8 @@ _KINDS = ("env", "profile", "bundle")
 def list_resources(config: ConfigRoot, kind: str) -> None:
     """List resources of KIND (env, profile, or bundle)."""
     if kind == "env":
-        render_list("envs", config.list_envs())
+        render_list("envs", config.list_envs(), config.envs_dir)
     elif kind == "profile":
-        render_list("profiles", config.list_profiles())
+        render_list("profiles", config.list_profiles(), config.profiles_dir)
     else:
-        render_list("bundles", config.list_bundles())
+        render_list("bundles", config.list_bundles(), config.bundles_dir)

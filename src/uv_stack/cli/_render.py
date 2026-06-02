@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from pathlib import Path
 
 import rich_click as click
 from rich.console import Console
@@ -23,8 +24,12 @@ def render_error(error: UvStackError) -> None:
     error_console.print(Panel(body, title="uv-stack error", border_style="red"))
 
 
-def render_list(title: str, items: Iterable[str]) -> None:
-    """Print a simple single-column table."""
+def render_list(title: str, items: Iterable[str], directory: Path | None = None) -> None:
+    """Print a simple single-column table, optionally headed by its directory."""
+    if directory is not None:
+        # A full-width line, not a table caption: captions wrap to the
+        # content-sized table width and mangle long absolute paths.
+        console.print(f"[dim]{title} in {directory}[/dim]")
     table = Table(title=title)
     table.add_column(title.rstrip("s").capitalize())
     for item in items:

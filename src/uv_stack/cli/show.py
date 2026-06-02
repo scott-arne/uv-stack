@@ -35,6 +35,11 @@ def _show_env(config: ConfigRoot, name: str) -> None:
     echo("Stack:")
     for token in cfg.stack:
         echo(f"  {token}")
+    echo("Channels:")
+    echo("  conda-forge")
+    for channel in cfg.channels:
+        if channel != "conda-forge":
+            echo(f"  {channel}")
     echo("Micromamba packages:")
     for pkg in cfg.micromamba:
         echo(f"  {pkg}")

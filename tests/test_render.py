@@ -52,3 +52,23 @@ def test_render_environment_yml():
     assert "- graphviz" in text
     assert "- openbabel" in text
     assert "conda-forge" in text
+
+
+def test_render_environment_yml_appends_extra_channels_after_conda_forge():
+    env = EnvConfig(name="main", channels=["bioconda", "mycorp"])
+    text = render_environment_yml(env)
+    channels = [
+        line.strip()[2:] for line in text.splitlines() if line.startswith("  - ")
+    ]
+    # conda-forge keeps top priority; extras follow in order.
+    assert channels[:3] == ["conda-forge", "bioconda", "mycorp"]
+
+
+def test_render_environment_yml_dedupes_conda_forge():
+    env = EnvConfig(name="main", channels=["conda-forge", "bioconda"])
+    text = render_environment_yml(env)
+    assert text.count("- conda-forge") == 1
+    channels = [
+        line.strip()[2:] for line in text.splitlines() if line.startswith("  - ")
+    ]
+    assert channels[:2] == ["conda-forge", "bioconda"]

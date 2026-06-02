@@ -58,6 +58,7 @@ class EnvConfig(BaseModel):
     python: str = "3.12"
     stack: list[str] = Field(default_factory=list)
     micromamba: list[str] = Field(default_factory=list)
+    channels: list[str] = Field(default_factory=list)
 
 
 class ResolvedStack(BaseModel):

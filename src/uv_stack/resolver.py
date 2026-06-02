@@ -6,7 +6,7 @@ The grammar mirrors the original zsh tooling:
     Resolve bundle ``x`` (recursively resolving each of its lines).
 ``profile:x``
     Add profile ``x`` (must exist).
-``pkg:x``
+``package:x`` / ``pkg:x``
     Add ``x`` as a literal inline requirement.
 unqualified ``x``
     Profile if ``profiles/x.in`` exists, else bundle if ``bundles/x.bundle``
@@ -54,6 +54,73 @@ class Resolver:
             self._resolve_token(token)
         return ResolvedStack(profiles=self._profiles, inline=self._inline)
 
+    def classify(self, tokens: Iterable[str]) -> list[str]:
+        """Classify each token without expanding bundles or profiles.
+
+        Each token is labeled by what it *is* — ``bundle:<name>``,
+        ``profile:<name>``, or ``package:<spec>`` — using the same precedence as
+        :meth:`resolve` but with no recursion. The result is de-duplicated with
+        first occurrence winning.
+
+        :param tokens: Stack tokens to classify.
+        :returns: Full specifiers (e.g. ``["bundle:standard", "package:numpy"]``).
+        """
+        classified: list[str] = []
+        seen: set[str] = set()
+        for token in tokens:
+            spec = self._classify_token(token)
+            if spec is not None and spec not in seen:
+                seen.add(spec)
+                classified.append(spec)
+        return classified
+
+    def resolve_packages(self, tokens: Iterable[str]) -> list[str]:
+        """Fully resolve ``tokens`` to a flat, de-duplicated package list.
+
+        Bundles and profiles are expanded to the packages they contain, so the
+        result is a raw requirements list with no ``-r`` references or kind
+        prefixes (compatible with a ``requirements.txt``). Profile packages come
+        first in resolution order, followed by inline requirements.
+
+        :param tokens: Stack tokens to resolve.
+        :returns: Package specifiers in order, de-duplicated.
+        :raises ResolutionError: For an explicitly-qualified profile or bundle
+            that does not exist.
+        """
+        stack = self.resolve(tokens)
+        packages: list[str] = []
+        seen: set[str] = set()
+        for name in stack.profiles:
+            for req in self._config.load_profile(name).requirements:
+                if req not in seen:
+                    seen.add(req)
+                    packages.append(req)
+        for req in stack.inline:
+            if req not in seen:
+                seen.add(req)
+                packages.append(req)
+        return packages
+
+    def _classify_token(self, token: str) -> str | None:
+        token = token.strip()
+        if not token:
+            return None
+        if token.startswith("@"):
+            return f"bundle:{token[1:]}"
+        if token.startswith("bundle:"):
+            return token
+        if token.startswith("profile:"):
+            return token
+        if token.startswith("package:"):
+            return token
+        if token.startswith("pkg:"):
+            return f"package:{token[len('pkg:') :]}"
+        if self._config.profile_exists(token):
+            return f"profile:{token}"
+        if self._config.bundle_exists(token):
+            return f"bundle:{token}"
+        return f"package:{token}"
+
     def _resolve_token(self, token: str) -> None:
         token = token.strip()
         if not token:
@@ -65,6 +132,8 @@ class Resolver:
             self._resolve_bundle(token[len("bundle:") :], explicit=True)
         elif token.startswith("profile:"):
             self._add_profile(token[len("profile:") :], explicit=True)
+        elif token.startswith("package:"):
+            self._add_inline(token[len("package:") :])
         elif token.startswith("pkg:"):
             self._add_inline(token[len("pkg:") :])
         elif self._config.profile_exists(token):

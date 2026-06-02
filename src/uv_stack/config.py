@@ -74,6 +74,9 @@ class ConfigRoot:
     def env_micromamba_path(self, name: str) -> Path:
         return self.env_dir(name) / "micromamba.txt"
 
+    def env_channels_path(self, name: str) -> Path:
+        return self.env_dir(name) / "channels.txt"
+
     def env_local_path(self, name: str) -> Path:
         return self.env_dir(name) / "requirements.local.in"
 
@@ -144,4 +147,5 @@ class ConfigRoot:
             python=first_clean_line(self.env_python_path(name), default="3.12"),
             stack=read_clean_lines(self.env_stack_path(name)),
             micromamba=read_clean_lines(self.env_micromamba_path(name)),
+            channels=read_clean_lines(self.env_channels_path(name)),
         )

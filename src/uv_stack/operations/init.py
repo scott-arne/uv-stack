@@ -1,8 +1,8 @@
-"""The ``config init`` operation: seed default profiles and bundles.
+"""The ``config init`` operation: create the config directory tree.
 
-Writes the contents from :mod:`uv_stack.defaults` into the config tree, creating
-``profiles/``, ``bundles/``, and ``envs/`` as needed. Existing files are never
-overwritten; only absent files are written.
+Creates ``profiles/``, ``bundles/``, and ``envs/`` under the config root if they
+are absent. It seeds no profiles or bundles; those are authored by the user.
+Existing directories are left untouched.
 """
 
 from __future__ import annotations
@@ -10,31 +10,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from uv_stack.config import ConfigRoot
-from uv_stack.defaults import DEFAULT_BUNDLES, DEFAULT_PROFILES
 
 
-def seed_defaults(config: ConfigRoot) -> list[Path]:
-    """Write default profiles and bundles into the config tree.
+def init_config_root(config: ConfigRoot) -> list[Path]:
+    """Create any missing config directories under the root.
 
-    :param config: The configuration root to seed.
-    :returns: The list of files actually written (absent files only).
+    :param config: The configuration root to initialize.
+    :returns: The directories actually created (absent ones only).
     """
-    config.profiles_dir.mkdir(parents=True, exist_ok=True)
-    config.bundles_dir.mkdir(parents=True, exist_ok=True)
-    config.envs_dir.mkdir(parents=True, exist_ok=True)
-
-    written: list[Path] = []
-
-    for name, content in DEFAULT_PROFILES.items():
-        path = config.profile_path(name)
-        if not path.exists():
-            path.write_text(content)
-            written.append(path)
-
-    for name, content in DEFAULT_BUNDLES.items():
-        path = config.bundle_path(name)
-        if not path.exists():
-            path.write_text(content)
-            written.append(path)
-
-    return written
+    created: list[Path] = []
+    for directory in (config.profiles_dir, config.bundles_dir, config.envs_dir):
+        if not directory.is_dir():
+            directory.mkdir(parents=True, exist_ok=True)
+            created.append(directory)
+    return created

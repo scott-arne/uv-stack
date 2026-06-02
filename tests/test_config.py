@@ -69,6 +69,13 @@ def test_load_env(config_tree: ConfigRoot):
     assert env.python == "3.12"
     assert env.stack == ["@standard"]
     assert env.micromamba == ["graphviz"]
+    assert env.channels == ["bioconda"]
+
+
+def test_load_env_without_channels(config_tree: ConfigRoot):
+    config_tree.env_channels_path("main").unlink()
+    env = config_tree.load_env("main")
+    assert env.channels == []
 
 
 def test_load_env_missing_stack_raises(config_tree: ConfigRoot):

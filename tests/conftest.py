@@ -13,7 +13,8 @@ def config_tree(tmp_path: Path) -> ConfigRoot:
 
     profiles: ds, chem, utils
     bundles:  standard (ds chem utils), qsar (standard + umap-learn)
-    envs:     main (stack: @standard, python 3.12, micromamba: graphviz)
+    envs:     main (stack: @standard, python 3.12, micromamba: graphviz,
+              channels: bioconda)
     """
     root = tmp_path / "python-envs"
     (root / "profiles").mkdir(parents=True)
@@ -31,6 +32,7 @@ def config_tree(tmp_path: Path) -> ConfigRoot:
     env.joinpath("python.txt").write_text("3.12\n")
     env.joinpath("stack.txt").write_text("@standard\n")
     env.joinpath("micromamba.txt").write_text("graphviz\n")
+    env.joinpath("channels.txt").write_text("bioconda\n")
     env.joinpath("requirements.local.in").write_text("some-local-pkg\n")
 
     return ConfigRoot(root)

@@ -8,26 +8,36 @@ from uv_stack.cli import cli
 
 
 def _seeded_root(tmp_path: Path) -> Path:
+    """A config root with the profiles and bundles the CLI tests reference.
+
+    Mirrors the ``config_tree`` fixture: profiles ds/chem/utils and a
+    ``standard`` bundle (ds chem utils). ``config init`` no longer seeds any
+    profiles or bundles, so the tests author the ones they need.
+    """
     from uv_stack.config import ConfigRoot
-    from uv_stack.operations.init import seed_defaults
+    from uv_stack.operations.init import init_config_root
 
     root = tmp_path / "python-envs"
-    seed_defaults(ConfigRoot(root))
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    cfg.profile_path("ds").write_text("numpy\npandas\n")
+    cfg.profile_path("chem").write_text("rdkit\n")
+    cfg.profile_path("utils").write_text("rich\n")
+    cfg.bundle_path("standard").write_text("ds\nchem\nutils\n")
     return root
 
 
 def _env_root(tmp_path: Path) -> Path:
     from uv_stack.config import ConfigRoot
-    from uv_stack.operations.init import seed_defaults
 
-    root = tmp_path / "python-envs"
+    root = _seeded_root(tmp_path)
     cfg = ConfigRoot(root)
-    seed_defaults(cfg)
     env_dir = cfg.env_dir("main")
     env_dir.mkdir(parents=True)
     (env_dir / "python.txt").write_text("3.12\n")
     (env_dir / "stack.txt").write_text("@standard\n")
     (env_dir / "micromamba.txt").write_text("graphviz\n")
+    (env_dir / "channels.txt").write_text("bioconda\n")
     return root
 
 
@@ -39,11 +49,11 @@ def _two_failing_envs_root(tmp_path: Path) -> Path:
     keeping the batch-behavior tests hermetic.
     """
     from uv_stack.config import ConfigRoot
-    from uv_stack.operations.init import seed_defaults
+    from uv_stack.operations.init import init_config_root
 
     root = tmp_path / "python-envs"
     cfg = ConfigRoot(root)
-    seed_defaults(cfg)
+    init_config_root(cfg)
     for name in ("alpha", "beta"):
         env_dir = cfg.env_dir(name)
         env_dir.mkdir(parents=True)
@@ -60,7 +70,7 @@ def _two_failing_envs_root(tmp_path: Path) -> Path:
 def test_version():
     result = CliRunner().invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "0.1.0" in result.output
+    assert "0.1.1" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +180,8 @@ def test_list_profile(tmp_path: Path):
     result = CliRunner().invoke(cli, ["--root", str(root), "list", "profile"])
     assert result.exit_code == 0
     assert "ds" in result.output
+    # The profiles directory is indicated in the output.
+    assert "profiles" in result.output
 
 
 def test_list_bundle(tmp_path: Path):
@@ -196,6 +208,9 @@ def test_show_env(tmp_path: Path):
     result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "main"])
     assert result.exit_code == 0
     assert "Environment: main" in result.output
+    assert "Channels:" in result.output
+    assert "conda-forge" in result.output
+    assert "bioconda" in result.output
 
 
 def test_show_env_defaults_to_main(tmp_path: Path):
@@ -245,11 +260,25 @@ def test_show_missing_env_errors(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_command(tmp_path: Path):
+def test_resolve_classifies_without_expanding(tmp_path: Path):
     root = _seeded_root(tmp_path)
-    result = CliRunner().invoke(cli, ["--root", str(root), "resolve", "standard"])
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "resolve", "standard", "ds", "numpy"]
+    )
     assert result.exit_code == 0
-    assert "ds" in result.output
+    lines = result.output.split()
+    assert lines == ["bundle:standard", "profile:ds", "package:numpy"]
+
+
+def test_resolve_full_expands_to_flat_packages(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "resolve", "--full", "standard"]
+    )
+    assert result.exit_code == 0
+    # standard -> ds (numpy, pandas), chem (rdkit), utils (rich); no prefixes.
+    lines = result.output.split()
+    assert lines == ["numpy", "pandas", "rdkit", "rich"]
 
 
 def test_doctor_clean(tmp_path: Path):

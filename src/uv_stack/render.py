@@ -77,14 +77,26 @@ def render_requirements_flat(stack: ResolvedStack, config: ConfigRoot) -> str:
 def render_environment_yml(env: EnvConfig) -> str:
     """Render a micromamba ``environment.yml`` for a named environment.
 
-    :param env: The environment config (name, python, micromamba packages).
+    ``conda-forge`` is always the top-priority channel; any channels from the
+    env's ``channels.txt`` are appended after it (de-duplicated, so listing
+    ``conda-forge`` there does not produce a duplicate). Channel order is
+    priority order in conda/mamba, so the first listed wins.
+
+    :param env: The environment config (name, python, channels, packages).
     :returns: File text ending with a trailing newline.
     """
+    channels = ["conda-forge"]
+    for channel in env.channels:
+        if channel not in channels:
+            channels.append(channel)
+
     lines = [
         _HEADER,
         f"name: {env.name}",
         "channels:",
-        "  - conda-forge",
+    ]
+    lines += [f"  - {channel}" for channel in channels]
+    lines += [
         "dependencies:",
         f"  - python={env.python}",
         "  - pip",

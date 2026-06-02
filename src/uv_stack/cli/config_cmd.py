@@ -6,7 +6,7 @@ import rich_click as click
 
 from uv_stack.cli._render import echo
 from uv_stack.config import ConfigRoot
-from uv_stack.operations.init import seed_defaults
+from uv_stack.operations.init import init_config_root
 
 
 @click.group()
@@ -17,11 +17,11 @@ def config() -> None:
 @config.command("init")
 @click.pass_obj
 def config_init(config_root: ConfigRoot) -> None:
-    """Seed default profiles and bundles (never clobbers existing files)."""
-    written = seed_defaults(config_root)
-    if not written:
-        echo("Nothing to do — all default files already exist.")
+    """Create missing config directories (profiles/, bundles/, envs/)."""
+    created = init_config_root(config_root)
+    if not created:
+        echo("Nothing to do — all config directories already exist.")
         return
-    echo(f"Wrote {len(written)} files under {config_root.root}:")
-    for path in written:
+    echo(f"Created {len(created)} directories under {config_root.root}:")
+    for path in created:
         echo(f"  {path}")
