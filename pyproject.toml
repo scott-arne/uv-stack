@@ -25,6 +25,9 @@ dev = [
     "ruff",
     "mypy",
     "vrzn>=0.2.2",
+    "invoke>=3.0.3",
+    "build>=1.5.0",
+    "twine>=6.2.0",
 ]
 
 [tool.ruff]
