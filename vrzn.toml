@@ -5,3 +5,9 @@ type = "pyproject-version"
 [[locations]]
 file = "src/uv_stack/__init__.py"
 type = "python-dunder"
+
+[[locations]]
+file = "tests/test_cli.py"
+type = "custom"
+label = "version test assertion"
+template = 'stack, version {version}'

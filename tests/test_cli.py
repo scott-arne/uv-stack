@@ -70,7 +70,7 @@ def _two_failing_envs_root(tmp_path: Path) -> Path:
 def test_version():
     result = CliRunner().invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "0.1.1" in result.output
+    assert "stack, version 0.1.3" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +90,41 @@ def test_upgrade_dry_run(tmp_path: Path):
     cfg = ConfigRoot(root)
     assert cfg.env_requirements_in("main").is_file()
     assert not cfg.env_lock("main").is_file()
+
+
+def test_upgrade_all_dry_run_targets_every_env(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "--all", "--dry-run"])
+    assert result.exit_code == 0
+    assert "Upgrading alpha" in result.output
+    assert "Upgrading beta" in result.output
+
+
+def test_upgrade_all_does_not_prompt(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    # No stdin supplied: an unconditional confirm() prompt would abort the batch.
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "--all"])
+    assert result.exit_code == 1
+    assert "Upgrading alpha" in result.output
+    assert "Upgrading beta" in result.output
+
+
+def test_upgrade_all_rejects_explicit_names(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "--all", "alpha"])
+    assert result.exit_code == 2
+    assert "--all cannot be combined" in result.output
+
+
+def test_upgrade_all_no_envs(tmp_path: Path):
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    root = tmp_path / "python-envs"
+    init_config_root(ConfigRoot(root))
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "--all"])
+    assert result.exit_code == 0
+    assert "No environments discovered." in result.output
 
 
 def test_upgrade_batch_continues_on_failure_and_summarizes(tmp_path: Path):

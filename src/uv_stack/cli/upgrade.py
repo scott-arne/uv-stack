@@ -74,6 +74,12 @@ def _print_summary(names: list[str], failed: list[str]) -> None:
 
 @click.command("upgrade")
 @click.argument("names", nargs=-1)
+@click.option(
+    "--all",
+    "all_envs",
+    is_flag=True,
+    help="Upgrade all discovered environments (cannot be combined with NAMES).",
+)
 @click.option("-y", "--yes", is_flag=True, help="Confirm bulk upgrade of all envs.")
 @click.option("--dry-run", is_flag=True, help="Print the command plan; change nothing.")
 @click.option(
@@ -92,6 +98,7 @@ def _print_summary(names: list[str], failed: list[str]) -> None:
 def upgrade(
     config: ConfigRoot,
     names: tuple[str, ...],
+    all_envs: bool,
     yes: bool,
     dry_run: bool,
     stop_on_error: bool,
@@ -100,11 +107,16 @@ def upgrade(
 ) -> None:
     """Render, compile, install, and check one or more existing environments.
 
-    With no NAMES, all discovered environments are upgraded (with confirmation
-    unless -y is given). By default the batch continues past a failing
-    environment and reports a ``✓``/``✗`` summary; ``--stop-on-error`` aborts at
-    the first failure. To create a missing environment, use ``stack create env``.
+    Pass NAMES to upgrade specific environments, or ``--all`` to upgrade every
+    discovered environment. With neither, all environments are upgraded as well
+    (the implicit form of ``--all``). Upgrading all environments prompts for
+    confirmation unless -y is given. By default the batch continues past a
+    failing environment and reports a ``✓``/``✗`` summary; ``--stop-on-error``
+    aborts at the first failure. To create a missing environment, use
+    ``stack create env``.
     """
+    if all_envs and names:
+        raise click.UsageError("--all cannot be combined with explicit environment NAMES.")
     options = UpgradeOptions(
         dry_run=dry_run,
         no_upgrade=no_upgrade,
@@ -119,7 +131,9 @@ def upgrade(
         echo("Discovered environments:")
         for name in targets:
             echo(f"  - {name}")
-        if not yes and not click.confirm("Upgrade all of these?"):
+        # The confirmation guards the *implicit* bulk path (``upgrade`` with no
+        # arguments). An explicit ``--all`` is itself the confirmation, as is -y.
+        if not all_envs and not yes and not click.confirm("Upgrade all of these?"):
             echo("Aborted.")
             return
     _run_upgrade(config, targets, options, stop_on_error=stop_on_error)
