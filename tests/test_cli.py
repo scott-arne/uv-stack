@@ -31,10 +31,20 @@ def _seeded_root(tmp_path: Path) -> Path:
     root = tmp_path / "python-envs"
     cfg = ConfigRoot(root)
     init_config_root(cfg)
-    cfg.profile_path("ds").write_text("includes:\n  - numpy\n  - pandas\n")
-    cfg.profile_path("chem").write_text("includes:\n  - rdkit\n")
+    cfg.profile_path("ds").write_text(
+        "description: Core data-science stack with numpy scipy pandas polars and friends\n"
+        "tags: [data, core]\n"
+        "includes:\n  - numpy\n  - pandas\n"
+    )
+    cfg.profile_path("chem").write_text(
+        "description: Cheminformatics\ntags: [chem, bio]\nincludes:\n  - rdkit\n"
+    )
     cfg.profile_path("utils").write_text("includes:\n  - rich\n")
-    cfg.bundle_path("standard").write_text("includes:\n  - ds\n  - chem\n  - utils\n")
+    cfg.bundle_path("standard").write_text(
+        "description: Everything for daily work\n"
+        "tags: [core]\n"
+        "includes:\n  - ds\n  - chem\n  - utils\n"
+    )
     return root
 
 
@@ -221,7 +231,6 @@ def test_list_env(tmp_path: Path):
     result = CliRunner().invoke(cli, ["--root", str(root), "list", "env"])
     assert result.exit_code == 0
     assert "main" in result.output
-    # New columns: Python version and a raw stack-token count.
     assert "Python" in result.output
     assert "Stack" in result.output
     assert "3.12" in result.output
@@ -229,28 +238,76 @@ def test_list_env(tmp_path: Path):
     assert cells[-1] == "1"  # @standard -> one stack token
 
 
-def test_list_profile(tmp_path: Path):
+def test_list_profile_columns(tmp_path: Path):
     root = _seeded_root(tmp_path)
-    result = CliRunner().invoke(cli, ["--root", str(root), "list", "profile"])
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "list", "profile"], env={"COLUMNS": "200"}
+    )
+    assert result.exit_code == 0
+    assert "Packages" in result.output
+    assert "Tags" in result.output
+    assert "Description" in result.output
+    cells = _row_cells(result.output, "chem")
+    assert cells[0] == "chem"
+    assert cells[1] == "1"
+    assert "chem" in cells[2] and "bio" in cells[2]
+    assert cells[3] == "Cheminformatics"
+
+
+def test_list_profile_truncates_long_description(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "list", "profile"], env={"COLUMNS": "200"}
+    )
+    cells = _row_cells(result.output, "ds")
+    assert cells[-1].endswith("…")
+    assert len(cells[-1]) <= 40
+
+
+def test_list_bundle_renames_count_to_entries(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "list", "bundle"], env={"COLUMNS": "200"}
+    )
+    assert result.exit_code == 0
+    assert "Entries" in result.output
+    assert "Tokens" not in result.output
+    cells = _row_cells(result.output, "standard")
+    assert cells[0] == "standard"
+    assert cells[1] == "3"
+
+
+def test_list_profile_tag_filter(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "list", "profile", "--tag", "data"],
+        env={"COLUMNS": "200"},
+    )
     assert result.exit_code == 0
     assert "ds" in result.output
-    # The profiles directory is indicated in the output.
-    assert "profiles" in result.output
-    # New column: raw package count.
-    assert "Packages" in result.output
-    cells = _row_cells(result.output, "ds")
-    assert cells[-1] == "2"  # ds -> numpy, pandas
+    assert "rdkit" not in result.output
+    assert "chem" not in result.output
+    assert "utils" not in result.output
 
 
-def test_list_bundle(tmp_path: Path):
+def test_list_profile_tag_filter_or(tmp_path: Path):
     root = _seeded_root(tmp_path)
-    result = CliRunner().invoke(cli, ["--root", str(root), "list", "bundle"])
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(root), "list", "profile", "--tag", "data", "--tag", "bio"],
+        env={"COLUMNS": "200"},
+    )
     assert result.exit_code == 0
-    assert "standard" in result.output
-    # New column: raw token count.
-    assert "Tokens" in result.output
-    cells = _row_cells(result.output, "standard")
-    assert cells[-1] == "3"  # standard -> ds, chem, utils
+    assert "ds" in result.output
+    assert "chem" in result.output
+    assert "utils" not in result.output
+
+
+def test_list_env_tag_is_usage_error(tmp_path: Path):
+    root = _env_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "list", "env", "--tag", "x"])
+    assert result.exit_code == 2
+    assert "tag" in result.output.lower()
 
 
 def test_list_bad_kind(tmp_path: Path):

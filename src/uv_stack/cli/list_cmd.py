@@ -9,14 +9,41 @@ from uv_stack.config import ConfigRoot
 
 _KINDS = ("env", "profile", "bundle")
 
+#: Max rendered width of the Description and Tags cells before truncation.
+_DESCRIPTION_WIDTH = 40
+_TAGS_WIDTH = 20
+
+
+def _truncate(text: str, width: int) -> str:
+    """Return ``text`` shortened to ``width`` characters with an ellipsis.
+
+    :param text: The full cell text (may be empty).
+    :param width: Maximum number of characters in the result.
+    :returns: ``text`` unchanged when within ``width``, else its first
+        ``width - 1`` characters followed by ``…``.
+    """
+    if len(text) <= width:
+        return text
+    return text[: width - 1] + "…"
+
 
 @click.command("list")
 @click.argument("kind", type=click.Choice(_KINDS))
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help="Filter profiles/bundles to those carrying any of these tags (repeatable).",
+)
 @click.pass_obj
-def list_resources(config: ConfigRoot, kind: str) -> None:
+def list_resources(config: ConfigRoot, kind: str, tags: tuple[str, ...]) -> None:
     """List resources of KIND (env, profile, or bundle)."""
-    # Annotate so mypy widens to a common row type across the branches
-    # (env rows are 3-tuples; profile/bundle rows are 2-tuples).
+    if kind == "env" and tags:
+        raise click.UsageError(
+            "--tag is not valid for 'env' (environments have no tags)."
+        )
+
+    wanted = set(tags)
     rows: list[tuple[str, ...]]
     if kind == "env":
         rows = []
@@ -30,24 +57,52 @@ def list_resources(config: ConfigRoot, kind: str) -> None:
             config.envs_dir,
         )
     elif kind == "profile":
-        rows = [
-            (name, str(len(config.load_profile(name).includes)))
-            for name in config.list_profiles()
-        ]
+        rows = []
+        for name in config.list_profiles():
+            prof = config.load_profile(name)
+            if wanted and wanted.isdisjoint(prof.tags):
+                continue
+            rows.append(
+                (
+                    name,
+                    str(len(prof.includes)),
+                    _truncate(", ".join(prof.tags), _TAGS_WIDTH),
+                    _truncate(prof.description or "", _DESCRIPTION_WIDTH),
+                )
+            )
         render_table(
             "profiles",
-            [("Profile", "left"), ("Packages", "right")],
+            [
+                ("Profile", "left"),
+                ("Packages", "right"),
+                ("Tags", "left"),
+                ("Description", "left"),
+            ],
             rows,
             config.profiles_dir,
         )
     else:
-        rows = [
-            (name, str(len(config.load_bundle(name).includes)))
-            for name in config.list_bundles()
-        ]
+        rows = []
+        for name in config.list_bundles():
+            bundle = config.load_bundle(name)
+            if wanted and wanted.isdisjoint(bundle.tags):
+                continue
+            rows.append(
+                (
+                    name,
+                    str(len(bundle.includes)),
+                    _truncate(", ".join(bundle.tags), _TAGS_WIDTH),
+                    _truncate(bundle.description or "", _DESCRIPTION_WIDTH),
+                )
+            )
         render_table(
             "bundles",
-            [("Bundle", "left"), ("Tokens", "right")],
+            [
+                ("Bundle", "left"),
+                ("Entries", "right"),
+                ("Tags", "left"),
+                ("Description", "left"),
+            ],
             rows,
             config.bundles_dir,
         )
