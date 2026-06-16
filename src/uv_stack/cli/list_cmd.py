@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import rich_click as click
 
-from uv_stack.cli._render import render_list
+from uv_stack.cli._render import render_table
 from uv_stack.config import ConfigRoot
 
 _KINDS = ("env", "profile", "bundle")
@@ -15,9 +15,39 @@ _KINDS = ("env", "profile", "bundle")
 @click.pass_obj
 def list_resources(config: ConfigRoot, kind: str) -> None:
     """List resources of KIND (env, profile, or bundle)."""
+    # Annotate so mypy widens to a common row type across the branches
+    # (env rows are 3-tuples; profile/bundle rows are 2-tuples).
+    rows: list[tuple[str, ...]]
     if kind == "env":
-        render_list("envs", config.list_envs(), config.envs_dir)
+        rows = []
+        for env in config.list_envs():
+            cfg = config.load_env(env)
+            rows.append((env, cfg.python, str(len(cfg.stack))))
+        render_table(
+            "envs",
+            [("Env", "left"), ("Python", "left"), ("Stack", "right")],
+            rows,
+            config.envs_dir,
+        )
     elif kind == "profile":
-        render_list("profiles", config.list_profiles(), config.profiles_dir)
+        rows = [
+            (name, str(len(config.load_profile(name).requirements)))
+            for name in config.list_profiles()
+        ]
+        render_table(
+            "profiles",
+            [("Profile", "left"), ("Packages", "right")],
+            rows,
+            config.profiles_dir,
+        )
     else:
-        render_list("bundles", config.list_bundles(), config.bundles_dir)
+        rows = [
+            (name, str(len(config.load_bundle(name).tokens)))
+            for name in config.list_bundles()
+        ]
+        render_table(
+            "bundles",
+            [("Bundle", "left"), ("Tokens", "right")],
+            rows,
+            config.bundles_dir,
+        )

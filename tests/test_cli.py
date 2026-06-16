@@ -7,6 +7,17 @@ from click.testing import CliRunner
 from uv_stack.cli import cli
 
 
+def _row_cells(output: str, name: str) -> list[str]:
+    """Return the trimmed cell values of the rich table row containing ``name``.
+
+    Splits the matching line on the box-drawing column separator so a count
+    assertion targets the intended column rather than matching a digit that
+    appears incidentally elsewhere in the row (e.g. the ``3.12`` Python cell).
+    """
+    line = next(line for line in output.splitlines() if name in line)
+    return [cell.strip() for cell in line.strip().strip("│").split("│")]
+
+
 def _seeded_root(tmp_path: Path) -> Path:
     """A config root with the profiles and bundles the CLI tests reference.
 
@@ -210,6 +221,12 @@ def test_list_env(tmp_path: Path):
     result = CliRunner().invoke(cli, ["--root", str(root), "list", "env"])
     assert result.exit_code == 0
     assert "main" in result.output
+    # New columns: Python version and a raw stack-token count.
+    assert "Python" in result.output
+    assert "Stack" in result.output
+    assert "3.12" in result.output
+    cells = _row_cells(result.output, "main")
+    assert cells[-1] == "1"  # @standard -> one stack token
 
 
 def test_list_profile(tmp_path: Path):
@@ -219,6 +236,10 @@ def test_list_profile(tmp_path: Path):
     assert "ds" in result.output
     # The profiles directory is indicated in the output.
     assert "profiles" in result.output
+    # New column: raw package count.
+    assert "Packages" in result.output
+    cells = _row_cells(result.output, "ds")
+    assert cells[-1] == "2"  # ds -> numpy, pandas
 
 
 def test_list_bundle(tmp_path: Path):
@@ -226,6 +247,10 @@ def test_list_bundle(tmp_path: Path):
     result = CliRunner().invoke(cli, ["--root", str(root), "list", "bundle"])
     assert result.exit_code == 0
     assert "standard" in result.output
+    # New column: raw token count.
+    assert "Tokens" in result.output
+    cells = _row_cells(result.output, "standard")
+    assert cells[-1] == "3"  # standard -> ds, chem, utils
 
 
 def test_list_bad_kind(tmp_path: Path):
