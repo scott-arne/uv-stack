@@ -1,4 +1,4 @@
-"""Shared parsing helpers for ``.in`` / ``.bundle`` / ``.txt`` config files.
+"""Shared parsing helpers for the env ``.txt`` config files.
 
 Config files use a simple line-oriented grammar: ``#`` starts a comment,
 surrounding whitespace is insignificant, and blank lines are ignored.

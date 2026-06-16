@@ -66,8 +66,8 @@ def test_missing_explicit_bundle_raises(config_tree: ConfigRoot):
 
 def test_bundle_cycle_is_safe(config_tree: ConfigRoot):
     # a -> b -> a
-    (config_tree.bundles_dir / "a.bundle").write_text("b\n")
-    (config_tree.bundles_dir / "b.bundle").write_text("a\nnumpy-extra\n")
+    config_tree.bundle_path("a").write_text("includes:\n  - b\n")
+    config_tree.bundle_path("b").write_text("includes:\n  - a\n  - numpy-extra\n")
     rs = Resolver(config_tree).resolve(["@a"])
     assert rs.inline == ["numpy-extra"]
 

@@ -31,10 +31,10 @@ def _seeded_root(tmp_path: Path) -> Path:
     root = tmp_path / "python-envs"
     cfg = ConfigRoot(root)
     init_config_root(cfg)
-    cfg.profile_path("ds").write_text("numpy\npandas\n")
-    cfg.profile_path("chem").write_text("rdkit\n")
-    cfg.profile_path("utils").write_text("rich\n")
-    cfg.bundle_path("standard").write_text("ds\nchem\nutils\n")
+    cfg.profile_path("ds").write_text("includes:\n  - numpy\n  - pandas\n")
+    cfg.profile_path("chem").write_text("includes:\n  - rdkit\n")
+    cfg.profile_path("utils").write_text("includes:\n  - rich\n")
+    cfg.bundle_path("standard").write_text("includes:\n  - ds\n  - chem\n  - utils\n")
     return root
 
 

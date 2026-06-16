@@ -1,16 +1,34 @@
+import pytest
+from pydantic import ValidationError
+
 from uv_stack.models import Bundle, EnvConfig, Profile, ResolvedStack
 
 
-def test_profile_from_lines_cleans_input():
-    p = Profile.from_lines("ds", ["numpy  # core", "", "# comment", "pandas"])
+def test_profile_fields_and_defaults():
+    p = Profile(name="ds", includes=["numpy", "pandas"])
     assert p.name == "ds"
-    assert p.requirements == ["numpy", "pandas"]
+    assert p.includes == ["numpy", "pandas"]
+    assert p.description is None
+    assert p.tags == []
 
 
-def test_bundle_from_lines_cleans_input():
-    b = Bundle.from_lines("qsar", ["ds", "chem  # chemistry", "", "umap-learn"])
+def test_profile_with_description_and_tags():
+    p = Profile(name="ds", description="Core DS", tags=["data"], includes=["numpy"])
+    assert p.description == "Core DS"
+    assert p.tags == ["data"]
+
+
+def test_bundle_fields_and_defaults():
+    b = Bundle(name="qsar", includes=["ds", "chem", "umap-learn"])
     assert b.name == "qsar"
-    assert b.tokens == ["ds", "chem", "umap-learn"]
+    assert b.includes == ["ds", "chem", "umap-learn"]
+    assert b.description is None
+    assert b.tags == []
+
+
+def test_profile_rejects_unknown_key():
+    with pytest.raises(ValidationError):
+        Profile(name="ds", includes=["numpy"], bogus="x")
 
 
 def test_env_config_defaults():

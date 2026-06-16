@@ -57,12 +57,20 @@ def _show_env(config: ConfigRoot, name: str) -> None:
 def _show_profile(config: ConfigRoot, name: str) -> None:
     prof = config.load_profile(name)
     echo(f"Profile: {prof.name}")
-    for req in prof.requirements:
+    if prof.description:
+        echo(f"Description: {prof.description}")
+    if prof.tags:
+        echo(f"Tags: {', '.join(prof.tags)}")
+    for req in prof.includes:
         echo(f"  {req}")
 
 
 def _show_bundle(config: ConfigRoot, name: str) -> None:
     b = config.load_bundle(name)
     echo(f"Bundle: {b.name}")
-    for token in b.tokens:
+    if b.description:
+        echo(f"Description: {b.description}")
+    if b.tags:
+        echo(f"Tags: {', '.join(b.tags)}")
+    for token in b.includes:
         echo(f"  {token}")

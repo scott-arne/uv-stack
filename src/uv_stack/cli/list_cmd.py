@@ -31,7 +31,7 @@ def list_resources(config: ConfigRoot, kind: str) -> None:
         )
     elif kind == "profile":
         rows = [
-            (name, str(len(config.load_profile(name).requirements)))
+            (name, str(len(config.load_profile(name).includes)))
             for name in config.list_profiles()
         ]
         render_table(
@@ -42,7 +42,7 @@ def list_resources(config: ConfigRoot, kind: str) -> None:
         )
     else:
         rows = [
-            (name, str(len(config.load_bundle(name).tokens)))
+            (name, str(len(config.load_bundle(name).includes)))
             for name in config.list_bundles()
         ]
         render_table(

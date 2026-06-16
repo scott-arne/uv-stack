@@ -1,54 +1,47 @@
 """Pydantic data models for uv-stack config objects.
 
-Models are pure data: they hold no filesystem or subprocess knowledge. The
-``from_lines`` constructors accept raw file lines and clean them, so callers may
-pass either raw or pre-cleaned input.
+Models are pure data: they hold no filesystem or subprocess knowledge. Profiles
+and bundles are validated from the mappings parsed out of their YAML files.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
-from pydantic import BaseModel, Field
-
-from uv_stack.parse import clean_line
-
-
-def _clean(lines: Iterable[str]) -> list[str]:
-    cleaned = (clean_line(line) for line in lines)
-    return [line for line in cleaned if line]
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Profile(BaseModel):
-    """A reusable package group (``profiles/<name>.in``)."""
+    """A reusable package group (``profiles/<name>.yaml``).
+
+    :param name: Profile name (the file stem; not stored in the YAML).
+    :param description: Optional one-line human description.
+    :param tags: Optional free-form categorization tags.
+    :param includes: Literal package specifications.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str
-    requirements: list[str] = Field(default_factory=list)
-
-    @classmethod
-    def from_lines(cls, name: str, lines: Iterable[str]) -> Profile:
-        """Build a profile from raw file lines.
-
-        :param name: Profile name (file stem).
-        :param lines: Raw lines from the ``.in`` file.
-        """
-        return cls(name=name, requirements=_clean(lines))
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    includes: list[str] = Field(default_factory=list)
 
 
 class Bundle(BaseModel):
-    """A composable recipe (``bundles/<name>.bundle``) of stack tokens."""
+    """A composable recipe (``bundles/<name>.yaml``).
+
+    :param name: Bundle name (the file stem; not stored in the YAML).
+    :param description: Optional one-line human description.
+    :param tags: Optional free-form categorization tags.
+    :param includes: References to profiles, other bundles, or packages, which
+        the resolver expands.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str
-    tokens: list[str] = Field(default_factory=list)
-
-    @classmethod
-    def from_lines(cls, name: str, lines: Iterable[str]) -> Bundle:
-        """Build a bundle from raw file lines.
-
-        :param name: Bundle name (file stem).
-        :param lines: Raw lines from the ``.bundle`` file.
-        """
-        return cls(name=name, tokens=_clean(lines))
+    description: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    includes: list[str] = Field(default_factory=list)
 
 
 class EnvConfig(BaseModel):
@@ -64,7 +57,7 @@ class EnvConfig(BaseModel):
 class ResolvedStack(BaseModel):
     """The result of resolving a list of stack tokens.
 
-    ``profiles`` are emitted as ``-r profiles/<name>.in`` references; ``inline``
+    Profiles are recorded by name and expanded inline at render time; ``inline``
     holds literal packages, editable installs, and local archive paths.
     """
 

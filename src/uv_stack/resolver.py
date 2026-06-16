@@ -9,13 +9,13 @@ The grammar mirrors the original zsh tooling:
 ``package:x`` / ``pkg:x``
     Add ``x`` as a literal inline requirement.
 unqualified ``x``
-    Profile if ``profiles/x.in`` exists, else bundle if ``bundles/x.bundle``
+    Profile if ``profiles/x.yaml`` exists, else bundle if ``bundles/x.yaml``
     exists, else a literal inline requirement.
 ``-e <path>`` / archive paths / anything else
     Literal inline requirement.
 
-Profiles are recorded by name (rendered later as ``-r profiles/<name>.in``).
-First occurrence wins for ordering; bundles already on the resolution path are
+Profiles are recorded by name (expanded inline at render time). First
+occurrence wins for ordering; bundles already on the resolution path are
 skipped, so mutually-referential bundles cannot recurse forever.
 """
 
@@ -91,7 +91,7 @@ class Resolver:
         packages: list[str] = []
         seen: set[str] = set()
         for name in stack.profiles:
-            for req in self._config.load_profile(name).requirements:
+            for req in self._config.load_profile(name).includes:
                 if req not in seen:
                     seen.add(req)
                     packages.append(req)
@@ -147,7 +147,7 @@ class Resolver:
         if explicit and not self._config.profile_exists(name):
             raise ResolutionError(
                 f"Missing profile: {self._config.profile_path(name)}",
-                hint="Check the profile name or create the .in file.",
+                hint="Check the profile name or create the .yaml file.",
             )
         if name not in self._seen_profiles:
             self._seen_profiles.add(name)
@@ -163,11 +163,11 @@ class Resolver:
         if explicit and not self._config.bundle_exists(name):
             raise ResolutionError(
                 f"Missing bundle: {self._config.bundle_path(name)}",
-                hint="Check the bundle name or create the .bundle file.",
+                hint="Check the bundle name or create the .yaml file.",
             )
         if name in self._seen_bundles:
             return
         self._seen_bundles.add(name)
         bundle = self._config.load_bundle(name)
-        for token in bundle.tokens:
+        for token in bundle.includes:
             self._resolve_token(token)

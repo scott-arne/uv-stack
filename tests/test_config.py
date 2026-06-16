@@ -28,8 +28,8 @@ def test_discover_default(monkeypatch):
 
 def test_path_helpers(config_tree: ConfigRoot):
     root = config_tree.root
-    assert config_tree.profile_path("ds") == root / "profiles" / "ds.in"
-    assert config_tree.bundle_path("qsar") == root / "bundles" / "qsar.bundle"
+    assert config_tree.profile_path("ds") == root / "profiles" / "ds.yaml"
+    assert config_tree.bundle_path("qsar") == root / "bundles" / "qsar.yaml"
     assert config_tree.env_stack_path("main") == root / "envs" / "main" / "stack.txt"
     assert config_tree.env_lock("main") == root / "envs" / "main" / "requirements.lock.txt"
 
@@ -51,7 +51,9 @@ def test_listing(config_tree: ConfigRoot):
 
 def test_load_profile(config_tree: ConfigRoot):
     p = config_tree.load_profile("ds")
-    assert p.requirements == ["numpy", "pandas"]
+    assert p.includes == ["numpy", "pandas"]
+    assert p.description == "Core data-science stack"
+    assert p.tags == ["data", "core"]
 
 
 def test_load_profile_missing_raises(config_tree: ConfigRoot):
@@ -61,7 +63,25 @@ def test_load_profile_missing_raises(config_tree: ConfigRoot):
 
 def test_load_bundle(config_tree: ConfigRoot):
     b = config_tree.load_bundle("standard")
-    assert b.tokens == ["ds", "chem", "utils"]
+    assert b.includes == ["ds", "chem", "utils"]
+
+
+def test_load_profile_malformed_yaml_raises(config_tree: ConfigRoot):
+    config_tree.profile_path("ds").write_text("includes: [unterminated\n")
+    with pytest.raises(ConfigError):
+        config_tree.load_profile("ds")
+
+
+def test_load_profile_empty_file_raises(config_tree: ConfigRoot):
+    config_tree.profile_path("ds").write_text("")
+    with pytest.raises(ConfigError):
+        config_tree.load_profile("ds")
+
+
+def test_load_profile_unknown_key_raises(config_tree: ConfigRoot):
+    config_tree.profile_path("ds").write_text("includes: [numpy]\nbogus: true\n")
+    with pytest.raises(ConfigError):
+        config_tree.load_profile("ds")
 
 
 def test_load_env(config_tree: ConfigRoot):

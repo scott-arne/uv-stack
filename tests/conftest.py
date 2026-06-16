@@ -21,12 +21,23 @@ def config_tree(tmp_path: Path) -> ConfigRoot:
     (root / "bundles").mkdir(parents=True)
     (root / "envs" / "main").mkdir(parents=True)
 
-    (root / "profiles" / "ds.in").write_text("numpy\npandas\n")
-    (root / "profiles" / "chem.in").write_text("rdkit\n")
-    (root / "profiles" / "utils.in").write_text("rich\n")
+    (root / "profiles" / "ds.yaml").write_text(
+        "description: Core data-science stack\n"
+        "tags: [data, core]\n"
+        "includes:\n  - numpy\n  - pandas\n"
+    )
+    (root / "profiles" / "chem.yaml").write_text(
+        "description: Cheminformatics\nincludes:\n  - rdkit\n"
+    )
+    (root / "profiles" / "utils.yaml").write_text("includes:\n  - rich\n")
 
-    (root / "bundles" / "standard.bundle").write_text("ds\nchem\nutils\n")
-    (root / "bundles" / "qsar.bundle").write_text("standard\numap-learn\n")
+    (root / "bundles" / "standard.yaml").write_text(
+        "description: Everything for daily work\n"
+        "includes:\n  - ds\n  - chem\n  - utils\n"
+    )
+    (root / "bundles" / "qsar.yaml").write_text(
+        "includes:\n  - standard\n  - umap-learn\n"
+    )
 
     env = root / "envs" / "main"
     env.joinpath("python.txt").write_text("3.12\n")

@@ -10,10 +10,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TypeVar
+
+import yaml
+from pydantic import ValidationError
 
 from uv_stack.errors import ConfigError
 from uv_stack.models import Bundle, EnvConfig, Profile
 from uv_stack.parse import first_clean_line, read_clean_lines
+
+_ModelT = TypeVar("_ModelT", Profile, Bundle)
 
 DEFAULT_ROOT = Path.home() / ".config" / "python-envs"
 
@@ -65,10 +71,10 @@ class ConfigRoot:
         return self.root / "project-python.txt"
 
     def profile_path(self, name: str) -> Path:
-        return self.profiles_dir / f"{name}.in"
+        return self.profiles_dir / f"{name}.yaml"
 
     def bundle_path(self, name: str) -> Path:
-        return self.bundles_dir / f"{name}.bundle"
+        return self.bundles_dir / f"{name}.yaml"
 
     def env_dir(self, name: str) -> Path:
         return self.envs_dir / name
@@ -111,12 +117,12 @@ class ConfigRoot:
     def list_profiles(self) -> list[str]:
         if not self.profiles_dir.is_dir():
             return []
-        return sorted(p.stem for p in self.profiles_dir.glob("*.in"))
+        return sorted(p.stem for p in self.profiles_dir.glob("*.yaml"))
 
     def list_bundles(self) -> list[str]:
         if not self.bundles_dir.is_dir():
             return []
-        return sorted(p.stem for p in self.bundles_dir.glob("*.bundle"))
+        return sorted(p.stem for p in self.bundles_dir.glob("*.yaml"))
 
     def list_envs(self) -> list[str]:
         if not self.envs_dir.is_dir():
@@ -135,23 +141,49 @@ class ConfigRoot:
         line = first_clean_line(self.project_python_path(), default="")
         return line or None
 
-    def load_profile(self, name: str) -> Profile:
-        path = self.profile_path(name)
+    def _load_yaml_model(
+        self, path: Path, name: str, model: type[_ModelT]
+    ) -> _ModelT:
+        """Parse ``path`` as YAML and validate it into ``model``.
+
+        :param path: The YAML file to read.
+        :param name: The resource name (file stem), injected into the model.
+        :param model: The pydantic model class (:class:`Profile` or
+            :class:`Bundle`).
+        :returns: The validated model instance.
+        :raises ConfigError: If the file is missing, not valid YAML, not a
+            mapping, or fails schema validation.
+        """
         if not path.is_file():
             raise ConfigError(
-                f"Missing profile: {path}",
-                hint=f"Create {path} or check the profile name.",
+                f"Missing {model.__name__.lower()}: {path}",
+                hint=f"Create {path} or check the name.",
             )
-        return Profile.from_lines(name, path.read_text().splitlines())
+        try:
+            data = yaml.safe_load(path.read_text())
+        except yaml.YAMLError as exc:
+            raise ConfigError(
+                f"Invalid YAML in {path}: {exc}",
+                hint="Fix the YAML syntax.",
+            ) from exc
+        if not isinstance(data, dict):
+            raise ConfigError(
+                f"Expected a YAML mapping in {path}, got {type(data).__name__}.",
+                hint="The file must define at least 'includes:'.",
+            )
+        try:
+            return model.model_validate({**data, "name": name})
+        except ValidationError as exc:
+            raise ConfigError(
+                f"Invalid {model.__name__.lower()} config in {path}: {exc}",
+                hint="Check the fields against the schema (description, tags, includes).",
+            ) from exc
+
+    def load_profile(self, name: str) -> Profile:
+        return self._load_yaml_model(self.profile_path(name), name, Profile)
 
     def load_bundle(self, name: str) -> Bundle:
-        path = self.bundle_path(name)
-        if not path.is_file():
-            raise ConfigError(
-                f"Missing bundle: {path}",
-                hint=f"Create {path} or check the bundle name.",
-            )
-        return Bundle.from_lines(name, path.read_text().splitlines())
+        return self._load_yaml_model(self.bundle_path(name), name, Bundle)
 
     def load_env(self, name: str) -> EnvConfig:
         if not self.env_exists(name):
