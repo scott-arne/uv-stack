@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "rich-click>=1.7",
     "pydantic>=2",
+    "pyyaml>=6",
 ]
 
 [project.scripts]
@@ -28,6 +29,7 @@ dev = [
     "invoke>=3.0.3",
     "build>=1.5.0",
     "twine>=6.2.0",
+    "types-PyYAML",
 ]
 
 [tool.ruff]
