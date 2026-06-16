@@ -2,7 +2,7 @@
 
 ``diagnose`` never mutates the filesystem; it returns a list of findings the CLI
 prints with suggested fixes. It flags missing directories, legacy names
-(``*.profiles``, ``profiles.txt``), env-like directories left at the root, and
+(``*.in``, ``*.bundle``, ``profiles.txt``), env-like directories left at the root, and
 envs missing their source files.
 """
 
@@ -61,14 +61,23 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                 )
             )
 
-    # Legacy bundle extension.
+    # Leftover pre-YAML config files (clean break: these are no longer read).
+    if config.profiles_dir.is_dir():
+        for legacy in config.profiles_dir.glob("*.in"):
+            findings.append(
+                Finding(
+                    "warn",
+                    f"Legacy profile file: {legacy}",
+                    fix=f"Convert it to {legacy.with_suffix('.yaml')} (YAML).",
+                )
+            )
     if config.bundles_dir.is_dir():
-        for legacy in config.bundles_dir.glob("*.profiles"):
+        for legacy in config.bundles_dir.glob("*.bundle"):
             findings.append(
                 Finding(
                     "warn",
                     f"Legacy bundle file: {legacy}",
-                    fix=f"Rename to {legacy.with_suffix('.bundle')}.",
+                    fix=f"Convert it to {legacy.with_suffix('.yaml')} (YAML).",
                 )
             )
 

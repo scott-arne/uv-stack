@@ -84,6 +84,12 @@ def test_load_profile_unknown_key_raises(config_tree: ConfigRoot):
         config_tree.load_profile("ds")
 
 
+def test_load_bundle_malformed_yaml_raises(config_tree: ConfigRoot):
+    config_tree.bundle_path("standard").write_text("includes: [unterminated\n")
+    with pytest.raises(ConfigError):
+        config_tree.load_bundle("standard")
+
+
 def test_load_env(config_tree: ConfigRoot):
     env = config_tree.load_env("main")
     assert env.python == "3.12"

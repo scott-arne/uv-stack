@@ -17,10 +17,16 @@ def test_missing_root_reports_error(tmp_path: Path):
     assert any(f.level == "error" for f in findings)
 
 
-def test_legacy_bundle_extension_flagged(config_tree: ConfigRoot):
-    (config_tree.bundles_dir / "old.profiles").write_text("ds\n")
+def test_legacy_profile_in_file_flagged(config_tree: ConfigRoot):
+    (config_tree.profiles_dir / "old.in").write_text("numpy\n")
     messages = [f.message for f in diagnose(config_tree)]
-    assert any("old.profiles" in m for m in messages)
+    assert any("old.in" in m for m in messages)
+
+
+def test_legacy_bundle_file_flagged(config_tree: ConfigRoot):
+    (config_tree.bundles_dir / "old.bundle").write_text("ds\n")
+    messages = [f.message for f in diagnose(config_tree)]
+    assert any("old.bundle" in m for m in messages)
 
 
 def test_legacy_profiles_txt_flagged(config_tree: ConfigRoot):
