@@ -78,3 +78,9 @@ def test_uv_init_without_name():
 def test_uv_add_and_sync():
     assert uv_add(Path("r.txt")).args == ["uv", "add", "--no-sync", "-r", "r.txt"]
     assert uv_sync().args == ["uv", "sync"]
+
+
+def test_uv_sync_with_python():
+    assert uv_sync("/envs/main/bin/python").args == [
+        "uv", "sync", "--python", "/envs/main/bin/python",
+    ]

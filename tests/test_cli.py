@@ -196,6 +196,8 @@ def test_create_project_help():
     assert result.exit_code == 0
     assert "--python" in result.output
     assert "--no-sync" in result.output
+    # The --python help advertises micromamba env-name support.
+    assert "micromamba" in result.output
 
 
 # ---------------------------------------------------------------------------

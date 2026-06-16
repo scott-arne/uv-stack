@@ -31,7 +31,15 @@ def create_env(config: ConfigRoot, name: str, recreate: bool) -> None:
 
 @create.command("project")
 @click.argument("tokens", nargs=-1, required=True)
-@click.option("--python", "python", default="3.12", help="Python version to pin.")
+@click.option(
+    "--python",
+    "python",
+    default=None,
+    help=(
+        "Python version or micromamba env name for the project interpreter. "
+        "Defaults to $UV_STACK_PROJECT_PYTHON, the config-root default, then 3.12."
+    ),
+)
 @click.option("--name", "name", default=None, help="Project name for uv init.")
 @click.option("--no-sync", is_flag=True, help="Add dependencies but do not sync.")
 @click.option("--force", is_flag=True, help="Add to an existing pyproject.toml.")
@@ -39,7 +47,7 @@ def create_env(config: ConfigRoot, name: str, recreate: bool) -> None:
 def create_project(
     config: ConfigRoot,
     tokens: tuple[str, ...],
-    python: str,
+    python: str | None,
     name: str | None,
     no_sync: bool,
     force: bool,

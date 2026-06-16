@@ -73,6 +73,14 @@ def uv_add(requirements_file: Path) -> Command:
     return Command(["uv", "add", "--no-sync", "-r", str(requirements_file)])
 
 
-def uv_sync() -> Command:
-    """Build ``uv sync``."""
-    return Command(["uv", "sync"])
+def uv_sync(python: str | None = None) -> Command:
+    """Build ``uv sync``, optionally pinning the project interpreter.
+
+    :param python: Interpreter passed to ``--python``. When omitted, ``uv sync``
+        re-resolves the interpreter itself; pass an explicit path to keep the
+        project environment deterministic.
+    """
+    args = ["uv", "sync"]
+    if python:
+        args += ["--python", python]
+    return Command(args)

@@ -56,6 +56,14 @@ class ConfigRoot:
         return self.root / "envs"
 
     # -- path helpers ----------------------------------------------------
+    def project_python_path(self) -> Path:
+        """Path to the root-level default for ``create project --python``.
+
+        This is config-root scoped (one per tree), distinct from the per-env
+        ``python.txt`` returned by :meth:`env_python_path`.
+        """
+        return self.root / "project-python.txt"
+
     def profile_path(self, name: str) -> Path:
         return self.profiles_dir / f"{name}.in"
 
@@ -118,6 +126,15 @@ class ConfigRoot:
         )
 
     # -- loaders ---------------------------------------------------------
+    def default_project_python(self) -> str | None:
+        """Return the configured default for ``create project --python``.
+
+        :returns: The first clean line of ``project-python.txt``, or ``None``
+            when the file is absent or empty.
+        """
+        line = first_clean_line(self.project_python_path(), default="")
+        return line or None
+
     def load_profile(self, name: str) -> Profile:
         path = self.profile_path(name)
         if not path.is_file():
