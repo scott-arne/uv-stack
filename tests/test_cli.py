@@ -91,7 +91,7 @@ def _two_failing_envs_root(tmp_path: Path) -> Path:
 def test_version():
     result = CliRunner().invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "stack, version 0.1.3" in result.output
+    assert "stack, version 0.1.4" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +156,9 @@ def test_upgrade_batch_continues_on_failure_and_summarizes(tmp_path: Path):
     assert "Upgrading beta" in result.output
     assert "Summary" in result.output
     assert "2 of 2 environment(s) failed." in result.output
+    # Each ✗ row is annotated with a one-line reason drawn from the error.
+    summary = result.output.split("Summary", 1)[1]
+    assert "Missing profile" in summary
 
 
 def test_upgrade_stop_on_error_aborts_after_first(tmp_path: Path):

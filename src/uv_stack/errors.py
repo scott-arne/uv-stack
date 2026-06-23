@@ -38,6 +38,8 @@ class ToolError(UvStackError):
 
     :param command: The argv list of the command that failed.
     :param returncode: The process exit code.
+    :param detail: A concise tail of the command's stderr, when captured, so the
+        CLI can report *why* it failed rather than only the exit code.
     """
 
     def __init__(
@@ -46,7 +48,9 @@ class ToolError(UvStackError):
         command: list[str],
         returncode: int,
         hint: str | None = None,
+        detail: str | None = None,
     ) -> None:
         super().__init__(message, hint)
         self.command = command
         self.returncode = returncode
+        self.detail = detail

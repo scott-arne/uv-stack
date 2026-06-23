@@ -1,4 +1,4 @@
-"""``stack upgrade``: upgrade existing environments (render → compile → install → check)."""
+"""``stack upgrade``: upgrade existing environments (render → compile → sync → check)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import rich_click as click
 
 from uv_stack.cli._render import console, echo, render_error
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import UvStackError
+from uv_stack.errors import ToolError, UvStackError
 from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
 from uv_stack.runner import SubprocessRunner
 
@@ -32,7 +32,7 @@ def _run_upgrade(
     :param stop_on_error: Abort the batch on the first failure.
     """
     runner = SubprocessRunner()
-    failed: list[str] = []
+    failures: list[tuple[str, UvStackError]] = []
 
     for name in names:
         console.rule(f"Upgrading {name}")
@@ -40,7 +40,7 @@ def _run_upgrade(
             result = upgrade_env(config, runner, name, options)
         except UvStackError as error:
             render_error(error)
-            failed.append(name)
+            failures.append((name, error))
             if stop_on_error:
                 break
             continue
@@ -52,22 +52,42 @@ def _run_upgrade(
     if options.dry_run:
         return
 
-    _print_summary(names, failed)
-    if failed:
+    _print_summary(names, failures)
+    if failures:
         sys.exit(1)
 
 
-def _print_summary(names: list[str], failed: list[str]) -> None:
-    """Print a per-environment ✓/✗ summary of an upgrade batch."""
-    failed_set = set(failed)
+def _failure_reason(error: UvStackError) -> str:
+    """Condense an error into a single summary line.
+
+    Prefers a :class:`ToolError`'s captured ``detail`` (the failing command's
+    stderr tail) collapsed to its last line — typically the actual diagnostic,
+    e.g. ``numba requires numpy>=1.22,<2.5, but 2.5.0 is installed`` — and falls
+    back to the error message for non-tool failures (bad config, resolution).
+    """
+    if isinstance(error, ToolError) and error.detail:
+        return error.detail.splitlines()[-1].strip()
+    return error.message
+
+
+def _print_summary(names: list[str], failures: list[tuple[str, UvStackError]]) -> None:
+    """Print a per-environment ✓/✗ summary of an upgrade batch.
+
+    Each ``✗`` row is annotated with a one-line reason so the summary explains
+    *why* an environment failed without reprinting the full error panel.
+    """
+    reasons = {name: _failure_reason(error) for name, error in failures}
+    width = max((len(name) for name in names), default=0)
     console.rule("Summary")
     for name in names:
-        if name in failed_set:
-            console.print(f"  [red]✗[/red] {name}")
+        if name in reasons:
+            console.print(f"  [red]✗[/red] {name:<{width}}  [dim]{reasons[name]}[/dim]")
         else:
             console.print(f"  [green]✓[/green] {name}")
-    if failed:
-        console.print(f"[red]{len(failed)} of {len(names)} environment(s) failed.[/red]")
+    if failures:
+        console.print(
+            f"[red]{len(failures)} of {len(names)} environment(s) failed.[/red]"
+        )
     else:
         console.print("[green]All requested environments upgraded.[/green]")
 
@@ -105,7 +125,7 @@ def upgrade(
     no_upgrade: bool,
     upgrade_packages: tuple[str, ...],
 ) -> None:
-    """Render, compile, install, and check one or more existing environments.
+    """Render, compile, sync, and check one or more existing environments.
 
     Pass NAMES to upgrade specific environments, or ``--all`` to upgrade every
     discovered environment. With neither, all environments are upgraded as well

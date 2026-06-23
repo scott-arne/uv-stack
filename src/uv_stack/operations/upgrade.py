@@ -1,4 +1,4 @@
-"""The ``upgrade`` operation: render → compile → install → check.
+"""The ``upgrade`` operation: render → compile → sync → check.
 
 Filesystem writes (``requirements.in``, ``environment.yml``, the lock) are
 guarded explicitly; ``--dry-run`` renders the two safe generated files, builds
@@ -18,7 +18,7 @@ from uv_stack.commands import (
     micromamba_remove,
     uv_pip_check,
     uv_pip_compile,
-    uv_pip_install,
+    uv_pip_sync,
 )
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import EnvError
@@ -71,7 +71,7 @@ def upgrade_env(
     env_name: str,
     options: UpgradeOptions,
 ) -> UpgradeResult:
-    """Render config, then compile, install, and check an environment.
+    """Render config, then compile, sync, and check an environment.
 
     :param config: Configuration root.
     :param runner: Command runner.
@@ -114,7 +114,7 @@ def upgrade_env(
                 upgrade_packages=options.upgrade_packages,
             )
         )
-        planned.append(uv_pip_install(_DRY_RUN_PYTHON, lock))
+        planned.append(uv_pip_sync(_DRY_RUN_PYTHON, lock))
         planned.append(uv_pip_check(_DRY_RUN_PYTHON))
         return UpgradeResult(env_name=env_name, planned=planned)
 
@@ -152,7 +152,7 @@ def upgrade_env(
             tmp_lock.unlink()
         raise
 
-    runner.run(uv_pip_install(python, lock))
+    runner.run(uv_pip_sync(python, lock))
     runner.run(uv_pip_check(python))
 
     return UpgradeResult(env_name=env_name)

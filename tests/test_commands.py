@@ -10,7 +10,7 @@ from uv_stack.commands import (
     uv_init,
     uv_pip_check,
     uv_pip_compile,
-    uv_pip_install,
+    uv_pip_sync,
     uv_sync,
 )
 
@@ -38,9 +38,12 @@ def test_uv_pip_compile_upgrade_packages():
     assert "--upgrade" not in cmd.args
 
 
-def test_uv_pip_install():
-    cmd = uv_pip_install("/py", Path("lock.txt"))
-    assert cmd.args == ["uv", "pip", "install", "--python", "/py", "-r", "lock.txt"]
+def test_uv_pip_sync():
+    cmd = uv_pip_sync("/py", Path("lock.txt"))
+    assert cmd.args == [
+        "uv", "pip", "sync", "--python", "/py",
+        "-C", "editable_mode=strict", "lock.txt",
+    ]
 
 
 def test_uv_pip_check():

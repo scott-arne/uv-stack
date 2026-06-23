@@ -89,12 +89,12 @@ def test_upgrade_writes_generated_files_and_runs_sequence(config_tree: ConfigRoo
     assert config_tree.env_environment_yml("main").is_file()
     assert config_tree.env_lock("main").is_file()
 
-    # Command sequence: probe -> compile -> install -> check.
+    # Command sequence: probe -> compile -> sync -> check.
     argv = [" ".join(c.args) for c in rec.commands]
     compile_idx = next(i for i, a in enumerate(argv) if "pip compile" in a)
-    install_idx = next(i for i, a in enumerate(argv) if "pip install" in a)
+    sync_idx = next(i for i, a in enumerate(argv) if "pip sync" in a)
     check_idx = next(i for i, a in enumerate(argv) if "pip check" in a)
-    assert compile_idx < install_idx < check_idx
+    assert compile_idx < sync_idx < check_idx
     # Default behavior forces --upgrade on compile.
     assert "--upgrade" in rec.commands[compile_idx].args
     assert result.env_name == "main"

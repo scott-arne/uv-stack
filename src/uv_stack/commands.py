@@ -32,9 +32,29 @@ def uv_pip_compile(
     return Command(args)
 
 
-def uv_pip_install(python: str, lock: Path) -> Command:
-    """Build ``uv pip install -r <lock>`` against a specific interpreter."""
-    return Command(["uv", "pip", "install", "--python", python, "-r", str(lock)])
+def uv_pip_sync(python: str, lock: Path) -> Command:
+    """Build ``uv pip sync <lock>`` against a specific interpreter.
+
+    ``sync`` makes the environment match the lock *exactly* — installing what is
+    missing and uninstalling anything not in the lock. This is the correct
+    semantics for a fully-locked, spec-driven environment: a plain
+    ``uv pip install -r`` is additive and leaves orphaned packages behind, so a
+    later upgrade can bump a shared dependency past an orphan's version ceiling
+    and leave the env internally inconsistent (caught by ``uv pip check``).
+
+    Passes ``-C editable_mode=strict`` so setuptools writes a static symlink
+    proxy for ``-e`` packages (a plain-path ``.pth`` rather than an import-hook
+    finder). Static analyzers such as Pylance/Pyright resolve the former but not
+    the latter; the symlink layout still reflects live source edits. The flag is
+    inert for non-editable wheel installs in the lock.
+    """
+    return Command(
+        [
+            "uv", "pip", "sync", "--python", python,
+            "-C", "editable_mode=strict",
+            str(lock),
+        ]
+    )
 
 
 def uv_pip_check(python: str) -> Command:
