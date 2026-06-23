@@ -68,6 +68,7 @@ target/
 docs/plans
 docs/specs
 docs/superpowers
+docs/hyperpowers
 
 # Project tooling + planning artifacts
 .superpowers
