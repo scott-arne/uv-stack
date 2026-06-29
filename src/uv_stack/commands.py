@@ -32,7 +32,7 @@ def uv_pip_compile(
     return Command(args)
 
 
-def uv_pip_sync(python: str, lock: Path) -> Command:
+def uv_pip_sync(python: str, lock: Path, *, editable_mode: str = "compat") -> Command:
     """Build ``uv pip sync <lock>`` against a specific interpreter.
 
     ``sync`` makes the environment match the lock *exactly* — installing what is
@@ -42,16 +42,24 @@ def uv_pip_sync(python: str, lock: Path) -> Command:
     later upgrade can bump a shared dependency past an orphan's version ceiling
     and leave the env internally inconsistent (caught by ``uv pip check``).
 
-    Passes ``-C editable_mode=strict`` so setuptools writes a static symlink
-    proxy for ``-e`` packages (a plain-path ``.pth`` rather than an import-hook
-    finder). Static analyzers such as Pylance/Pyright resolve the former but not
-    the latter; the symlink layout still reflects live source edits. The flag is
-    inert for non-editable wheel installs in the lock.
+    Passes ``-C editable_mode=<mode>`` to control how setuptools records ``-e``
+    packages. ``compat`` (the default) writes a plain-path ``.pth`` pointing at
+    the live source tree: it survives recompiled C-extension ``.so`` files and
+    resolves cleanly in static analyzers such as Pylance/Pyright. ``strict``
+    writes an import-hook finder that snapshots the package's files at install
+    time — it breaks when an extension module is rebuilt and resolves poorly in
+    Pyright — so it is wrong for the C++ extension packages in this stack. The
+    flag is inert for non-editable wheel installs in the lock.
+
+    :param python: Path to the target interpreter.
+    :param lock: Path to the compiled lock file to sync against.
+    :param editable_mode: setuptools editable layout, ``compat`` or ``strict``.
+    :returns: The ``uv pip sync`` command.
     """
     return Command(
         [
             "uv", "pip", "sync", "--python", python,
-            "-C", "editable_mode=strict",
+            "-C", f"editable_mode={editable_mode}",
             str(lock),
         ]
     )

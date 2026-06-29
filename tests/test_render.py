@@ -74,3 +74,12 @@ def test_render_environment_yml_dedupes_conda_forge():
         line.strip()[2:] for line in text.splitlines() if line.startswith("  - ")
     ]
     assert channels[:2] == ["conda-forge", "bioconda"]
+
+
+def test_render_environment_yml_dedupes_redundant_pip():
+    # ``pip`` is always emitted; listing it (or any repeat) in micromamba.txt
+    # must not produce a duplicate dependency line.
+    env = EnvConfig(name="main", micromamba=["pip", "graphviz", "graphviz"])
+    text = render_environment_yml(env)
+    assert text.count("- pip") == 1
+    assert text.count("- graphviz") == 1

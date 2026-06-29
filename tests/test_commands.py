@@ -42,8 +42,13 @@ def test_uv_pip_sync():
     cmd = uv_pip_sync("/py", Path("lock.txt"))
     assert cmd.args == [
         "uv", "pip", "sync", "--python", "/py",
-        "-C", "editable_mode=strict", "lock.txt",
+        "-C", "editable_mode=compat", "lock.txt",
     ]
+
+
+def test_uv_pip_sync_editable_mode_override():
+    cmd = uv_pip_sync("/py", Path("lock.txt"), editable_mode="strict")
+    assert "editable_mode=strict" in cmd.args
 
 
 def test_uv_pip_check():

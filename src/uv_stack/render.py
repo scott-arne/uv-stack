@@ -83,6 +83,10 @@ def render_environment_yml(env: EnvConfig) -> str:
     ``conda-forge`` there does not produce a duplicate). Channel order is
     priority order in conda/mamba, so the first listed wins.
 
+    ``python`` and ``pip`` are always emitted; any ``micromamba.txt`` package
+    that repeats them (or repeats another package) is dropped, so a redundant
+    entry never produces a duplicate dependency line.
+
     :param env: The environment config (name, python, channels, packages).
     :returns: File text ending with a trailing newline.
     """
@@ -91,16 +95,23 @@ def render_environment_yml(env: EnvConfig) -> str:
         if channel not in channels:
             channels.append(channel)
 
+    dependencies = [f"python={env.python}", "pip"]
+    seen = {"python", "pip"}
+    for pkg in env.micromamba:
+        # A package spec's name is the leading token before any version or
+        # channel qualifier, so ``pip`` and ``pip==24.0`` collapse to one entry.
+        key = pkg.split("=", 1)[0].split("<", 1)[0].split(">", 1)[0].split("::", 1)[-1].strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        dependencies.append(pkg)
+
     lines = [
         _HEADER,
         f"name: {env.name}",
         "channels:",
     ]
     lines += [f"  - {channel}" for channel in channels]
-    lines += [
-        "dependencies:",
-        f"  - python={env.python}",
-        "  - pip",
-    ]
-    lines += [f"  - {pkg}" for pkg in env.micromamba]
+    lines.append("dependencies:")
+    lines += [f"  - {dep}" for dep in dependencies]
     return "\n".join(lines) + "\n"
