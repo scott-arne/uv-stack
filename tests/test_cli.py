@@ -91,7 +91,7 @@ def _two_failing_envs_root(tmp_path: Path) -> Path:
 def test_version():
     result = CliRunner().invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "stack, version 0.1.4" in result.output
+    assert "stack, version 0.1.6" in result.output
 
 
 # ---------------------------------------------------------------------------

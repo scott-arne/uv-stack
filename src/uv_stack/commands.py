@@ -7,12 +7,36 @@ makes the command shapes trivially unit-testable.
 
 from __future__ import annotations
 
+import os
+import shutil
 from collections.abc import Sequence
 from pathlib import Path
 
 from uv_stack.runner import Command
 
 _PYTHON_PATH_SNIPPET = "import sys; print(sys.executable)"
+
+
+def _micromamba_exe() -> str:
+    """Resolve the ``micromamba`` executable to invoke via :mod:`subprocess`.
+
+    ``micromamba shell init`` installs ``micromamba`` as a *shell function*
+    (``micromamba() { __mamba_wrap "$@"; }``) rather than a binary on ``PATH``,
+    so ``which micromamba`` prints the function body. ``subprocess`` performs a
+    raw ``exec``-style ``PATH`` lookup that never consults shell functions, so a
+    bare ``"micromamba"`` argv fails with ``FileNotFoundError`` on such hosts.
+
+    Prefer ``$MAMBA_EXE`` — the absolute binary path that the same shell init
+    exports alongside the function — then a real binary on ``PATH``, and finally
+    fall back to the bare name so the original error still surfaces when
+    micromamba is genuinely not installed.
+
+    :returns: The micromamba executable path or bare command name.
+    """
+    exe = os.environ.get("MAMBA_EXE")
+    if exe:
+        return exe
+    return shutil.which("micromamba") or "micromamba"
 
 
 def uv_pip_compile(
@@ -72,18 +96,18 @@ def uv_pip_check(python: str) -> Command:
 
 def micromamba_create(environment_yml: Path) -> Command:
     """Build ``micromamba create -f <env.yml> -y``."""
-    return Command(["micromamba", "create", "-f", str(environment_yml), "-y"])
+    return Command([_micromamba_exe(), "create", "-f", str(environment_yml), "-y"])
 
 
 def micromamba_remove(env_name: str) -> Command:
     """Build ``micromamba remove -n <env> --all -y``."""
-    return Command(["micromamba", "remove", "-n", env_name, "--all", "-y"])
+    return Command([_micromamba_exe(), "remove", "-n", env_name, "--all", "-y"])
 
 
 def micromamba_python_path(env_name: str) -> Command:
     """Build a command that prints the env's Python executable path."""
     return Command(
-        ["micromamba", "run", "-n", env_name, "python", "-c", _PYTHON_PATH_SNIPPET]
+        [_micromamba_exe(), "run", "-n", env_name, "python", "-c", _PYTHON_PATH_SNIPPET]
     )
 
 

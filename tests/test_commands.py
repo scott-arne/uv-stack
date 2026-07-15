@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from uv_stack import commands
 from uv_stack.commands import (
     micromamba_create,
     micromamba_python_path,
@@ -55,22 +56,51 @@ def test_uv_pip_check():
     assert uv_pip_check("/py").args == ["uv", "pip", "check", "--python", "/py"]
 
 
-def test_micromamba_create():
+def test_micromamba_create_uses_mamba_exe(monkeypatch):
+    # micromamba shell init installs micromamba as a shell function and exports
+    # the real binary path as MAMBA_EXE; the builder must exec that path, not the
+    # bare name (which subprocess cannot resolve to a shell function).
+    monkeypatch.setenv("MAMBA_EXE", "/opt/mm/bin/micromamba")
+    assert micromamba_create(Path("env.yml")).args[0] == "/opt/mm/bin/micromamba"
+
+
+def test_micromamba_create(monkeypatch):
+    monkeypatch.setenv("MAMBA_EXE", "micromamba")
     assert micromamba_create(Path("env.yml")).args == [
         "micromamba", "create", "-f", "env.yml", "-y",
     ]
 
 
-def test_micromamba_remove():
+def test_micromamba_remove(monkeypatch):
+    monkeypatch.setenv("MAMBA_EXE", "micromamba")
     assert micromamba_remove("main").args == [
         "micromamba", "remove", "-n", "main", "--all", "-y",
     ]
 
 
-def test_micromamba_python_path():
+def test_micromamba_python_path(monkeypatch):
+    monkeypatch.setenv("MAMBA_EXE", "micromamba")
     cmd = micromamba_python_path("main")
     assert cmd.args[:4] == ["micromamba", "run", "-n", "main"]
     assert "python" in cmd.args
+
+
+def test_micromamba_exe_prefers_mamba_exe_over_path(monkeypatch):
+    monkeypatch.setenv("MAMBA_EXE", "/opt/mm/bin/micromamba")
+    monkeypatch.setattr(commands.shutil, "which", lambda _: "/usr/bin/micromamba")
+    assert commands._micromamba_exe() == "/opt/mm/bin/micromamba"
+
+
+def test_micromamba_exe_falls_back_to_path(monkeypatch):
+    monkeypatch.delenv("MAMBA_EXE", raising=False)
+    monkeypatch.setattr(commands.shutil, "which", lambda _: "/usr/bin/micromamba")
+    assert commands._micromamba_exe() == "/usr/bin/micromamba"
+
+
+def test_micromamba_exe_falls_back_to_bare_name(monkeypatch):
+    monkeypatch.delenv("MAMBA_EXE", raising=False)
+    monkeypatch.setattr(commands.shutil, "which", lambda _: None)
+    assert commands._micromamba_exe() == "micromamba"
 
 
 def test_uv_init_with_name_and_python():
