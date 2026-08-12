@@ -705,3 +705,24 @@ def test_create_env_python_empty_string_without_tokens_is_usage_error(tmp_path: 
         cli, ["--root", str(root), "create", "env", "fresh", "--python", ""]
     )
     assert result.exit_code == 2
+
+
+def test_create_env_rejects_malformed_profile_before_scaffolding(
+    tmp_path: Path, monkeypatch
+):
+    """Malformed profile YAML pre-validates so stack.txt is never written."""
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    cfg.profile_path("broken").write_text("includes: {not: [valid\n")
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "fresh", "broken"]
+    )
+    assert result.exit_code == 1
+    assert not cfg.env_stack_path("fresh").exists()

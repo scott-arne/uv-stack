@@ -57,9 +57,11 @@ def create_env(
     if python is not None and not python.strip():
         raise click.UsageError("--python requires a non-empty version.")
     if tokens:
-        # Validate before anything durable is written: strict failures and
-        # missing explicit references must not leave a half-created env.
-        Resolver(config, strict=strict).resolve(list(tokens))
+        # Validate before anything durable is written: strict failures,
+        # missing explicit references, and malformed profile YAML must not
+        # leave a half-created env. flatten() loads every referenced profile.
+        resolver = Resolver(config, strict=strict)
+        resolver.flatten(resolver.resolve(list(tokens)))
         for path in write_env_sources(config, name, list(tokens), python=python):
             echo(f"Wrote {path}")
     options = (
