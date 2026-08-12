@@ -160,12 +160,14 @@ def write_env_sources(
 
     written: list[Path] = []
     stack_text = "\n".join(tokens) + "\n"
+    stack_written = False
     _publish(
         stack_path,
         stack_text,
         f"Environment '{name}' already has a stack.txt.",
         "Edit it directly, or omit TOKENS to rebuild the env.",
     )
+    stack_written = True
     written.append(stack_path)
 
     if python:
@@ -178,9 +180,9 @@ def write_env_sources(
             )
             written.append(python_path)  # type: ignore[arg-type]
         except BaseException:
-            # Rollback stack.txt if python.txt publication fails.
-            if stack_path.exists():
-                stack_path.unlink()
+            # Rollback stack.txt if this call successfully published it.
+            if stack_written:
+                stack_path.unlink(missing_ok=True)
             raise
 
     return written
