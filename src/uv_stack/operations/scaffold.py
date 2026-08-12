@@ -78,9 +78,15 @@ def write_profile(
     :param description: Optional one-line description.
     :param tags: Optional tags.
     :returns: The path written.
-    :raises ConfigError: If the profile already exists.
+    :raises ConfigError: If the profile already exists or would shadow an existing bundle.
     """
     _validate_name("profile", name)
+    if config.bundle_exists(name):
+        bundle_path = config.bundle_path(name)
+        raise ConfigError(
+            f"Profile '{name}' would shadow the existing bundle: {bundle_path}",
+            hint="Unqualified tokens prefer profiles over bundles; choose another name.",
+        )
     path = config.profile_path(name)
     if path.exists():
         raise ConfigError(
@@ -111,9 +117,15 @@ def write_bundle(
     :param description: Optional one-line description.
     :param tags: Optional tags.
     :returns: The path written.
-    :raises ConfigError: If the bundle already exists.
+    :raises ConfigError: If the bundle already exists or would be shadowed by an existing profile.
     """
     _validate_name("bundle", name)
+    if config.profile_exists(name):
+        profile_path = config.profile_path(name)
+        raise ConfigError(
+            f"Bundle '{name}' would be shadowed by the existing profile: {profile_path}",
+            hint="Unqualified tokens prefer profiles over bundles; choose another name.",
+        )
     path = config.bundle_path(name)
     if path.exists():
         raise ConfigError(
@@ -213,8 +225,14 @@ def write_starter_profile(config: ConfigRoot) -> Path:
 
     :param config: Configuration root.
     :returns: The path written.
-    :raises ConfigError: If a starter profile already exists.
+    :raises ConfigError: If a starter profile already exists or would shadow an existing bundle.
     """
+    if config.bundle_exists("starter"):
+        starter_bundle_path = config.bundle_path("starter")
+        raise ConfigError(
+            f"Profile 'starter' would shadow the existing bundle: {starter_bundle_path}",
+            hint="Unqualified tokens prefer profiles over bundles; choose another name.",
+        )
     path = config.profile_path("starter")
     if path.exists():
         raise ConfigError(

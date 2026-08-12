@@ -530,6 +530,20 @@ def test_create_profile_refuses_overwrite(tmp_path: Path):
     assert result.exit_code == 1
 
 
+def test_create_profile_refuses_collision_with_bundle(tmp_path: Path):
+    """Creating a profile named 'standard' (existing bundle) exits with code 1."""
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "profile", "standard", "numpy"]
+    )
+    assert result.exit_code == 1
+    assert "would shadow the existing bundle" in _combined_output(result)
+    # Verify the file was not created.
+    from uv_stack.config import ConfigRoot
+    assert not ConfigRoot(root).profile_path("standard").exists()
+
+
 def test_create_bundle_writes_yaml_and_warns(tmp_path: Path):
     root = _seeded_root(tmp_path)
     runner = CliRunner()

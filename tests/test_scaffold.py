@@ -39,6 +39,15 @@ def test_write_profile_refuses_overwrite(config_tree: ConfigRoot):
     assert "Profile 'ds' already exists" in str(excinfo.value)
 
 
+def test_write_profile_refuses_collision_with_bundle(config_tree: ConfigRoot):
+    """Creating a profile with a name matching an existing bundle raises ConfigError."""
+    with pytest.raises(ConfigError) as excinfo:
+        write_profile(config_tree, "standard", ["numpy"])
+    assert "would shadow the existing bundle" in str(excinfo.value)
+    # Verify the file was not created.
+    assert not config_tree.profile_path("standard").exists()
+
+
 def test_write_bundle_round_trips(config_tree: ConfigRoot):
     write_bundle(config_tree, "daily", ["ds", "pkg:httpx"], tags=["core"])
     bundle = config_tree.load_bundle("daily")
@@ -50,6 +59,15 @@ def test_write_bundle_refuses_overwrite(config_tree: ConfigRoot):
     with pytest.raises(ConfigError) as excinfo:
         write_bundle(config_tree, "standard", ["ds"])
     assert "Bundle 'standard' already exists" in str(excinfo.value)
+
+
+def test_write_bundle_refuses_collision_with_profile(config_tree: ConfigRoot):
+    """Creating a bundle with a name matching an existing profile raises ConfigError."""
+    with pytest.raises(ConfigError) as excinfo:
+        write_bundle(config_tree, "ds", ["numpy"])
+    assert "would be shadowed by the existing profile" in str(excinfo.value)
+    # Verify the file was not created.
+    assert not config_tree.bundle_path("ds").exists()
 
 
 def test_write_env_sources_creates_stack_and_python(config_tree: ConfigRoot):
