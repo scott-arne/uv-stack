@@ -265,3 +265,135 @@ def test_repair_misplaced_env_skips_when_dest_created_after_diagnose(config_tree
     assert (stray / "requirements.in").exists()
     assert dest.exists()
     assert (dest / "environment.yml").read_text() == "name: x\n"
+
+
+def test_finish_move_normal_case(tmp_path: Path):
+    """Normal move: source identity matches linked inode → source removed."""
+    import os
+
+    from uv_stack.operations.doctor import _finish_move
+
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("content\n")
+    os.link(src, dst)
+    linked_stat = dst.lstat()
+    _finish_move(src, dst, linked_stat)
+    assert not src.exists()
+    assert dst.read_text() == "content\n"
+
+
+def test_finish_move_dst_exists_before_link(tmp_path: Path):
+    """Destination exists before link → FileExistsError from os.link (not tested here)."""
+    # This scenario is tested by the file-rename skip tests; _finish_move
+    # is only called after a successful os.link.
+    pass
+
+
+def test_finish_move_src_replaced_after_link(tmp_path: Path):
+    """Source replaced after link → link withdrawn, OSError raised, replacement survives."""
+    import os
+
+    from uv_stack.operations.doctor import _finish_move
+
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("original\n")
+    os.link(src, dst)
+    linked_stat = dst.lstat()
+    # Replace source with new inode.
+    src.unlink()
+    src.write_text("replacement\n")
+    try:
+        _finish_move(src, dst, linked_stat)
+        raise AssertionError("Expected OSError")
+    except OSError as e:
+        assert "changed during move" in str(e)
+    # Replacement survives.
+    assert src.exists()
+    assert src.read_text() == "replacement\n"
+    # Link withdrawn.
+    assert not dst.exists()
+
+
+def test_finish_move_src_vanished_after_link(tmp_path: Path):
+    """Source vanished after link → no error, dest preserves the inode."""
+    import os
+
+    from uv_stack.operations.doctor import _finish_move
+
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("content\n")
+    os.link(src, dst)
+    linked_stat = dst.lstat()
+    src.unlink()
+    # Should not raise.
+    _finish_move(src, dst, linked_stat)
+    assert not src.exists()
+    assert dst.read_text() == "content\n"
+
+
+def test_finish_move_dst_replaced_after_link(tmp_path: Path):
+    """Destination replaced → link withdrawn, OSError for src change."""
+    import os
+
+    from uv_stack.operations.doctor import _finish_move
+
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("original\n")
+    os.link(src, dst)
+    linked_stat = dst.lstat()
+    # Replace both src and dst.
+    src.unlink()
+    src.write_text("new-src\n")
+    dst.unlink()
+    dst.write_text("new-dst\n")
+    try:
+        _finish_move(src, dst, linked_stat)
+        raise AssertionError("Expected OSError")
+    except OSError as e:
+        assert "changed during move" in str(e)
+    # Both replacements survive.
+    assert src.exists()
+    assert src.read_text() == "new-src\n"
+    assert dst.exists()
+    assert dst.read_text() == "new-dst\n"
+
+
+def test_move_no_replace_identity_check_in_rename(config_tree: ConfigRoot, monkeypatch):
+    """File rename with source replaced after link → skipped, replacement survives."""
+    import os
+
+    env_dir = config_tree.env_dir("race")
+    env_dir.mkdir(parents=True)
+    profiles_txt = env_dir / "profiles.txt"
+    stack_txt = env_dir / "stack.txt"
+    profiles_txt.write_text("@standard\n")
+    findings = diagnose(config_tree)
+
+    # Simulate race: monkeypatch _finish_move to replace source before unlinking.
+    from uv_stack.operations import doctor
+
+    original_finish = doctor._finish_move
+
+    def race_finish(src: Path, dst: Path, linked_stat: os.stat_result) -> None:
+        # Replace source with new inode before calling original.
+        if src == profiles_txt:
+            src.unlink()
+            src.write_text("@replaced\n")
+        original_finish(src, dst, linked_stat)
+
+    monkeypatch.setattr(doctor, "_finish_move", race_finish)
+
+    actions = repair(config_tree, findings)
+
+    skipped = [a for a in actions if a.finding.kind == "legacy-profiles-txt"]
+    assert skipped and not skipped[0].applied
+    assert "changed during move" in skipped[0].reason
+    # Replacement survives.
+    assert profiles_txt.exists()
+    assert profiles_txt.read_text() == "@replaced\n"
+    # Link withdrawn.
+    assert not stack_txt.exists()

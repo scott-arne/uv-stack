@@ -167,13 +167,47 @@ class RepairAction:
     reason: str | None = None
 
 
-def _move_no_replace(src: Path, dst: Path) -> None:
-    """Move ``src`` to ``dst``, refusing to replace an existing ``dst``.
+def _finish_move(src: Path, dst: Path, linked_stat: os.stat_result) -> None:
+    """Complete a move after linking, ensuring source identity before unlinking.
 
-    :raises FileExistsError: If ``dst`` already exists at publication time.
+    :param src: The source path that was linked.
+    :param dst: The destination path where the link was created.
+    :param linked_stat: The stat result of ``dst`` immediately after linking.
+    :raises OSError: If ``src`` changed identity during the move (the move is
+        rolled back and nothing is deleted).
+    """
+    try:
+        current = src.lstat()
+    except FileNotFoundError:
+        return  # src vanished after linking; dst preserves the inode
+    if (current.st_dev, current.st_ino) == (linked_stat.st_dev, linked_stat.st_ino):
+        src.unlink()
+        return
+    # src was replaced after we linked the old inode: withdraw our link
+    # (identity-checked) and report without deleting anyone's file.
+    try:
+        dst_now = dst.lstat()
+        if (dst_now.st_dev, dst_now.st_ino) == (linked_stat.st_dev, linked_stat.st_ino):
+            dst.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
+    raise OSError(f"{src} changed during move; nothing deleted")
+
+
+def _move_no_replace(src: Path, dst: Path) -> None:
+    """Move ``src`` to ``dst``, refusing to replace ``dst`` or a changed ``src``.
+
+    Publishes via :func:`os.link` (fails if ``dst`` exists), then removes the
+    source only while it still names the linked inode — a source replaced
+    mid-move is left untouched and the published link is withdrawn.
+
+    :raises FileExistsError: If ``dst`` already exists.
+    :raises OSError: If ``src`` changed identity during the move (the move is
+        rolled back and nothing is deleted).
     """
     os.link(src, dst)
-    src.unlink()
+    linked = dst.lstat()
+    _finish_move(src, dst, linked)
 
 
 def _fix_mkdir(config: ConfigRoot, finding: Finding) -> RepairAction:
@@ -206,6 +240,10 @@ def _fix_rename(config: ConfigRoot, finding: Finding) -> RepairAction:
             return RepairAction(
                 finding, description, applied=False,
                 reason=f"{finding.dest.name} already exists",
+            )
+        except OSError as error:
+            return RepairAction(
+                finding, description, applied=False, reason=str(error)
             )
     else:
         try:
