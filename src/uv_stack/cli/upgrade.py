@@ -6,6 +6,7 @@ import sys
 
 import rich_click as click
 
+from uv_stack.cli._complete import complete_env_names
 from uv_stack.cli._render import console, echo, render_error, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ToolError, UvStackError
@@ -97,7 +98,7 @@ def _print_summary(names: list[str], failures: list[tuple[str, UvStackError]]) -
 
 
 @click.command("upgrade")
-@click.argument("names", nargs=-1)
+@click.argument("names", nargs=-1, shell_complete=complete_env_names)
 @click.option(
     "--all",
     "all_envs",

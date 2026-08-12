@@ -6,6 +6,7 @@ import json
 
 import rich_click as click
 
+from uv_stack.cli._complete import complete_show_names
 from uv_stack.cli._render import echo, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.operations.create import env_interpreter
@@ -23,7 +24,7 @@ def _probe_interpreter(config: ConfigRoot, name: str) -> str | None:
 
 @click.command("show")
 @click.argument("kind", type=click.Choice(_KINDS))
-@click.argument("name", required=False)
+@click.argument("name", required=False, shell_complete=complete_show_names)
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.pass_obj
 def show(config: ConfigRoot, kind: str, name: str | None, as_json: bool) -> None:

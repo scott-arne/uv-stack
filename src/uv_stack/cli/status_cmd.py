@@ -6,6 +6,7 @@ import json
 
 import rich_click as click
 
+from uv_stack.cli._complete import complete_env_names
 from uv_stack.cli._render import console, echo, render_table
 from uv_stack.config import ConfigRoot
 from uv_stack.operations.status import compute_status
@@ -13,7 +14,7 @@ from uv_stack.runner import SubprocessRunner
 
 
 @click.command("status")
-@click.argument("names", nargs=-1)
+@click.argument("names", nargs=-1, shell_complete=complete_env_names)
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.pass_obj
 def status(config: ConfigRoot, names: tuple[str, ...], as_json: bool) -> None:

@@ -56,7 +56,7 @@ click.rich_click.COMMAND_GROUPS = {
     "stack": [
         {"name": "Environments", "commands": ["upgrade", "create"]},
         {"name": "Inspection", "commands": ["list", "show", "resolve", "status"]},
-        {"name": "Maintenance", "commands": ["init", "doctor", "config"]},
+        {"name": "Maintenance", "commands": ["init", "doctor", "config", "completion"]},
     ]
 }
 
@@ -88,6 +88,7 @@ def cli(ctx: click.Context, root: str | None) -> None:
 
 def _register() -> None:
     from uv_stack.cli import (
+        completion_cmd,
         config_cmd,
         create,
         doctor,
@@ -108,6 +109,7 @@ def _register() -> None:
     cli.add_command(doctor.doctor)
     cli.add_command(config_cmd.config)
     cli.add_command(status_cmd.status)
+    cli.add_command(completion_cmd.completion)
 
 
 _register()

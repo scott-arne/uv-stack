@@ -1243,3 +1243,57 @@ def test_init_rejects_bad_tokens_before_writing(tmp_path: Path, monkeypatch):
     from uv_stack.config import ConfigRoot
 
     assert not ConfigRoot(root).env_stack_path("main").exists()
+
+
+# ---------------------------------------------------------------------------
+# completion
+# ---------------------------------------------------------------------------
+
+
+def test_completion_zsh_prints_script(tmp_path: Path):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["completion", "zsh"])
+    assert result.exit_code == 0
+    assert result.output.startswith('# Add to ~/.zshrc: eval "$(stack completion zsh)"')
+    assert "_STACK_COMPLETE" in result.output
+
+
+def test_completion_requires_shell_argument():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["completion"])
+    assert result.exit_code == 2
+
+
+def test_complete_env_names(tmp_path: Path):
+    import click as _click
+
+    from uv_stack.cli._complete import complete_env_names
+
+    root = _env_root(tmp_path)
+    ctx = _click.Context(cli)
+    ctx.params = {"root": str(root)}
+    assert complete_env_names(ctx, None, "") == ["main"]
+    assert complete_env_names(ctx, None, "ma") == ["main"]
+    assert complete_env_names(ctx, None, "zz") == []
+
+
+def test_complete_env_names_survives_bad_root():
+    import click as _click
+
+    from uv_stack.cli._complete import complete_env_names
+
+    ctx = _click.Context(cli)
+    ctx.params = {}
+    # No root param at all: fall back to discovery, never raise.
+    assert isinstance(complete_env_names(ctx, None, "zzz-no-such"), list)
+
+
+def test_complete_show_names_dispatches_on_kind(tmp_path: Path):
+    import click as _click
+
+    from uv_stack.cli._complete import complete_show_names
+
+    root = _seeded_root(tmp_path)
+    ctx = _click.Context(cli)
+    ctx.params = {"root": str(root), "kind": "profile"}
+    assert complete_show_names(ctx, None, "d") == ["ds"]
