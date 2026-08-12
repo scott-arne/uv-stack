@@ -9,8 +9,13 @@ envs missing their source files.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+
+import yaml
 
 from uv_stack.config import ConfigRoot
+from uv_stack.fsutil import atomic_write
+from uv_stack.parse import read_clean_lines
 
 _KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib"}
 
@@ -22,11 +27,17 @@ class Finding:
     :param level: ``"error"`` or ``"warn"``.
     :param message: What was detected.
     :param fix: Optional suggested remediation.
+    :param kind: Machine-readable finding type (used by :func:`repair`).
+    :param path: The offending file or directory, when applicable.
+    :param dest: The repair target path, when applicable.
     """
 
     level: str
     message: str
     fix: str | None = None
+    kind: str = ""
+    path: Path | None = None
+    dest: Path | None = None
 
 
 def diagnose(config: ConfigRoot) -> list[Finding]:
@@ -43,6 +54,8 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                 "error",
                 f"Config root does not exist: {config.root}",
                 fix=f"Run 'stack config init' or create {config.root}.",
+                kind="missing-root",
+                path=config.root,
             )
         )
         return findings
@@ -58,6 +71,8 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                     "error",
                     f"Missing {name} directory: {directory}",
                     fix=f"Create {directory} (or run 'stack config init').",
+                    kind="missing-dir",
+                    path=directory,
                 )
             )
 
@@ -69,6 +84,9 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                     "warn",
                     f"Legacy profile file: {legacy}",
                     fix=f"Convert it to {legacy.with_suffix('.yaml')} (YAML).",
+                    kind="legacy-profile",
+                    path=legacy,
+                    dest=legacy.with_suffix(".yaml"),
                 )
             )
     if config.bundles_dir.is_dir():
@@ -78,6 +96,9 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                     "warn",
                     f"Legacy bundle file: {legacy}",
                     fix=f"Convert it to {legacy.with_suffix('.yaml')} (YAML).",
+                    kind="legacy-bundle",
+                    path=legacy,
+                    dest=legacy.with_suffix(".yaml"),
                 )
             )
 
@@ -91,6 +112,9 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                     "warn",
                     f"Env-like directory not under envs/: {child.name}",
                     fix=f"Move it: mv {child} {config.envs_dir / child.name}",
+                    kind="misplaced-env",
+                    path=child,
+                    dest=config.envs_dir / child.name,
                 )
             )
 
@@ -105,6 +129,9 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                         "warn",
                         f"Legacy profiles.txt in env '{env_dir.name}'",
                         fix=f"Rename {env_dir / 'profiles.txt'} to stack.txt.",
+                        kind="legacy-profiles-txt",
+                        path=env_dir / "profiles.txt",
+                        dest=env_dir / "stack.txt",
                     )
                 )
             if (env_dir / "stack.txt").is_file() and not (
@@ -115,7 +142,117 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                         "warn",
                         f"Env '{env_dir.name}' missing python.txt (will default to 3.12)",
                         fix=f"Create {env_dir / 'python.txt'}.",
+                        kind="missing-python-txt",
+                        path=env_dir / "python.txt",
                     )
                 )
 
     return findings
+
+
+@dataclass
+class RepairAction:
+    """The outcome of attempting one finding's fix.
+
+    :param finding: The finding that was addressed.
+    :param description: Human description of what was (or would be) done.
+    :param applied: Whether the fix was applied.
+    :param reason: Why the fix was skipped, when it was.
+    """
+
+    finding: Finding
+    description: str
+    applied: bool
+    reason: str | None = None
+
+
+def _fix_mkdir(config: ConfigRoot, finding: Finding) -> RepairAction:
+    assert finding.path is not None
+    finding.path.mkdir(parents=True, exist_ok=True)
+    return RepairAction(finding, f"created {finding.path}", applied=True)
+
+
+def _fix_rename(config: ConfigRoot, finding: Finding) -> RepairAction:
+    assert finding.path is not None and finding.dest is not None
+    description = f"move {finding.path} to {finding.dest}"
+    if finding.dest.exists():
+        return RepairAction(
+            finding, description, applied=False,
+            reason=f"{finding.dest.name} already exists",
+        )
+    finding.dest.parent.mkdir(parents=True, exist_ok=True)
+    finding.path.rename(finding.dest)
+    return RepairAction(
+        finding, f"moved {finding.path} to {finding.dest}", applied=True
+    )
+
+
+def _fix_python_txt(config: ConfigRoot, finding: Finding) -> RepairAction:
+    assert finding.path is not None
+    atomic_write(finding.path, "3.12\n")
+    return RepairAction(
+        finding, f"wrote {finding.path} with default 3.12", applied=True
+    )
+
+
+def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
+    assert finding.path is not None and finding.dest is not None
+    description = f"convert {finding.path} to {finding.dest}"
+    if finding.dest.exists():
+        return RepairAction(
+            finding, description, applied=False,
+            reason=f"{finding.dest.name} already exists",
+        )
+    # Path.rename would silently replace an existing backup on POSIX; a
+    # repair pass must never destroy user content, so skip instead.
+    if finding.path.with_name(finding.path.name + ".bak").exists():
+        return RepairAction(
+            finding, description, applied=False,
+            reason=f"{finding.path.name}.bak already exists",
+        )
+    includes = read_clean_lines(finding.path)
+    atomic_write(
+        finding.dest,
+        yaml.safe_dump(
+            {"includes": includes}, sort_keys=False, default_flow_style=False
+        ),
+    )
+    backup = finding.path.with_name(finding.path.name + ".bak")
+    finding.path.rename(backup)
+    return RepairAction(
+        finding,
+        f"converted {finding.path.name} to {finding.dest.name} "
+        f"(original saved as {backup.name})",
+        applied=True,
+    )
+
+
+_REPAIRS = {
+    "missing-root": _fix_mkdir,
+    "missing-dir": _fix_mkdir,
+    "legacy-profile": _fix_convert_yaml,
+    "legacy-bundle": _fix_convert_yaml,
+    "misplaced-env": _fix_rename,
+    "legacy-profiles-txt": _fix_rename,
+    "missing-python-txt": _fix_python_txt,
+}
+
+
+def repair(config: ConfigRoot, findings: list[Finding]) -> list[RepairAction]:
+    """Apply the safe fix for each finding that has one.
+
+    Findings without a registered handler are ignored. Nothing here deletes
+    user content: conversions keep the original as ``*.bak`` and renames skip
+    when the destination exists.
+
+    :param config: The configuration root being repaired.
+    :param findings: Findings from :func:`diagnose`.
+    :returns: One :class:`RepairAction` per handled finding, in order.
+    """
+    actions: list[RepairAction] = []
+    for finding in findings:
+        handler = _REPAIRS.get(finding.kind)
+        if handler is None:
+            continue
+        actions.append(handler(config, finding))
+    return actions
