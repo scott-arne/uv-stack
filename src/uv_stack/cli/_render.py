@@ -68,3 +68,11 @@ def render_table(
 def echo(message: str) -> None:
     """Print a plain line to stdout (kept here so commands avoid importing rich)."""
     click.echo(message)
+
+
+def print_activation_hint(name: str) -> None:
+    """Print how to enter or use a freshly built environment."""
+    echo("Activate it:")
+    echo(f"  micromamba activate {name}")
+    echo("Or run one-offs without activating:")
+    echo(f"  micromamba run -n {name} python")

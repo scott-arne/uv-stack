@@ -189,7 +189,10 @@ class ConfigRoot:
         if not self.env_exists(name):
             raise ConfigError(
                 f"Missing stack file for env '{name}': expected {self.env_stack_path(name)}",
-                hint="Create stack.txt in the env config directory.",
+                hint=(
+                    "Create stack.txt in the env config directory, or pass "
+                    f"TOKENS: stack create env {name} TOKENS..."
+                ),
             )
         return EnvConfig(
             name=name,

@@ -6,11 +6,11 @@ from pathlib import Path
 
 import rich_click as click
 
-from uv_stack.cli._render import console, echo, render_warnings
+from uv_stack.cli._render import console, echo, print_activation_hint, render_warnings
 from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
 from uv_stack.operations.project import ProjectOptions, init_project
-from uv_stack.operations.scaffold import write_bundle, write_profile
+from uv_stack.operations.scaffold import write_bundle, write_env_sources, write_profile
 from uv_stack.operations.upgrade import UpgradeOptions
 from uv_stack.resolver import Resolver
 from uv_stack.runner import SubprocessRunner
@@ -23,12 +23,48 @@ def create() -> None:
 
 @create.command("env")
 @click.argument("name")
+@click.argument("tokens", nargs=-1)
+@click.option(
+    "--python",
+    "python",
+    default=None,
+    help="Write python.txt with this version (requires TOKENS).",
+)
 @click.option("--recreate", is_flag=True, help="Remove and recreate the env first.")
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Fail if an unqualified token falls through to a literal package.",
+)
 @click.pass_obj
-def create_env(config: ConfigRoot, name: str, recreate: bool) -> None:
-    """Create environment NAME, then upgrade it (``--recreate`` wipes it first)."""
-    options = UpgradeOptions(recreate=True) if recreate else UpgradeOptions(create=True)
+def create_env(
+    config: ConfigRoot,
+    name: str,
+    tokens: tuple[str, ...],
+    python: str | None,
+    recreate: bool,
+    strict: bool,
+) -> None:
+    """Create environment NAME, then upgrade it ('--recreate' wipes it first).
+
+    With TOKENS, scaffold envs/NAME/stack.txt first (and python.txt when
+    '--python' is given).
+    """
+    if python and not tokens:
+        raise click.UsageError(
+            "--python requires TOKENS (it only applies when scaffolding a new env)."
+        )
+    if tokens:
+        for path in write_env_sources(config, name, list(tokens), python=python):
+            echo(f"Wrote {path}")
+    options = (
+        UpgradeOptions(recreate=True, strict=strict)
+        if recreate
+        else UpgradeOptions(create=True, strict=strict)
+    )
     _run_upgrade(config, [name], options)
+    echo("")
+    print_activation_hint(name)
 
 
 @create.command("project")

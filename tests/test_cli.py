@@ -593,3 +593,62 @@ def test_create_bundle_rejects_missing_explicit_bundle(tmp_path: Path):
     from uv_stack.config import ConfigRoot
 
     assert not ConfigRoot(root).bundle_exists("daily")
+
+
+def test_create_env_with_tokens_scaffolds_and_builds(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda config, names, options, **kw: calls.append((names, options)),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "create", "env", "fresh",
+         "@standard", "httpx", "--python", "3.13"],
+    )
+    assert result.exit_code == 0
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    assert cfg.env_stack_path("fresh").read_text() == "@standard\nhttpx\n"
+    assert cfg.env_python_path("fresh").read_text() == "3.13\n"
+    assert calls and calls[0][0] == ["fresh"]
+    assert calls[0][1].create is True
+    assert "micromamba activate fresh" in result.output
+
+
+def test_create_env_python_without_tokens_is_usage_error(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "fresh", "--python", "3.13"]
+    )
+    assert result.exit_code == 2
+
+
+def test_create_env_tokens_refuse_existing_stack(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade", lambda *a, **kw: None
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "main", "ds"]
+    )
+    assert result.exit_code == 1
+
+
+def test_create_env_without_tokens_still_works(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda config, names, options, **kw: calls.append(names),
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "create", "env", "main"])
+    assert result.exit_code == 0
+    assert calls == [["main"]]
+    assert "micromamba activate main" in result.output

@@ -108,3 +108,17 @@ def test_load_env_missing_stack_raises(config_tree: ConfigRoot):
     (config_tree.root / "envs" / "broken").mkdir()
     with pytest.raises(ConfigError):
         config_tree.load_env("broken")
+
+
+def test_load_env_missing_hint_mentions_create_env_tokens(tmp_path):
+    from uv_stack.config import ConfigRoot
+    from uv_stack.errors import ConfigError
+
+    cfg = ConfigRoot(tmp_path)
+    try:
+        cfg.load_env("ghost")
+    except ConfigError as error:
+        assert error.hint is not None
+        assert "pass TOKENS: stack create env ghost TOKENS..." in error.hint
+    else:
+        raise AssertionError("expected ConfigError")
