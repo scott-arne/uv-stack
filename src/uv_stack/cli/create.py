@@ -109,9 +109,10 @@ def create_bundle(
     strict: bool,
 ) -> None:
     """Create bundles/NAME.yaml from stack TOKENS."""
-    # Validate tokens before writing: strict errors abort, warnings print.
-    result = Resolver(config, strict=strict).classify(list(tokens))
-    render_warnings(result.warnings)
+    # Full resolution (not classify) so explicit profile:/bundle: references
+    # must exist before anything durable is written.
+    stack = Resolver(config, strict=strict).resolve(list(tokens))
+    render_warnings(stack.warnings)
     path = write_bundle(
         config, name, list(tokens), description=description, tags=list(tags)
     )

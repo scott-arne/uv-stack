@@ -555,3 +555,27 @@ def test_create_bundle_strict_rejects_typo(tmp_path: Path):
     from uv_stack.config import ConfigRoot
 
     assert not ConfigRoot(root).bundle_exists("daily")
+
+
+def test_create_bundle_rejects_missing_explicit_profile(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "bundle", "daily", "profile:ghost"]
+    )
+    assert result.exit_code == 1
+    from uv_stack.config import ConfigRoot
+
+    assert not ConfigRoot(root).bundle_exists("daily")
+
+
+def test_create_bundle_rejects_missing_explicit_bundle(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "bundle", "daily", "@ghost"]
+    )
+    assert result.exit_code == 1
+    from uv_stack.config import ConfigRoot
+
+    assert not ConfigRoot(root).bundle_exists("daily")
