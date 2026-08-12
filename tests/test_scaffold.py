@@ -166,7 +166,7 @@ def test_write_env_sources_rollback_on_python_failure(config_tree: ConfigRoot):
         call_count += 1
         if call_count == 1:
             # First call (stack.txt) succeeds.
-            atomic_write_new(path, text)
+            return atomic_write_new(path, text)
         else:
             # Second call (python.txt) fails.
             raise RuntimeError("Simulated failure")
@@ -192,7 +192,7 @@ def test_write_env_sources_rollback_preserves_concurrent_replacement(config_tree
         call_count += 1
         if call_count == 1:
             # First call (stack.txt) succeeds normally.
-            original_publish(path, text, message, hint)
+            return original_publish(path, text, message, hint)
         else:
             # Second call (python.txt): first replace stack.txt, then fail.
             # Replacement has different content and a new inode.

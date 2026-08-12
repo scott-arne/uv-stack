@@ -44,8 +44,12 @@ def _current_umask() -> int:
 
 def test_atomic_write_new_creates_file(tmp_path: Path):
     target = tmp_path / "new.txt"
-    atomic_write_new(target, "content\n")
+    stat_result = atomic_write_new(target, "content\n")
     assert target.read_text() == "content\n"
+    # Verify the returned stat matches the published file's identity.
+    actual_stat = target.stat()
+    assert isinstance(stat_result, os.stat_result)
+    assert (stat_result.st_dev, stat_result.st_ino) == (actual_stat.st_dev, actual_stat.st_ino)
 
 
 def test_atomic_write_new_refuses_existing_file(tmp_path: Path):
@@ -58,7 +62,8 @@ def test_atomic_write_new_refuses_existing_file(tmp_path: Path):
 
 def test_atomic_write_new_leaves_no_temp_files_on_success(tmp_path: Path):
     target = tmp_path / "clean.txt"
-    atomic_write_new(target, "x")
+    stat_result = atomic_write_new(target, "x")
+    assert isinstance(stat_result, os.stat_result)
     assert [p.name for p in tmp_path.iterdir()] == ["clean.txt"]
 
 

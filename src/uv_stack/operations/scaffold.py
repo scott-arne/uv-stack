@@ -7,6 +7,7 @@ overwrite existing files — editing belongs to the user — and write atomicall
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import yaml
@@ -32,17 +33,18 @@ def _validate_name(kind: str, name: str) -> None:
         )
 
 
-def _publish(path: Path, text: str, message: str, hint: str) -> None:
+def _publish(path: Path, text: str, message: str, hint: str) -> os.stat_result:
     """Atomically publish ``text`` to ``path``, mapping FileExistsError.
 
     :param path: Destination file.
     :param text: Content to write.
     :param message: ConfigError message if the target exists.
     :param hint: ConfigError hint if the target exists.
+    :returns: The stat of the published inode.
     :raises ConfigError: If the target already exists.
     """
     try:
-        atomic_write_new(path, text)
+        return atomic_write_new(path, text)
     except FileExistsError as exc:
         raise ConfigError(message, hint=hint) from exc
 
@@ -161,14 +163,13 @@ def write_env_sources(
     written: list[Path] = []
     stack_text = "\n".join(tokens) + "\n"
     stack_identity: tuple[int, int] | None = None
-    _publish(
+    stack_stat = _publish(
         stack_path,
         stack_text,
         f"Environment '{name}' already has a stack.txt.",
         "Edit it directly, or omit TOKENS to rebuild the env.",
     )
     # Capture the identity of the file we just published for safe rollback.
-    stack_stat = stack_path.lstat()
     stack_identity = (stack_stat.st_dev, stack_stat.st_ino)
     written.append(stack_path)
 

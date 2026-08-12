@@ -35,7 +35,7 @@ def atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def atomic_write_new(path: Path, text: str) -> None:
+def atomic_write_new(path: Path, text: str) -> os.stat_result:
     """Write ``text`` to ``path`` atomically, failing if ``path`` exists.
 
     The content is written to a temporary file and published with
@@ -44,6 +44,7 @@ def atomic_write_new(path: Path, text: str) -> None:
 
     :param path: Destination file (must not exist).
     :param text: Content to write.
+    :returns: The stat of the published inode, captured race-free from the temporary file.
     :raises FileExistsError: If ``path`` already exists at publication time.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,7 +55,11 @@ def atomic_write_new(path: Path, text: str) -> None:
         umask = os.umask(0)
         os.umask(umask)
         os.chmod(tmp_name, 0o666 & ~umask)
+        # Capture the identity before linking: the temp file IS the published inode
+        # once linked — os.link creates a second name for the same inode.
+        identity = os.stat(tmp_name)
         os.link(tmp_name, path)
+        return identity
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
