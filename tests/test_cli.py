@@ -1006,6 +1006,48 @@ def test_show_env_json_has_no_interpreter_probe(tmp_path: Path, monkeypatch):
     assert payload["profiles"] == ["ds", "chem", "utils"]
 
 
+def test_show_env_surfaces_resolver_warnings_json(tmp_path: Path, monkeypatch):
+    import json
+
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    env_dir = cfg.env_dir("main")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    # Use a near-miss typo (standrd -> standard) to trigger a warning.
+    (env_dir / "stack.txt").write_text("standrd\n")
+
+    def _boom():
+        raise AssertionError("JSON mode must not construct a runner")
+
+    monkeypatch.setattr("uv_stack.cli.show.SubprocessRunner", _boom)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "show", "env", "main", "--json"]
+    )
+    assert result.exit_code == 0
+    # Extract JSON from output (warnings may appear before/after JSON in combined output).
+    # Try parsing lines until we find a valid JSON object.
+    combined = _combined_output(result)
+    lines = combined.split('\n')
+    json_lines = []
+    in_json = False
+    for line in lines:
+        if line.startswith('{'):
+            in_json = True
+        if in_json:
+            json_lines.append(line)
+        if in_json and line.strip() == '}':
+            break
+    json_text = '\n'.join(json_lines)
+    payload = json.loads(json_text)
+    assert payload["name"] == "main"
+    # Verify the warning is in the combined output.
+    assert "did you mean 'standard'" in combined
+
+
 def test_show_profile_json(tmp_path: Path):
     import json
 
@@ -1047,4 +1089,38 @@ def test_resolve_full_json(tmp_path: Path):
     )
     assert json.loads(result.output) == {
         "packages": ["numpy", "pandas", "rdkit", "rich"]
+    }
+
+
+def test_list_bundle_json_full_lists(tmp_path: Path):
+    import json
+
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "list", "bundle", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.output) == [
+        {
+            "name": "standard",
+            "entries": ["ds", "chem", "utils"],
+            "tags": ["core"],
+            "description": "Everything for daily work",
+        }
+    ]
+
+
+def test_show_bundle_json(tmp_path: Path):
+    import json
+
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "show", "bundle", "standard", "--json"]
+    )
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {
+        "name": "standard",
+        "description": "Everything for daily work",
+        "tags": ["core"],
+        "includes": ["ds", "chem", "utils"],
     }

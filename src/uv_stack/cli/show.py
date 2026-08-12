@@ -6,7 +6,7 @@ import json
 
 import rich_click as click
 
-from uv_stack.cli._render import echo
+from uv_stack.cli._render import echo, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.operations.create import env_interpreter
 from uv_stack.render import render_requirements_in
@@ -41,6 +41,7 @@ def show(config: ConfigRoot, kind: str, name: str | None, as_json: bool) -> None
 def _show_env(config: ConfigRoot, name: str, as_json: bool) -> None:
     cfg = config.load_env(name)
     stack = Resolver(config).resolve(cfg.stack)
+    render_warnings(stack.warnings, styled=not as_json)
     channels = ["conda-forge"] + [c for c in cfg.channels if c != "conda-forge"]
     if as_json:
         payload = {
