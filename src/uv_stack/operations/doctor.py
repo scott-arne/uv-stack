@@ -197,8 +197,8 @@ def _fix_rename(config: ConfigRoot, finding: Finding) -> RepairAction:
             reason=f"{finding.dest.name} already exists",
         )
     finding.dest.parent.mkdir(parents=True, exist_ok=True)
-    # For files: use no-replace move; for directories: rename (which already
-    # refuses to replace a non-empty target on POSIX).
+    # For files: use no-replace move; for directories: reserve the destination
+    # first to prevent replacing an empty directory created concurrently.
     if finding.path.is_file():
         try:
             _move_no_replace(finding.path, finding.dest)
@@ -209,8 +209,20 @@ def _fix_rename(config: ConfigRoot, finding: Finding) -> RepairAction:
             )
     else:
         try:
-            finding.path.rename(finding.dest)
+            finding.dest.mkdir(exist_ok=False)
+        except FileExistsError:
+            return RepairAction(
+                finding, description, applied=False,
+                reason=f"{finding.dest.name} already exists",
+            )
+        try:
+            os.rename(finding.path, finding.dest)
         except OSError as error:
+            # Best-effort cleanup of the placeholder we created.
+            try:
+                finding.dest.rmdir()
+            except OSError:
+                pass
             return RepairAction(
                 finding, description, applied=False, reason=str(error)
             )
@@ -255,9 +267,9 @@ def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
             reason=f"{finding.path.name}.bak already exists",
         )
     includes = read_clean_lines(finding.path)
-    # Publish the YAML with atomic_write_new.
+    # Publish the YAML with atomic_write_new; capture stat for identity check.
     try:
-        atomic_write_new(
+        dest_stat = atomic_write_new(
             finding.dest,
             yaml.safe_dump(
                 {"includes": includes}, sort_keys=False, default_flow_style=False
@@ -271,14 +283,29 @@ def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
     # Move the source to backup with no-replace semantics.
     try:
         _move_no_replace(finding.path, backup)
-    except FileExistsError:
-        # Backup appeared after our check: remove the just-published YAML to
-        # avoid a half-converted state.
-        finding.dest.unlink()
-        return RepairAction(
-            finding, description, applied=False,
-            reason=f"{finding.path.name}.bak already exists",
-        )
+    except OSError as error:
+        # Backup appeared after our check OR the source vanished: remove the
+        # just-published YAML only if it is still the file we published.
+        skip_reason: str
+        try:
+            current_stat = finding.dest.lstat()
+            if (current_stat.st_dev, current_stat.st_ino) == (
+                dest_stat.st_dev,
+                dest_stat.st_ino,
+            ):
+                finding.dest.unlink(missing_ok=True)
+            skip_reason = (
+                f"{finding.path.name}.bak already exists"
+                if isinstance(error, FileExistsError)
+                else str(error)
+            )
+        except FileNotFoundError:
+            skip_reason = (
+                f"{finding.path.name}.bak already exists"
+                if isinstance(error, FileExistsError)
+                else str(error)
+            )
+        return RepairAction(finding, description, applied=False, reason=skip_reason)
     return RepairAction(
         finding,
         f"converted {finding.path.name} to {finding.dest.name} "

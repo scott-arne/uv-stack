@@ -190,3 +190,78 @@ def test_repair_skips_profiles_txt_rename_when_stack_txt_appears_after_diagnose(
     assert "stack.txt already exists" in skipped[0].reason
     assert (env_dir / "profiles.txt").exists()
     assert (env_dir / "stack.txt").read_text() == "@stable\n"
+
+
+def test_repair_conversion_rollback_on_source_vanish(config_tree: ConfigRoot, monkeypatch):
+    """Source vanishes after YAML publish → YAML removed (identity match), action skipped."""
+    from uv_stack.operations import doctor
+
+    legacy = config_tree.profiles_dir / "vanish.in"
+    legacy.write_text("numpy\n")
+    findings = diagnose(config_tree)
+
+    # Monkeypatch _move_no_replace to unlink the source then raise FileNotFoundError.
+    def fake_move(src, dst):
+        src.unlink()
+        raise FileNotFoundError(f"{src} disappeared")
+
+    monkeypatch.setattr(doctor, "_move_no_replace", fake_move)
+
+    actions = repair(config_tree, findings)
+    skipped = [a for a in actions if a.finding.kind == "legacy-profile"]
+    assert skipped and not skipped[0].applied
+    assert "disappeared" in skipped[0].reason
+    # YAML was removed in rollback.
+    assert not (config_tree.profiles_dir / "vanish.yaml").exists()
+    # Source is gone (simulated vanish).
+    assert not legacy.exists()
+
+
+def test_repair_conversion_preserves_replaced_yaml(config_tree: ConfigRoot, monkeypatch):
+    """Dest YAML replaced after publish → replacement survives, action skipped."""
+    from uv_stack.operations import doctor
+
+    legacy = config_tree.profiles_dir / "race.in"
+    legacy.write_text("numpy\n")
+    findings = diagnose(config_tree)
+
+    def fake_move(src, dst):
+        # Simulate concurrent replacement: unlink the YAML and rewrite it.
+        yaml_path = config_tree.profiles_dir / "race.yaml"
+        yaml_path.unlink()
+        yaml_path.write_text("includes:\n- pandas\n")
+        raise FileExistsError(f"{dst.with_suffix('.bak')} already exists")
+
+    monkeypatch.setattr(doctor, "_move_no_replace", fake_move)
+
+    actions = repair(config_tree, findings)
+    skipped = [a for a in actions if a.finding.kind == "legacy-profile"]
+    assert skipped and not skipped[0].applied
+    assert "race.in.bak already exists" in skipped[0].reason
+    # Replacement YAML survives (identity check prevented deletion).
+    yaml_path = config_tree.profiles_dir / "race.yaml"
+    assert yaml_path.exists()
+    assert "pandas" in yaml_path.read_text()
+    # Source file untouched.
+    assert legacy.exists()
+
+
+def test_repair_misplaced_env_skips_when_dest_created_after_diagnose(config_tree: ConfigRoot):
+    """Dest dir created after diagnose → skipped, both directories intact."""
+    stray = config_tree.root / "concurrent"
+    stray.mkdir()
+    (stray / "requirements.in").write_text("# x\n")
+    findings = diagnose(config_tree)
+    # Destination appears after diagnosis.
+    dest = config_tree.envs_dir / "concurrent"
+    dest.mkdir()
+    (dest / "environment.yml").write_text("name: x\n")
+    actions = repair(config_tree, findings)
+    skipped = [a for a in actions if a.finding.kind == "misplaced-env"]
+    assert skipped and not skipped[0].applied
+    assert "concurrent already exists" in skipped[0].reason
+    # Both directories intact.
+    assert stray.exists()
+    assert (stray / "requirements.in").exists()
+    assert dest.exists()
+    assert (dest / "environment.yml").read_text() == "name: x\n"
