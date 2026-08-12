@@ -177,3 +177,37 @@ def test_write_env_sources_rollback_on_python_failure(config_tree: ConfigRoot):
 
     assert not config_tree.env_stack_path("rollback-test").exists()
     assert not config_tree.env_python_path("rollback-test").exists()
+
+
+def test_write_env_sources_rollback_preserves_concurrent_replacement(config_tree: ConfigRoot):
+    """Rollback should not unlink stack.txt if a concurrent process replaced it."""
+    from uv_stack import operations
+
+    original_publish = operations.scaffold._publish
+    call_count = 0
+    stack_path = config_tree.env_stack_path("concurrent-test")
+
+    def publish_with_concurrent_replacement(path, text, message, hint):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call (stack.txt) succeeds normally.
+            original_publish(path, text, message, hint)
+        else:
+            # Second call (python.txt): first replace stack.txt, then fail.
+            # Replacement has different content and a new inode.
+            stack_path.unlink()
+            stack_path.write_text("REPLACED\n")
+            raise RuntimeError("Simulated failure after replacement")
+
+    with mock.patch(
+        "uv_stack.operations.scaffold._publish",
+        side_effect=publish_with_concurrent_replacement,
+    ):
+        with pytest.raises(RuntimeError):
+            write_env_sources(config_tree, "concurrent-test", ["ds"], python="3.13")
+
+    # The replacement file should survive the rollback.
+    assert stack_path.exists()
+    assert stack_path.read_text() == "REPLACED\n"
+    assert not config_tree.env_python_path("concurrent-test").exists()

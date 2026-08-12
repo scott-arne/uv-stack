@@ -160,14 +160,16 @@ def write_env_sources(
 
     written: list[Path] = []
     stack_text = "\n".join(tokens) + "\n"
-    stack_written = False
+    stack_identity: tuple[int, int] | None = None
     _publish(
         stack_path,
         stack_text,
         f"Environment '{name}' already has a stack.txt.",
         "Edit it directly, or omit TOKENS to rebuild the env.",
     )
-    stack_written = True
+    # Capture the identity of the file we just published for safe rollback.
+    stack_stat = stack_path.lstat()
+    stack_identity = (stack_stat.st_dev, stack_stat.st_ino)
     written.append(stack_path)
 
     if python:
@@ -180,9 +182,16 @@ def write_env_sources(
             )
             written.append(python_path)  # type: ignore[arg-type]
         except BaseException:
-            # Rollback stack.txt if this call successfully published it.
-            if stack_written:
-                stack_path.unlink(missing_ok=True)
+            # Rollback is best-effort: only remove the exact file this call created.
+            # A concurrent process could have replaced stack.txt between our publish
+            # and this rollback; we must not unlink a replacement.
+            if stack_identity is not None:
+                try:
+                    current_stat = stack_path.lstat()
+                    if (current_stat.st_dev, current_stat.st_ino) == stack_identity:
+                        stack_path.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    pass
             raise
 
     return written
