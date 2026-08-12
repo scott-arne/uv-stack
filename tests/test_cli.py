@@ -952,3 +952,99 @@ def test_status_json(tmp_path: Path, monkeypatch):
             "message": None,
         }
     ]
+
+
+def test_list_env_json(tmp_path: Path):
+    import json
+
+    root = _env_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "list", "env", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.output) == [
+        {"name": "main", "python": "3.12", "stack": ["@standard"]}
+    ]
+
+
+def test_list_profile_json_full_lists(tmp_path: Path):
+    import json
+
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "list", "profile", "--json", "--tag", "chem"]
+    )
+    assert result.exit_code == 0
+    assert json.loads(result.output) == [
+        {
+            "name": "chem",
+            "packages": ["rdkit"],
+            "tags": ["chem", "bio"],
+            "description": "Cheminformatics",
+        }
+    ]
+
+
+def test_show_env_json_has_no_interpreter_probe(tmp_path: Path, monkeypatch):
+    import json
+
+    root = _env_root(tmp_path)
+
+    def _boom():
+        raise AssertionError("JSON mode must not construct a runner")
+
+    monkeypatch.setattr("uv_stack.cli.show.SubprocessRunner", _boom)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "show", "env", "main", "--json"]
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["name"] == "main"
+    assert payload["config_dir"] == str(root / "envs" / "main")
+    assert payload["channels"][0] == "conda-forge"
+    assert payload["profiles"] == ["ds", "chem", "utils"]
+
+
+def test_show_profile_json(tmp_path: Path):
+    import json
+
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "show", "profile", "utils", "--json"]
+    )
+    assert json.loads(result.output) == {
+        "name": "utils",
+        "description": None,
+        "tags": [],
+        "includes": ["rich"],
+    }
+
+
+def test_resolve_json(tmp_path: Path):
+    import json
+
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "resolve", "--json", "standard", "ds", "numpy"]
+    )
+    assert json.loads(result.output) == [
+        {"input": "standard", "kind": "bundle", "name": "standard"},
+        {"input": "ds", "kind": "profile", "name": "ds"},
+        {"input": "numpy", "kind": "package", "name": "numpy"},
+    ]
+
+
+def test_resolve_full_json(tmp_path: Path):
+    import json
+
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "resolve", "--full", "--json", "standard"]
+    )
+    assert json.loads(result.output) == {
+        "packages": ["numpy", "pandas", "rdkit", "rich"]
+    }

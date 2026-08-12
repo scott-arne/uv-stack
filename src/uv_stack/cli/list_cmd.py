@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 import rich_click as click
 
-from uv_stack.cli._render import render_table
+from uv_stack.cli._render import echo, render_table
 from uv_stack.config import ConfigRoot
 
 _KINDS = ("env", "profile", "bundle")
@@ -35,8 +37,11 @@ def _truncate(text: str, width: int) -> str:
     multiple=True,
     help="Filter profiles/bundles to those carrying any of these tags (repeatable).",
 )
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.pass_obj
-def list_resources(config: ConfigRoot, kind: str, tags: tuple[str, ...]) -> None:
+def list_resources(
+    config: ConfigRoot, kind: str, tags: tuple[str, ...], as_json: bool
+) -> None:
     """List resources of KIND (env, profile, or bundle)."""
     if kind == "env" and tags:
         raise click.UsageError(
@@ -44,25 +49,38 @@ def list_resources(config: ConfigRoot, kind: str, tags: tuple[str, ...]) -> None
         )
 
     wanted = set(tags)
-    rows: list[tuple[str, ...]]
     if kind == "env":
-        rows = []
+        env_data: list[dict[str, object]] = []
+        env_rows: list[tuple[str, ...]] = []
         for env in config.list_envs():
             cfg = config.load_env(env)
-            rows.append((env, cfg.python, str(len(cfg.stack))))
+            env_data.append({"name": env, "python": cfg.python, "stack": cfg.stack})
+            env_rows.append((env, cfg.python, str(len(cfg.stack))))
+        if as_json:
+            echo(json.dumps(env_data, indent=2))
+            return
         render_table(
             "envs",
             [("Env", "left"), ("Python", "left"), ("Stack", "right")],
-            rows,
+            env_rows,
             config.envs_dir,
         )
     elif kind == "profile":
-        rows = []
+        profile_data: list[dict[str, object]] = []
+        profile_rows: list[tuple[str, ...]] = []
         for name in config.list_profiles():
             prof = config.load_profile(name)
             if wanted and wanted.isdisjoint(prof.tags):
                 continue
-            rows.append(
+            profile_data.append(
+                {
+                    "name": name,
+                    "packages": prof.includes,
+                    "tags": prof.tags,
+                    "description": prof.description,
+                }
+            )
+            profile_rows.append(
                 (
                     name,
                     str(len(prof.includes)),
@@ -70,6 +88,9 @@ def list_resources(config: ConfigRoot, kind: str, tags: tuple[str, ...]) -> None
                     _truncate(prof.description or "", _DESCRIPTION_WIDTH),
                 )
             )
+        if as_json:
+            echo(json.dumps(profile_data, indent=2))
+            return
         render_table(
             "profiles",
             [
@@ -78,16 +99,25 @@ def list_resources(config: ConfigRoot, kind: str, tags: tuple[str, ...]) -> None
                 ("Tags", "left"),
                 ("Description", "left"),
             ],
-            rows,
+            profile_rows,
             config.profiles_dir,
         )
     else:
-        rows = []
+        bundle_data: list[dict[str, object]] = []
+        bundle_rows: list[tuple[str, ...]] = []
         for name in config.list_bundles():
             bundle = config.load_bundle(name)
             if wanted and wanted.isdisjoint(bundle.tags):
                 continue
-            rows.append(
+            bundle_data.append(
+                {
+                    "name": name,
+                    "entries": bundle.includes,
+                    "tags": bundle.tags,
+                    "description": bundle.description,
+                }
+            )
+            bundle_rows.append(
                 (
                     name,
                     str(len(bundle.includes)),
@@ -95,6 +125,9 @@ def list_resources(config: ConfigRoot, kind: str, tags: tuple[str, ...]) -> None
                     _truncate(bundle.description or "", _DESCRIPTION_WIDTH),
                 )
             )
+        if as_json:
+            echo(json.dumps(bundle_data, indent=2))
+            return
         render_table(
             "bundles",
             [
@@ -103,6 +136,6 @@ def list_resources(config: ConfigRoot, kind: str, tags: tuple[str, ...]) -> None
                 ("Tags", "left"),
                 ("Description", "left"),
             ],
-            rows,
+            bundle_rows,
             config.bundles_dir,
         )
