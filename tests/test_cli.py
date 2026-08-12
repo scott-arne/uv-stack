@@ -494,3 +494,64 @@ def test_old_project_group_is_gone():
     result = CliRunner().invoke(cli, ["project", "init", "ds"])
     assert result.exit_code == 2
     assert "No such command" in result.output
+
+
+def test_create_profile_writes_yaml(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "create", "profile", "viz",
+         "matplotlib", "seaborn", "--description", "Plotting", "--tag", "viz"],
+    )
+    assert result.exit_code == 0
+    assert "Wrote" in result.output
+    from uv_stack.config import ConfigRoot
+
+    prof = ConfigRoot(root).load_profile("viz")
+    assert prof.includes == ["matplotlib", "seaborn"]
+    assert prof.description == "Plotting"
+    assert prof.tags == ["viz"]
+
+
+def test_create_profile_requires_packages(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "create", "profile", "viz"])
+    assert result.exit_code == 2
+
+
+def test_create_profile_refuses_overwrite(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "profile", "ds", "numpy"]
+    )
+    assert result.exit_code == 1
+
+
+def test_create_bundle_writes_yaml_and_warns(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "create", "bundle", "daily", "ds", "standrd"],
+    )
+    assert result.exit_code == 0
+    assert "did you mean 'standard'" in _combined_output(result)
+    from uv_stack.config import ConfigRoot
+
+    assert ConfigRoot(root).load_bundle("daily").includes == ["ds", "standrd"]
+
+
+def test_create_bundle_strict_rejects_typo(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "create", "bundle", "daily", "--strict", "numpyy"],
+    )
+    assert result.exit_code == 1
+    from uv_stack.config import ConfigRoot
+
+    assert not ConfigRoot(root).bundle_exists("daily")

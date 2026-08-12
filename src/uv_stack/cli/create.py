@@ -6,11 +6,13 @@ from pathlib import Path
 
 import rich_click as click
 
-from uv_stack.cli._render import console, render_warnings
+from uv_stack.cli._render import console, echo, render_warnings
 from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
 from uv_stack.operations.project import ProjectOptions, init_project
+from uv_stack.operations.scaffold import write_bundle, write_profile
 from uv_stack.operations.upgrade import UpgradeOptions
+from uv_stack.resolver import Resolver
 from uv_stack.runner import SubprocessRunner
 
 
@@ -65,3 +67,52 @@ def create_project(
     )
     render_warnings(warnings)
     console.print("[green]Project initialized.[/green]")
+
+
+@create.command("profile")
+@click.argument("name")
+@click.argument("packages", nargs=-1, required=True)
+@click.option("--description", default=None, help="One-line description stored in the YAML.")
+@click.option("--tag", "tags", multiple=True, help="Tag stored in the YAML (repeatable).")
+@click.pass_obj
+def create_profile(
+    config: ConfigRoot,
+    name: str,
+    packages: tuple[str, ...],
+    description: str | None,
+    tags: tuple[str, ...],
+) -> None:
+    """Create profiles/NAME.yaml from PACKAGES."""
+    path = write_profile(
+        config, name, list(packages), description=description, tags=list(tags)
+    )
+    echo(f"Wrote {path}")
+
+
+@create.command("bundle")
+@click.argument("name")
+@click.argument("tokens", nargs=-1, required=True)
+@click.option("--description", default=None, help="One-line description stored in the YAML.")
+@click.option("--tag", "tags", multiple=True, help="Tag stored in the YAML (repeatable).")
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Fail if an unqualified token falls through to a literal package.",
+)
+@click.pass_obj
+def create_bundle(
+    config: ConfigRoot,
+    name: str,
+    tokens: tuple[str, ...],
+    description: str | None,
+    tags: tuple[str, ...],
+    strict: bool,
+) -> None:
+    """Create bundles/NAME.yaml from stack TOKENS."""
+    # Validate tokens before writing: strict errors abort, warnings print.
+    result = Resolver(config, strict=strict).classify(list(tokens))
+    render_warnings(result.warnings)
+    path = write_bundle(
+        config, name, list(tokens), description=description, tags=list(tags)
+    )
+    echo(f"Wrote {path}")
