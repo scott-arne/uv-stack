@@ -379,5 +379,15 @@ def repair(config: ConfigRoot, findings: list[Finding]) -> list[RepairAction]:
         handler = _REPAIRS.get(finding.kind)
         if handler is None:
             continue
-        actions.append(handler(config, finding))
+        try:
+            actions.append(handler(config, finding))
+        except OSError as error:
+            actions.append(
+                RepairAction(
+                    finding,
+                    finding.fix or finding.message,
+                    applied=False,
+                    reason=str(error),
+                )
+            )
     return actions

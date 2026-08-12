@@ -752,6 +752,70 @@ def test_activation_hint_leaves_safe_names_unquoted(capsys):
 
 
 # ---------------------------------------------------------------------------
+# doctor --fix and JSON
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_fix_repairs_and_reports(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    (cfg.profiles_dir / "old.in").write_text("numpy\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "doctor", "--fix"])
+    assert result.exit_code == 0
+    assert "fixed:" in result.output
+    assert "No problems detected." in result.output
+    assert cfg.profile_exists("old")
+
+
+def test_doctor_fix_exit_1_when_errors_remain(tmp_path: Path, monkeypatch):
+    # A root whose parent is read-only cannot be created; simulate by pointing
+    # repair at a path under a file (mkdir raises, so the error finding stays).
+    blocker = tmp_path / "blocker"
+    blocker.write_text("i am a file\n")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(blocker / "python-envs"), "doctor", "--fix"]
+    )
+    assert result.exit_code == 1
+
+
+def test_doctor_json_lists_findings(tmp_path: Path):
+    import json
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(tmp_path / "nope"), "doctor", "--json"]
+    )
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload[0]["kind"] == "missing-root"
+    assert payload[0]["level"] == "error"
+
+
+def test_doctor_fix_json_shape(tmp_path: Path):
+    import json
+
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    (cfg.bundles_dir / "old.bundle").write_text("ds\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "doctor", "--fix", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert set(payload.keys()) == {"actions", "remaining"}
+    action = payload["actions"][0]
+    assert action["kind"] == "legacy-bundle"
+    assert action["applied"] is True
+    assert action["reason"] is None
+    assert payload["remaining"] == []
+
+
+# ---------------------------------------------------------------------------
 # show env config and interpreter
 # ---------------------------------------------------------------------------
 
