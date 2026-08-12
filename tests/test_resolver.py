@@ -36,7 +36,7 @@ def test_package_prefix_is_inline(config_tree: ConfigRoot):
 def test_classify_output_round_trips_as_input(config_tree: ConfigRoot):
     # The specifiers printed by `stack resolve` must be re-readable as stack
     # tokens: resolving the classified output reproduces the same packages.
-    classified = Resolver(config_tree).classify(["package:rdkit", "chem", "@standard"])
+    classified = Resolver(config_tree).classify(["package:rdkit", "chem", "@standard"]).entries
     assert classified == ["package:rdkit", "profile:chem", "bundle:standard"]
     rs = Resolver(config_tree).resolve(classified)
     assert rs.profiles == ["chem", "ds", "utils"]
@@ -73,7 +73,7 @@ def test_bundle_cycle_is_safe(config_tree: ConfigRoot):
 
 
 def test_classify_labels_without_expanding(config_tree: ConfigRoot):
-    out = Resolver(config_tree).classify(["standard", "ds", "numpy"])
+    out = Resolver(config_tree).classify(["standard", "ds", "numpy"]).entries
     # standard is a bundle (NOT expanded), ds a profile, numpy a literal package.
     assert out == ["bundle:standard", "profile:ds", "package:numpy"]
 
@@ -81,14 +81,14 @@ def test_classify_labels_without_expanding(config_tree: ConfigRoot):
 def test_classify_honors_explicit_prefixes(config_tree: ConfigRoot):
     out = Resolver(config_tree).classify(
         ["@standard", "bundle:qsar", "profile:chem", "pkg:ds"]
-    )
+    ).entries
     # @ and bundle: -> bundle:; profile: passthrough; pkg: -> package: even though
     # a profile named "ds" exists.
     assert out == ["bundle:standard", "bundle:qsar", "profile:chem", "package:ds"]
 
 
 def test_classify_dedups_preserving_order(config_tree: ConfigRoot):
-    out = Resolver(config_tree).classify(["ds", "ds", "@standard", "standard"])
+    out = Resolver(config_tree).classify(["ds", "ds", "@standard", "standard"]).entries
     assert out == ["profile:ds", "bundle:standard"]
 
 
@@ -107,3 +107,80 @@ def test_resolve_packages_dedups_across_profiles_and_inline(config_tree: ConfigR
 def test_resolve_packages_missing_profile_raises(config_tree: ConfigRoot):
     with pytest.raises(ResolutionError):
         Resolver(config_tree).resolve_packages(["profile:ghost"])
+
+
+def test_resolve_warns_on_near_miss(config_tree: ConfigRoot):
+    # "standrd" is one edit from the "standard" bundle.
+    rs = Resolver(config_tree).resolve(["standrd"])
+    assert rs.inline == ["standrd"]
+    assert rs.warnings == [
+        "'standrd' resolved to a literal package; did you mean 'standard'? "
+        "(use pkg:standrd to silence)"
+    ]
+
+
+def test_resolve_no_warning_for_ordinary_package(config_tree: ConfigRoot):
+    rs = Resolver(config_tree).resolve(["numpy"])
+    assert rs.inline == ["numpy"]
+    assert rs.warnings == []
+
+
+def test_resolve_warns_on_profile_shadowing_bundle(config_tree: ConfigRoot):
+    # Create a bundle named like the existing "ds" profile.
+    config_tree.bundle_path("ds").write_text("includes:\n  - rich\n")
+    rs = Resolver(config_tree).resolve(["ds"])
+    assert rs.profiles == ["ds"]
+    assert rs.warnings == [
+        "'ds' matches both a profile and a bundle; using the profile "
+        "(use @ds for the bundle)"
+    ]
+
+
+def test_strict_rejects_bare_literal(config_tree: ConfigRoot):
+    with pytest.raises(ResolutionError) as excinfo:
+        Resolver(config_tree, strict=True).resolve(["numpy"])
+    assert "Unqualified token 'numpy'" in str(excinfo.value)
+
+
+def test_strict_exempts_qualified_and_non_name_tokens(config_tree: ConfigRoot):
+    rs = Resolver(config_tree, strict=True).resolve(
+        ["pkg:numpy", "package:pandas", "numpy>=2", "-e /path/pkg",
+         "/path/pkg.tar.gz", "ds"]
+    )
+    assert rs.profiles == ["ds"]
+    assert rs.inline == ["numpy", "pandas", "numpy>=2", "-e /path/pkg",
+                         "/path/pkg.tar.gz"]
+    assert rs.warnings == []
+
+
+def test_strict_applies_inside_bundles(config_tree: ConfigRoot):
+    config_tree.bundle_path("typo").write_text("includes:\n  - numpyy\n")
+    with pytest.raises(ResolutionError):
+        Resolver(config_tree, strict=True).resolve(["@typo"])
+
+
+def test_classify_returns_entries_and_warnings(config_tree: ConfigRoot):
+    result = Resolver(config_tree).classify(["standrd", "ds"])
+    assert result.entries == ["package:standrd", "profile:ds"]
+    assert result.warnings == [
+        "'standrd' resolved to a literal package; did you mean 'standard'? "
+        "(use pkg:standrd to silence)"
+    ]
+
+
+def test_classify_strict_rejects_bare_literal(config_tree: ConfigRoot):
+    with pytest.raises(ResolutionError):
+        Resolver(config_tree, strict=True).classify(["numpyy"])
+
+
+def test_warnings_are_deduplicated(config_tree: ConfigRoot):
+    rs = Resolver(config_tree).resolve(["standrd", "standrd"])
+    assert len(rs.warnings) == 1
+
+
+def test_flatten_matches_resolve_packages(config_tree: ConfigRoot):
+    resolver = Resolver(config_tree)
+    stack = resolver.resolve(["standard", "umap-learn"])
+    assert resolver.flatten(stack) == resolver.resolve_packages(
+        ["standard", "umap-learn"]
+    )

@@ -59,7 +59,22 @@ class ResolvedStack(BaseModel):
 
     Profiles are recorded by name and expanded inline at render time; ``inline``
     holds literal packages, editable installs, and local archive paths.
+    ``warnings`` carries non-fatal resolution advisories (near-miss typos,
+    profile/bundle shadowing) for the CLI edge to print.
     """
 
     profiles: list[str] = Field(default_factory=list)
     inline: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ClassifiedTokens(BaseModel):
+    """The result of classifying stack tokens without expansion.
+
+    :param entries: Full specifiers (e.g. ``["bundle:standard", "package:x"]``).
+    :param warnings: Non-fatal resolution advisories, as in
+        :class:`ResolvedStack`.
+    """
+
+    entries: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)

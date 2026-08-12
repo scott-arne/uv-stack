@@ -21,50 +21,69 @@ skipped, so mutually-referential bundles cannot recurse forever.
 
 from __future__ import annotations
 
+import difflib
+import re
 from collections.abc import Iterable
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ResolutionError
-from uv_stack.models import ResolvedStack
+from uv_stack.models import ClassifiedTokens, ResolvedStack
+
+#: Tokens that look like a plain profile/bundle/package name. Anything with a
+#: version specifier, path separator, extras bracket, or flag is clearly a
+#: requirement, so strict mode and near-miss checks leave it alone.
+_PLAIN_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class Resolver:
     """Turns stack tokens into a :class:`ResolvedStack`.
 
     :param config: The configuration root used to look up profiles and bundles.
+    :param strict: When true, an unqualified plain-name token that falls
+        through to a literal package raises :class:`ResolutionError` instead of
+        resolving silently.
     """
 
-    def __init__(self, config: ConfigRoot) -> None:
+    def __init__(self, config: ConfigRoot, *, strict: bool = False) -> None:
         self._config = config
+        self._strict = strict
 
     def resolve(self, tokens: Iterable[str]) -> ResolvedStack:
         """Resolve ``tokens`` into profiles and inline requirements.
 
         :param tokens: Stack tokens (from a ``stack.txt``, a bundle, or the CLI).
-        :returns: The resolved, de-duplicated stack.
+        :returns: The resolved, de-duplicated stack (with any warnings).
         :raises ResolutionError: For an explicitly-qualified profile or bundle
-            that does not exist.
+            that does not exist, or a bare literal fallthrough in strict mode.
         """
         self._profiles: list[str] = []
         self._inline: list[str] = []
+        self._warnings: list[str] = []
         self._seen_profiles: set[str] = set()
         self._seen_inline: set[str] = set()
         self._seen_bundles: set[str] = set()
         for token in tokens:
             self._resolve_token(token)
-        return ResolvedStack(profiles=self._profiles, inline=self._inline)
+        return ResolvedStack(
+            profiles=self._profiles,
+            inline=self._inline,
+            warnings=list(dict.fromkeys(self._warnings)),
+        )
 
-    def classify(self, tokens: Iterable[str]) -> list[str]:
+    def classify(self, tokens: Iterable[str]) -> ClassifiedTokens:
         """Classify each token without expanding bundles or profiles.
 
         Each token is labeled by what it *is* — ``bundle:<name>``,
         ``profile:<name>``, or ``package:<spec>`` — using the same precedence as
-        :meth:`resolve` but with no recursion. The result is de-duplicated with
-        first occurrence winning.
+        :meth:`resolve` but with no recursion. Entries are de-duplicated with
+        first occurrence winning; the same strict/warning rules as
+        :meth:`resolve` apply to bare tokens.
 
         :param tokens: Stack tokens to classify.
-        :returns: Full specifiers (e.g. ``["bundle:standard", "package:numpy"]``).
+        :returns: The classified entries plus any warnings.
+        :raises ResolutionError: For a bare literal fallthrough in strict mode.
         """
+        self._warnings = []
         classified: list[str] = []
         seen: set[str] = set()
         for token in tokens:
@@ -72,22 +91,19 @@ class Resolver:
             if spec is not None and spec not in seen:
                 seen.add(spec)
                 classified.append(spec)
-        return classified
+        return ClassifiedTokens(
+            entries=classified, warnings=list(dict.fromkeys(self._warnings))
+        )
 
-    def resolve_packages(self, tokens: Iterable[str]) -> list[str]:
-        """Fully resolve ``tokens`` to a flat, de-duplicated package list.
+    def flatten(self, stack: ResolvedStack) -> list[str]:
+        """Flatten an already-resolved stack to a de-duplicated package list.
 
-        Bundles and profiles are expanded to the packages they contain, so the
-        result is a raw requirements list with no ``-r`` references or kind
-        prefixes (compatible with a ``requirements.txt``). Profile packages come
-        first in resolution order, followed by inline requirements.
+        Profile packages come first in resolution order, then inline
+        requirements — the same shape :meth:`resolve_packages` returns.
 
-        :param tokens: Stack tokens to resolve.
+        :param stack: A stack previously returned by :meth:`resolve`.
         :returns: Package specifiers in order, de-duplicated.
-        :raises ResolutionError: For an explicitly-qualified profile or bundle
-            that does not exist.
         """
-        stack = self.resolve(tokens)
         packages: list[str] = []
         seen: set[str] = set()
         for name in stack.profiles:
@@ -100,6 +116,47 @@ class Resolver:
                 seen.add(req)
                 packages.append(req)
         return packages
+
+    def resolve_packages(self, tokens: Iterable[str]) -> list[str]:
+        """Fully resolve ``tokens`` to a flat, de-duplicated package list.
+
+        :param tokens: Stack tokens to resolve.
+        :returns: Package specifiers in order, de-duplicated.
+        :raises ResolutionError: For an explicitly-qualified profile or bundle
+            that does not exist.
+        """
+        return self.flatten(self.resolve(tokens))
+
+    # -- shared checks -----------------------------------------------------
+
+    def _check_bare_literal(self, token: str) -> None:
+        """Apply strict/near-miss rules to a bare token that became a literal."""
+        if not _PLAIN_NAME_RE.match(token):
+            return
+        if self._strict:
+            raise ResolutionError(
+                f"Unqualified token '{token}' resolved to a literal package.",
+                hint=(
+                    f"Use pkg:{token} for a literal package, or fix the "
+                    "profile/bundle name."
+                ),
+            )
+        known = sorted(
+            set(self._config.list_profiles()) | set(self._config.list_bundles())
+        )
+        matches = difflib.get_close_matches(token, known, n=1, cutoff=0.8)
+        if matches:
+            self._warnings.append(
+                f"'{token}' resolved to a literal package; did you mean "
+                f"'{matches[0]}'? (use pkg:{token} to silence)"
+            )
+
+    def _warn_shadow(self, token: str) -> None:
+        if self._config.bundle_exists(token):
+            self._warnings.append(
+                f"'{token}' matches both a profile and a bundle; using the "
+                f"profile (use @{token} for the bundle)"
+            )
 
     def _classify_token(self, token: str) -> str | None:
         token = token.strip()
@@ -116,9 +173,11 @@ class Resolver:
         if token.startswith("pkg:"):
             return f"package:{token[len('pkg:') :]}"
         if self._config.profile_exists(token):
+            self._warn_shadow(token)
             return f"profile:{token}"
         if self._config.bundle_exists(token):
             return f"bundle:{token}"
+        self._check_bare_literal(token)
         return f"package:{token}"
 
     def _resolve_token(self, token: str) -> None:
@@ -137,10 +196,12 @@ class Resolver:
         elif token.startswith("pkg:"):
             self._add_inline(token[len("pkg:") :])
         elif self._config.profile_exists(token):
+            self._warn_shadow(token)
             self._add_profile(token, explicit=False)
         elif self._config.bundle_exists(token):
             self._resolve_bundle(token, explicit=False)
         else:
+            self._check_bare_literal(token)
             self._add_inline(token)
 
     def _add_profile(self, name: str, *, explicit: bool) -> None:

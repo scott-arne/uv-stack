@@ -28,6 +28,6 @@ def resolve(config: ConfigRoot, tokens: tuple[str, ...], full: bool) -> None:
     if full:
         lines = resolver.resolve_packages(list(tokens))
     else:
-        lines = resolver.classify(list(tokens))
+        lines = resolver.classify(list(tokens)).entries
     for line in lines:
         echo(line)
