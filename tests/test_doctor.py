@@ -145,3 +145,48 @@ def test_repair_writes_default_python_txt(config_tree: ConfigRoot):
     config_tree.env_python_path("main").unlink()
     repair(config_tree, diagnose(config_tree))
     assert config_tree.env_python_path("main").read_text() == "3.12\n"
+
+
+def test_repair_skips_stale_legacy_conversion(config_tree: ConfigRoot):
+    """Stale conversion: legacy .in deleted after diagnose() → skip, no .yaml created."""
+    legacy = config_tree.profiles_dir / "ephemeral.in"
+    legacy.write_text("numpy\n")
+    findings = diagnose(config_tree)
+    # Delete the source after diagnosis.
+    legacy.unlink()
+    actions = repair(config_tree, findings)
+    skipped = [a for a in actions if a.finding.kind == "legacy-profile"]
+    assert skipped and not skipped[0].applied
+    assert "no longer exists" in skipped[0].reason
+    assert not (config_tree.profiles_dir / "ephemeral.yaml").exists()
+
+
+def test_repair_skips_python_txt_created_between_diagnose_and_repair(config_tree: ConfigRoot):
+    """python.txt created between diagnose and repair → skipped, user content preserved."""
+    config_tree.env_python_path("main").unlink()
+    findings = diagnose(config_tree)
+    # User creates python.txt with their own content after diagnosis.
+    config_tree.env_python_path("main").write_text("3.11\n")
+    actions = repair(config_tree, findings)
+    skipped = [a for a in actions if a.finding.kind == "missing-python-txt"]
+    assert skipped and not skipped[0].applied
+    assert "python.txt already exists" in skipped[0].reason
+    assert config_tree.env_python_path("main").read_text() == "3.11\n"
+
+
+def test_repair_skips_profiles_txt_rename_when_stack_txt_appears_after_diagnose(
+    config_tree: ConfigRoot,
+):
+    """profiles.txt rename when stack.txt appears after diagnose → skipped, both intact."""
+    env_dir = config_tree.env_dir("racy")
+    env_dir.mkdir(parents=True)
+    (env_dir / "profiles.txt").write_text("@standard\n")
+    findings = diagnose(config_tree)
+    # User creates stack.txt after diagnosis.
+    (env_dir / "stack.txt").write_text("@stable\n")
+    actions = repair(config_tree, findings)
+    skipped = [a for a in actions if a.finding.kind == "legacy-profiles-txt"]
+    assert skipped and not skipped[0].applied
+    assert "stack.txt already exists" in skipped[0].reason
+    assert (env_dir / "profiles.txt").exists()
+    assert (env_dir / "stack.txt").read_text() == "@stable\n"

@@ -8,13 +8,14 @@ envs missing their source files.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
 from uv_stack.config import ConfigRoot
-from uv_stack.fsutil import atomic_write
+from uv_stack.fsutil import atomic_write_new
 from uv_stack.parse import read_clean_lines
 
 _KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib"}
@@ -166,6 +167,15 @@ class RepairAction:
     reason: str | None = None
 
 
+def _move_no_replace(src: Path, dst: Path) -> None:
+    """Move ``src`` to ``dst``, refusing to replace an existing ``dst``.
+
+    :raises FileExistsError: If ``dst`` already exists at publication time.
+    """
+    os.link(src, dst)
+    src.unlink()
+
+
 def _fix_mkdir(config: ConfigRoot, finding: Finding) -> RepairAction:
     assert finding.path is not None
     finding.path.mkdir(parents=True, exist_ok=True)
@@ -175,13 +185,35 @@ def _fix_mkdir(config: ConfigRoot, finding: Finding) -> RepairAction:
 def _fix_rename(config: ConfigRoot, finding: Finding) -> RepairAction:
     assert finding.path is not None and finding.dest is not None
     description = f"move {finding.path} to {finding.dest}"
+    # Revalidate source exists.
+    if not finding.path.exists():
+        return RepairAction(
+            finding, description, applied=False,
+            reason=f"{finding.path.name} no longer exists",
+        )
     if finding.dest.exists():
         return RepairAction(
             finding, description, applied=False,
             reason=f"{finding.dest.name} already exists",
         )
     finding.dest.parent.mkdir(parents=True, exist_ok=True)
-    finding.path.rename(finding.dest)
+    # For files: use no-replace move; for directories: rename (which already
+    # refuses to replace a non-empty target on POSIX).
+    if finding.path.is_file():
+        try:
+            _move_no_replace(finding.path, finding.dest)
+        except FileExistsError:
+            return RepairAction(
+                finding, description, applied=False,
+                reason=f"{finding.dest.name} already exists",
+            )
+    else:
+        try:
+            finding.path.rename(finding.dest)
+        except OSError as error:
+            return RepairAction(
+                finding, description, applied=False, reason=str(error)
+            )
     return RepairAction(
         finding, f"moved {finding.path} to {finding.dest}", applied=True
     )
@@ -189,15 +221,26 @@ def _fix_rename(config: ConfigRoot, finding: Finding) -> RepairAction:
 
 def _fix_python_txt(config: ConfigRoot, finding: Finding) -> RepairAction:
     assert finding.path is not None
-    atomic_write(finding.path, "3.12\n")
-    return RepairAction(
-        finding, f"wrote {finding.path} with default 3.12", applied=True
-    )
+    description = f"write {finding.path} with default 3.12"
+    try:
+        atomic_write_new(finding.path, "3.12\n")
+    except FileExistsError:
+        return RepairAction(
+            finding, description, applied=False,
+            reason="python.txt already exists",
+        )
+    return RepairAction(finding, f"wrote {finding.path} with default 3.12", applied=True)
 
 
 def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
     assert finding.path is not None and finding.dest is not None
     description = f"convert {finding.path} to {finding.dest}"
+    # Revalidate the source first.
+    if not finding.path.is_file():
+        return RepairAction(
+            finding, description, applied=False,
+            reason=f"{finding.path.name} no longer exists",
+        )
     if finding.dest.exists():
         return RepairAction(
             finding, description, applied=False,
@@ -205,20 +248,37 @@ def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
         )
     # Path.rename would silently replace an existing backup on POSIX; a
     # repair pass must never destroy user content, so skip instead.
-    if finding.path.with_name(finding.path.name + ".bak").exists():
+    backup = finding.path.with_name(finding.path.name + ".bak")
+    if backup.exists():
         return RepairAction(
             finding, description, applied=False,
             reason=f"{finding.path.name}.bak already exists",
         )
     includes = read_clean_lines(finding.path)
-    atomic_write(
-        finding.dest,
-        yaml.safe_dump(
-            {"includes": includes}, sort_keys=False, default_flow_style=False
-        ),
-    )
-    backup = finding.path.with_name(finding.path.name + ".bak")
-    finding.path.rename(backup)
+    # Publish the YAML with atomic_write_new.
+    try:
+        atomic_write_new(
+            finding.dest,
+            yaml.safe_dump(
+                {"includes": includes}, sort_keys=False, default_flow_style=False
+            ),
+        )
+    except FileExistsError:
+        return RepairAction(
+            finding, description, applied=False,
+            reason=f"{finding.dest.name} already exists",
+        )
+    # Move the source to backup with no-replace semantics.
+    try:
+        _move_no_replace(finding.path, backup)
+    except FileExistsError:
+        # Backup appeared after our check: remove the just-published YAML to
+        # avoid a half-converted state.
+        finding.dest.unlink()
+        return RepairAction(
+            finding, description, applied=False,
+            reason=f"{finding.path.name}.bak already exists",
+        )
     return RepairAction(
         finding,
         f"converted {finding.path.name} to {finding.dest.name} "
