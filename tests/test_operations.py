@@ -317,3 +317,48 @@ def test_init_project_existing_pyproject_with_force_skips_init(
     argv = [" ".join(c.args) for c in rec.commands]
     assert not any("uv init" in a for a in argv)
     assert any("uv add --no-sync" in a for a in argv)
+
+
+def test_upgrade_result_carries_warnings(config_tree: ConfigRoot):
+    config_tree.env_stack_path("main").write_text("standrd\n")
+    rec = RecordingRunner(responder=_existing_env_responder)
+    result = upgrade_env(config_tree, rec, "main", UpgradeOptions())
+    assert result.warnings and "did you mean 'standard'" in result.warnings[0]
+
+
+def test_upgrade_strict_fails_on_bare_literal(config_tree: ConfigRoot):
+    from uv_stack.errors import ResolutionError
+
+    config_tree.env_stack_path("main").write_text("numpyy\n")
+    rec = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ResolutionError):
+        upgrade_env(config_tree, rec, "main", UpgradeOptions(strict=True))
+    # Strict failure happens at resolution, before any command runs.
+    assert rec.commands == []
+
+
+def test_init_project_returns_warnings(config_tree: ConfigRoot, tmp_path, monkeypatch):
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_warn"
+    project_dir.mkdir()
+    rec = RecordingRunner()
+    warnings = init_project(
+        config_tree, rec, ["standrd"], ProjectOptions(python="3.12"),
+        cwd=project_dir,
+    )
+    assert warnings and "did you mean 'standard'" in warnings[0]
+
+
+def test_init_project_strict_fails_fast(config_tree: ConfigRoot, tmp_path, monkeypatch):
+    from uv_stack.errors import ResolutionError
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_strict"
+    project_dir.mkdir()
+    rec = RecordingRunner()
+    with pytest.raises(ResolutionError):
+        init_project(
+            config_tree, rec, ["numpyy"],
+            ProjectOptions(python="3.12", strict=True), cwd=project_dir,
+        )
+    assert not (project_dir / "pyproject.toml").exists()

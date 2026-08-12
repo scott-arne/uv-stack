@@ -40,6 +40,7 @@ class UpgradeOptions:
     :param dry_run: Render generated files and return the plan without executing.
     :param upgrade_packages: Upgrade only these packages (disables full upgrade).
     :param no_upgrade: Recompile without forcing any upgrade.
+    :param strict: Fail when a bare token falls through to a literal package.
     """
 
     create: bool = False
@@ -47,6 +48,7 @@ class UpgradeOptions:
     dry_run: bool = False
     upgrade_packages: list[str] = field(default_factory=list)
     no_upgrade: bool = False
+    strict: bool = False
 
 
 @dataclass
@@ -55,10 +57,12 @@ class UpgradeResult:
 
     :param env_name: The environment that was upgraded.
     :param planned: The commands that would run (populated for dry runs).
+    :param warnings: Non-fatal resolution advisories for the CLI to print.
     """
 
     env_name: str
     planned: list[Command] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 def _should_upgrade_all(options: UpgradeOptions) -> bool:
@@ -83,7 +87,7 @@ def upgrade_env(
     :raises ToolError: If a uv/micromamba command fails.
     """
     env = config.load_env(env_name)
-    stack = Resolver(config).resolve(env.stack)
+    stack = Resolver(config, strict=options.strict).resolve(env.stack)
 
     atomic_write(
         config.env_requirements_in(env_name),
@@ -116,7 +120,7 @@ def upgrade_env(
         )
         planned.append(uv_pip_sync(_DRY_RUN_PYTHON, lock))
         planned.append(uv_pip_check(_DRY_RUN_PYTHON))
-        return UpgradeResult(env_name=env_name, planned=planned)
+        return UpgradeResult(env_name=env_name, planned=planned, warnings=stack.warnings)
 
     ensure_env(
         config, runner, env_name, create=options.create, recreate=options.recreate
@@ -155,4 +159,4 @@ def upgrade_env(
     runner.run(uv_pip_sync(python, lock))
     runner.run(uv_pip_check(python))
 
-    return UpgradeResult(env_name=env_name)
+    return UpgradeResult(env_name=env_name, warnings=stack.warnings)

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import rich_click as click
 
-from uv_stack.cli._render import console
+from uv_stack.cli._render import console, render_warnings
 from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
 from uv_stack.operations.project import ProjectOptions, init_project
@@ -43,6 +43,11 @@ def create_env(config: ConfigRoot, name: str, recreate: bool) -> None:
 @click.option("--name", "name", default=None, help="Project name for uv init.")
 @click.option("--no-sync", is_flag=True, help="Add dependencies but do not sync.")
 @click.option("--force", is_flag=True, help="Add to an existing pyproject.toml.")
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Fail if an unqualified token falls through to a literal package.",
+)
 @click.pass_obj
 def create_project(
     config: ConfigRoot,
@@ -51,8 +56,12 @@ def create_project(
     name: str | None,
     no_sync: bool,
     force: bool,
+    strict: bool,
 ) -> None:
     """Create a uv project from the resolved stack TOKENS."""
-    options = ProjectOptions(python=python, name=name, no_sync=no_sync, force=force)
-    init_project(config, SubprocessRunner(), list(tokens), options, cwd=Path.cwd())
+    options = ProjectOptions(python=python, name=name, no_sync=no_sync, force=force, strict=strict)
+    warnings = init_project(
+        config, SubprocessRunner(), list(tokens), options, cwd=Path.cwd()
+    )
+    render_warnings(warnings)
     console.print("[green]Project initialized.[/green]")

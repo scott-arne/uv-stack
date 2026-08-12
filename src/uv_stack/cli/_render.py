@@ -25,6 +25,19 @@ def render_error(error: UvStackError) -> None:
     error_console.print(Panel(body, title="uv-stack error", border_style="red"))
 
 
+def render_warnings(warnings: Iterable[str], *, styled: bool = True) -> None:
+    """Print resolution warnings, one per line, on stderr.
+
+    :param styled: Rich yellow markup when true; plain text when false
+        (JSON output modes must keep stderr unstyled).
+    """
+    for warning in warnings:
+        if styled:
+            error_console.print(f"[yellow]warning:[/yellow] {warning}")
+        else:
+            click.echo(f"warning: {warning}", err=True)
+
+
 def render_table(
     title: str,
     columns: Iterable[tuple[str, Literal["default", "left", "center", "right", "full"]]],

@@ -18,6 +18,14 @@ def _row_cells(output: str, name: str) -> list[str]:
     return [cell.strip() for cell in line.strip().strip("│").split("│")]
 
 
+def _combined_output(result) -> str:
+    """stdout plus stderr, tolerant of click versions that separate them."""
+    try:
+        return result.output + result.stderr
+    except (ValueError, AttributeError):
+        return result.output
+
+
 def _seeded_root(tmp_path: Path) -> Path:
     """A config root with the profiles and bundles the CLI tests reference.
 
@@ -401,6 +409,34 @@ def test_resolve_full_expands_to_flat_packages(tmp_path: Path):
     # standard -> ds (numpy, pandas), chem (rdkit), utils (rich); no prefixes.
     lines = result.output.split()
     assert lines == ["numpy", "pandas", "rdkit", "rich"]
+
+
+def test_resolve_prints_near_miss_warning(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "resolve", "standrd"])
+    assert result.exit_code == 0
+    assert "package:standrd" in result.output
+    assert "did you mean 'standard'" in _combined_output(result)
+
+
+def test_resolve_strict_fails_on_bare_literal(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "resolve", "--strict", "numpyy"]
+    )
+    assert result.exit_code == 1
+
+
+def test_resolve_full_strict_and_warnings(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "resolve", "--full", "standrd"]
+    )
+    assert result.exit_code == 0
+    assert "did you mean 'standard'" in _combined_output(result)
 
 
 def test_doctor_clean(tmp_path: Path):

@@ -41,12 +41,14 @@ class ProjectOptions:
     :param name: Optional project name passed to ``uv init``.
     :param no_sync: Add dependencies but skip ``uv sync``.
     :param force: Allow adding to an existing ``pyproject.toml``.
+    :param strict: Fail when a bare token falls through to a literal package.
     """
 
     python: str | None = None
     name: str | None = None
     no_sync: bool = False
     force: bool = False
+    strict: bool = False
 
 
 def init_project(
@@ -56,7 +58,7 @@ def init_project(
     options: ProjectOptions,
     *,
     cwd: Path,
-) -> None:
+) -> list[str]:
     """Initialize a uv project in ``cwd`` from resolved stack ``tokens``.
 
     :param config: Configuration root.
@@ -64,6 +66,7 @@ def init_project(
     :param tokens: Stack tokens (profiles, bundles, packages).
     :param options: Project options.
     :param cwd: Directory in which to create the project.
+    :returns: Non-fatal resolution warnings for the CLI to print.
     :raises ConfigError: If a ``pyproject.toml`` exists and ``force`` is False.
     """
     pyproject = cwd / "pyproject.toml"
@@ -77,7 +80,7 @@ def init_project(
     # scaffolding runs, and so both uv init and uv sync receive the same value.
     python = resolve_project_python(config, runner, options.python)
 
-    stack = Resolver(config).resolve(tokens)
+    stack = Resolver(config, strict=options.strict).resolve(tokens)
     flat = render_requirements_flat(stack, config)
 
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-stack.", suffix=".txt")
@@ -94,6 +97,8 @@ def init_project(
     finally:
         if tmp_req.exists():
             tmp_req.unlink()
+
+    return stack.warnings
 
 
 def select_project_python(config: ConfigRoot, flag: str | None) -> str:

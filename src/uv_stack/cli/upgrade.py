@@ -6,7 +6,7 @@ import sys
 
 import rich_click as click
 
-from uv_stack.cli._render import console, echo, render_error
+from uv_stack.cli._render import console, echo, render_error, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ToolError, UvStackError
 from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
@@ -44,6 +44,7 @@ def _run_upgrade(
             if stop_on_error:
                 break
             continue
+        render_warnings(result.warnings)
         if options.dry_run:
             echo("Planned commands:")
             for command in result.planned:
@@ -114,6 +115,11 @@ def _print_summary(names: list[str], failures: list[tuple[str, UvStackError]]) -
     multiple=True,
     help="Upgrade only this package (repeatable).",
 )
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Fail if an unqualified token falls through to a literal package.",
+)
 @click.pass_obj
 def upgrade(
     config: ConfigRoot,
@@ -124,6 +130,7 @@ def upgrade(
     stop_on_error: bool,
     no_upgrade: bool,
     upgrade_packages: tuple[str, ...],
+    strict: bool,
 ) -> None:
     """Render, compile, sync, and check one or more existing environments.
 
@@ -141,6 +148,7 @@ def upgrade(
         dry_run=dry_run,
         no_upgrade=no_upgrade,
         upgrade_packages=list(upgrade_packages),
+        strict=strict,
     )
     targets = list(names)
     if not targets:
