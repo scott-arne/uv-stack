@@ -770,16 +770,59 @@ def test_doctor_fix_repairs_and_reports(tmp_path: Path):
     assert cfg.profile_exists("old")
 
 
+def test_doctor_fix_iterates_to_fixed_point(tmp_path: Path):
+    # A completely absent root: fixing the root reveals the missing subdirectories,
+    # which are then fixed in subsequent rounds.
+    root = tmp_path / "python-envs"
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "doctor", "--fix"])
+    assert result.exit_code == 0
+    # Expect multiple "fixed:" lines (one for root, one for each subdir).
+    assert result.output.count("fixed:") >= 4  # root + profiles + bundles + envs
+    assert "No problems detected." in result.output
+    # Verify all directories were created.
+    from uv_stack.config import ConfigRoot
+    cfg = ConfigRoot(root)
+    assert cfg.root.is_dir()
+    assert cfg.profiles_dir.is_dir()
+    assert cfg.bundles_dir.is_dir()
+    assert cfg.envs_dir.is_dir()
+
+
+def test_doctor_fix_json_iterates_to_fixed_point(tmp_path: Path):
+    import json
+    # Same as above, but verify JSON output structure.
+    root = tmp_path / "python-envs"
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "doctor", "--fix", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    # Expect multiple actions: missing-root, then missing-dir for each subdir.
+    action_kinds = [a["kind"] for a in payload["actions"]]
+    assert "missing-root" in action_kinds
+    assert action_kinds.count("missing-dir") >= 3  # profiles, bundles, envs
+    assert all(a["applied"] for a in payload["actions"])
+    assert payload["remaining"] == []
+
+
 def test_doctor_fix_exit_1_when_errors_remain(tmp_path: Path, monkeypatch):
+    import json
     # A root whose parent is read-only cannot be created; simulate by pointing
     # repair at a path under a file (mkdir raises, so the error finding stays).
     blocker = tmp_path / "blocker"
     blocker.write_text("i am a file\n")
     runner = CliRunner()
     result = runner.invoke(
-        cli, ["--root", str(blocker / "python-envs"), "doctor", "--fix"]
+        cli, ["--root", str(blocker / "python-envs"), "doctor", "--fix", "--json"]
     )
     assert result.exit_code == 1
+    # Exit 1 must be from graceful failure reporting, not an unhandled OSError.
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    payload = json.loads(result.output)
+    # Verify the repair handler converted the mkdir OSError into a skipped action.
+    assert payload["actions"][0]["applied"] is False
+    assert payload["actions"][0]["reason"]  # non-empty reason
+    assert payload["remaining"][0]["kind"] == "missing-root"
 
 
 def test_doctor_json_lists_findings(tmp_path: Path):

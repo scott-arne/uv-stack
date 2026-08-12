@@ -9,7 +9,7 @@ import rich_click as click
 
 from uv_stack.cli._render import console, echo
 from uv_stack.config import ConfigRoot
-from uv_stack.operations.doctor import Finding, diagnose, repair
+from uv_stack.operations.doctor import Finding, RepairAction, diagnose, repair
 
 
 def _finding_dict(finding: Finding) -> dict[str, str | None]:
@@ -46,8 +46,18 @@ def doctor(config_root: ConfigRoot, fix: bool, as_json: bool) -> None:
         _print_findings(findings)
         return
 
-    actions = repair(config_root, findings)
-    remaining = diagnose(config_root)
+    actions: list[RepairAction] = []
+    findings = diagnose(config_root)
+    # Repairing can reveal new fixable findings (creating the root exposes
+    # the missing subdirectories), so iterate to a fixed point. The bound
+    # only guards against a pathological repair that never converges.
+    for _ in range(10):
+        round_actions = repair(config_root, findings)
+        actions.extend(round_actions)
+        findings = diagnose(config_root)
+        if not findings or not any(action.applied for action in round_actions):
+            break
+    remaining = findings
     if as_json:
         payload = {
             "actions": [
