@@ -1124,3 +1124,43 @@ def test_show_bundle_json(tmp_path: Path):
         "tags": ["core"],
         "includes": ["ds", "chem", "utils"],
     }
+
+
+def test_list_env_empty_hint(tmp_path: Path):
+    root = _seeded_root(tmp_path)  # profiles/bundles but no envs
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "list", "env"])
+    assert result.exit_code == 0
+    assert "No environments yet" in result.output
+    assert "stack create env" in result.output
+
+
+def test_list_profile_empty_hint(tmp_path: Path):
+    root = tmp_path / "python-envs"
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    init_config_root(ConfigRoot(root))
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "list", "profile"])
+    assert result.exit_code == 0
+    assert "No profiles yet" in result.output
+
+
+def test_list_tag_filter_no_match_hint(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "list", "profile", "--tag", "nonexistent"]
+    )
+    assert result.exit_code == 0
+    assert "No profiles match tags: nonexistent." in result.output
+
+
+def test_list_env_empty_json_is_empty_list(tmp_path: Path):
+    import json
+
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "list", "env", "--json"])
+    assert json.loads(result.output) == []

@@ -6,7 +6,7 @@ import json
 
 import rich_click as click
 
-from uv_stack.cli._render import echo, render_table
+from uv_stack.cli._render import console, echo, render_table
 from uv_stack.config import ConfigRoot
 
 _KINDS = ("env", "profile", "bundle")
@@ -14,6 +14,22 @@ _KINDS = ("env", "profile", "bundle")
 #: Max rendered width of the Description and Tags cells before truncation.
 _DESCRIPTION_WIDTH = 40
 _TAGS_WIDTH = 20
+
+_EMPTY_HINTS = {
+    "env": "No environments yet — run 'stack init' or 'stack create env NAME TOKENS...'.",
+    "profile": "No profiles yet — run 'stack create profile NAME PACKAGE...'.",
+    "bundle": "No bundles yet — run 'stack create bundle NAME TOKEN...'.",
+}
+
+
+def _print_empty_hint(kind: str, wanted: set[str]) -> None:
+    """Print the empty-result hint for ``kind`` (tag-aware) instead of a table."""
+    if wanted:
+        console.print(
+            f"[dim]No {kind}s match tags: {', '.join(sorted(wanted))}.[/dim]"
+        )
+    else:
+        console.print(f"[dim]{_EMPTY_HINTS[kind]}[/dim]")
 
 
 def _truncate(text: str, width: int) -> str:
@@ -59,6 +75,9 @@ def list_resources(
         if as_json:
             echo(json.dumps(env_data, indent=2))
             return
+        if not env_data:
+            _print_empty_hint("env", wanted)
+            return
         render_table(
             "envs",
             [("Env", "left"), ("Python", "left"), ("Stack", "right")],
@@ -90,6 +109,9 @@ def list_resources(
             )
         if as_json:
             echo(json.dumps(profile_data, indent=2))
+            return
+        if not profile_data:
+            _print_empty_hint("profile", wanted)
             return
         render_table(
             "profiles",
@@ -127,6 +149,9 @@ def list_resources(
             )
         if as_json:
             echo(json.dumps(bundle_data, indent=2))
+            return
+        if not bundle_data:
+            _print_empty_hint("bundle", wanted)
             return
         render_table(
             "bundles",
