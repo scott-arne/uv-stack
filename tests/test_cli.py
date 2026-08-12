@@ -1164,3 +1164,62 @@ def test_list_env_empty_json_is_empty_list(tmp_path: Path):
     runner = CliRunner()
     result = runner.invoke(cli, ["--root", str(root), "list", "env", "--json"])
     assert json.loads(result.output) == []
+
+
+def test_init_yes_on_empty_root_seeds_and_builds(tmp_path: Path, monkeypatch):
+    root = tmp_path / "python-envs"
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda config, names, options, **kw: calls.append((names, options)),
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "init", "--yes"])
+    assert result.exit_code == 0
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    assert cfg.profile_exists("starter")
+    starter_text = cfg.profile_path("starter").read_text()
+    assert starter_text.startswith("# A profile is a reusable")
+    assert cfg.env_stack_path("main").read_text() == "starter\n"
+    assert cfg.env_python_path("main").read_text() == "3.12\n"
+    assert calls and calls[0][0] == ["main"] and calls[0][1].create is True
+    assert "micromamba activate main" in result.output
+
+
+def test_init_yes_is_idempotent(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)  # profiles and env 'main' already exist
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "init", "--yes"])
+    assert result.exit_code == 0
+    from uv_stack.config import ConfigRoot
+
+    # Nothing new was seeded: profiles existed, so no starter profile.
+    assert not ConfigRoot(root).profile_exists("starter")
+    assert "Config root:" in result.output
+
+
+def test_init_interactive_decline_build_prints_next_step(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "python-envs"
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    runner = CliRunner()
+    # Prompts: seed starter? y | create env? y | name [main] | tokens [starter]
+    # | python [3.12] | build now? n
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "init"],
+        input="y\ny\n\n\n\nn\n",
+    )
+    assert result.exit_code == 0
+    assert "Build it with: stack create env main" in result.output
+    assert "micromamba activate" not in result.output
