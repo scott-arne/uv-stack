@@ -55,7 +55,7 @@ click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.COMMAND_GROUPS = {
     "stack": [
         {"name": "Environments", "commands": ["upgrade", "create"]},
-        {"name": "Inspection", "commands": ["list", "show", "resolve"]},
+        {"name": "Inspection", "commands": ["list", "show", "resolve", "status"]},
         {"name": "Maintenance", "commands": ["doctor", "config"]},
     ]
 }
@@ -94,6 +94,7 @@ def _register() -> None:
         list_cmd,
         resolve,
         show,
+        status_cmd,
         upgrade,
     )
 
@@ -104,6 +105,7 @@ def _register() -> None:
     cli.add_command(resolve.resolve)
     cli.add_command(doctor.doctor)
     cli.add_command(config_cmd.config)
+    cli.add_command(status_cmd.status)
 
 
 _register()

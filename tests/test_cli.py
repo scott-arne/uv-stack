@@ -791,3 +791,57 @@ def test_show_env_interpreter_not_created(tmp_path: Path, monkeypatch):
     result = runner.invoke(cli, ["--root", str(root), "show", "env", "main"])
     assert result.exit_code == 0
     assert "Interpreter: not created (run 'stack create env main')" in result.output
+
+
+def test_status_table(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.status_cmd.SubprocessRunner", lambda: _FakeProbeRunner()
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "status"])
+    assert result.exit_code == 0
+    cells = _row_cells(result.output, "main")
+    assert cells[0] == "main"
+    assert cells[1] == "3.12"
+    assert cells[2] == "yes"          # Created
+    assert cells[3] == "no"           # Lock (never upgraded here)
+    assert cells[4] == "never built"  # State
+
+
+def test_status_config_error_row_prints_message(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    ConfigRoot(root).env_stack_path("main").unlink()
+    monkeypatch.setattr(
+        "uv_stack.cli.status_cmd.SubprocessRunner", lambda: _FakeProbeRunner()
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "status", "main"])
+    assert result.exit_code == 0
+    assert "config error" in result.output
+    assert "main: Missing stack file" in result.output
+
+
+def test_status_json(tmp_path: Path, monkeypatch):
+    import json
+
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.status_cmd.SubprocessRunner", lambda: _FakeProbeRunner()
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "status", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload == [
+        {
+            "name": "main",
+            "python": "3.12",
+            "created": True,
+            "lock": False,
+            "state": "never built",
+            "message": None,
+        }
+    ]
