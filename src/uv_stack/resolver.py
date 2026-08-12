@@ -123,7 +123,7 @@ class Resolver:
         :param tokens: Stack tokens to resolve.
         :returns: Package specifiers in order, de-duplicated.
         :raises ResolutionError: For an explicitly-qualified profile or bundle
-            that does not exist.
+            that does not exist, or a bare literal fallthrough in strict mode.
         """
         return self.flatten(self.resolve(tokens))
 

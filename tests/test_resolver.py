@@ -139,7 +139,9 @@ def test_resolve_warns_on_profile_shadowing_bundle(config_tree: ConfigRoot):
 def test_strict_rejects_bare_literal(config_tree: ConfigRoot):
     with pytest.raises(ResolutionError) as excinfo:
         Resolver(config_tree, strict=True).resolve(["numpy"])
-    assert "Unqualified token 'numpy'" in str(excinfo.value)
+    assert str(excinfo.value) == "Unqualified token 'numpy' resolved to a literal package."
+    hint = excinfo.value.hint
+    assert hint == "Use pkg:numpy for a literal package, or fix the profile/bundle name."
 
 
 def test_strict_exempts_qualified_and_non_name_tokens(config_tree: ConfigRoot):
@@ -155,8 +157,9 @@ def test_strict_exempts_qualified_and_non_name_tokens(config_tree: ConfigRoot):
 
 def test_strict_applies_inside_bundles(config_tree: ConfigRoot):
     config_tree.bundle_path("typo").write_text("includes:\n  - numpyy\n")
-    with pytest.raises(ResolutionError):
+    with pytest.raises(ResolutionError) as excinfo:
         Resolver(config_tree, strict=True).resolve(["@typo"])
+    assert "Unqualified token 'numpyy'" in str(excinfo.value)
 
 
 def test_classify_returns_entries_and_warnings(config_tree: ConfigRoot):
