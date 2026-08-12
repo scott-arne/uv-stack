@@ -652,3 +652,56 @@ def test_create_env_without_tokens_still_works(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     assert calls == [["main"]]
     assert "micromamba activate main" in result.output
+
+
+def test_create_env_strict_typo_exits_before_scaffolding(tmp_path: Path, monkeypatch):
+    """Strict failure pre-validates so stack.txt is never written."""
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade", lambda *a, **kw: None
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "fresh", "--strict", "numpyy"]
+    )
+    assert result.exit_code == 1
+    from uv_stack.config import ConfigRoot
+    # stack.txt must not exist; the pre-validation failed before any write.
+    assert not ConfigRoot(root).env_stack_path("fresh").exists()
+
+
+def test_create_env_missing_explicit_profile_exits_before_scaffolding(tmp_path: Path, monkeypatch):
+    """Missing explicit reference pre-validates so stack.txt is never written."""
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade", lambda *a, **kw: None
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "fresh", "profile:ghost"]
+    )
+    assert result.exit_code == 1
+    from uv_stack.config import ConfigRoot
+    assert not ConfigRoot(root).env_stack_path("fresh").exists()
+
+
+def test_create_env_python_empty_string_is_usage_error(tmp_path: Path):
+    """--python '' with tokens exits 2 (UsageError) before writing anything."""
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "fresh", "ds", "--python", ""]
+    )
+    assert result.exit_code == 2
+    from uv_stack.config import ConfigRoot
+    assert not ConfigRoot(root).env_stack_path("fresh").exists()
+
+
+def test_create_env_python_empty_string_without_tokens_is_usage_error(tmp_path: Path):
+    """--python '' without tokens also exits 2."""
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "fresh", "--python", ""]
+    )
+    assert result.exit_code == 2

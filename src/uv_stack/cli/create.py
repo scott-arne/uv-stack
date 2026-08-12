@@ -50,11 +50,16 @@ def create_env(
     With TOKENS, scaffold envs/NAME/stack.txt first (and python.txt when
     '--python' is given).
     """
-    if python and not tokens:
+    if python is not None and not tokens:
         raise click.UsageError(
             "--python requires TOKENS (it only applies when scaffolding a new env)."
         )
+    if python is not None and not python.strip():
+        raise click.UsageError("--python requires a non-empty version.")
     if tokens:
+        # Validate before anything durable is written: strict failures and
+        # missing explicit references must not leave a half-created env.
+        Resolver(config, strict=strict).resolve(list(tokens))
         for path in write_env_sources(config, name, list(tokens), python=python):
             echo(f"Wrote {path}")
     options = (
