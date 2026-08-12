@@ -117,3 +117,40 @@ def test_compute_status_named_missing_env_is_config_error(config_tree: ConfigRoo
         ["ghost"],
     )
     assert statuses[0].state == "config error"
+
+
+def test_status_local_requirements_change_makes_lock_stale(config_tree: ConfigRoot):
+    """Regression: edits to requirements.local.in must trigger lock stale."""
+    _built(config_tree)
+    local_req = config_tree.env_local_path("main")
+    local_req.parent.mkdir(parents=True, exist_ok=True)
+    local_req.write_text("httpx\n")
+    # Bump mtime explicitly to ensure it exceeds the lock's mtime.
+    future = config_tree.env_lock("main").stat().st_mtime + 100
+    os.utime(local_req, (future, future))
+    status = env_status(
+        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
+    )
+    assert status.state == "lock stale"
+
+
+def test_compute_status_empty_list_returns_empty(config_tree: ConfigRoot):
+    """Regression: empty list must return empty, not all envs."""
+    _built(config_tree)
+    rec = RecordingRunner(responder=_existing_env_responder)
+    statuses = compute_status(config_tree, rec, [])
+    assert statuses == []
+    assert len(rec.commands) == 0
+
+
+def test_status_not_created_early_return_when_requirements_missing(
+    config_tree: ConfigRoot,
+):
+    """Regression: 'not created' must win even when generated files missing."""
+    _built(config_tree)
+    config_tree.env_requirements_in("main").unlink()
+    status = env_status(
+        config_tree, RecordingRunner(responder=_missing_env_responder), "main"
+    )
+    assert status.state == "not created"
+    assert status.created is False

@@ -77,6 +77,25 @@ def env_status(config: ConfigRoot, runner: Runner, name: str) -> EnvStatus:
         )
 
     created = _probe_created(runner, name)
+
+    if created is False:
+        return EnvStatus(
+            name=name,
+            python=env.python,
+            created=created,
+            lock_present=lock_present,
+            state="not created",
+        )
+
+    if not lock_present:
+        return EnvStatus(
+            name=name,
+            python=env.python,
+            created=created,
+            lock_present=lock_present,
+            state="never built",
+        )
+
     req_path = config.env_requirements_in(name)
     yml_path = config.env_environment_yml(name)
     sources_changed = (
@@ -85,17 +104,16 @@ def env_status(config: ConfigRoot, runner: Runner, name: str) -> EnvStatus:
         or not yml_path.is_file()
         or yml_path.read_text() != expected_yml
     )
-    lock_stale = (
-        lock_present
-        and req_path.is_file()
-        and lock.stat().st_mtime < req_path.stat().st_mtime
-    )
 
-    if created is False:
-        state = "not created"
-    elif not lock_present:
-        state = "never built"
-    elif sources_changed:
+    # Compute lock-staleness reference as max mtime of requirements.in
+    # and requirements.local.in (when present).
+    local_req = config.env_local_path(name)
+    req_mtime = req_path.stat().st_mtime if req_path.is_file() else 0
+    local_mtime = local_req.stat().st_mtime if local_req.is_file() else 0
+    reference_mtime = max(req_mtime, local_mtime)
+    lock_stale = lock.stat().st_mtime < reference_mtime if reference_mtime > 0 else False
+
+    if sources_changed:
         state = "sources changed"
     elif lock_stale:
         state = "lock stale"
@@ -121,5 +139,5 @@ def compute_status(
     :param names: Environment names, or ``None`` for all.
     :returns: One :class:`EnvStatus` per environment, in input/discovery order.
     """
-    targets = names if names else config.list_envs()
+    targets = config.list_envs() if names is None else names
     return [env_status(config, runner, name) for name in targets]
