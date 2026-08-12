@@ -155,6 +155,13 @@ def test_strict_exempts_qualified_and_non_name_tokens(config_tree: ConfigRoot):
     assert rs.warnings == []
 
 
+def test_strict_exempts_flags_and_dot_paths(config_tree: ConfigRoot):
+    rs = Resolver(config_tree, strict=True).resolve([".", "..", "--pre"])
+    assert rs.profiles == []
+    assert rs.inline == [".", "..", "--pre"]
+    assert rs.warnings == []
+
+
 def test_strict_applies_inside_bundles(config_tree: ConfigRoot):
     config_tree.bundle_path("typo").write_text("includes:\n  - numpyy\n")
     with pytest.raises(ResolutionError) as excinfo:

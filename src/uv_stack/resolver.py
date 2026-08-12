@@ -31,8 +31,9 @@ from uv_stack.models import ClassifiedTokens, ResolvedStack
 
 #: Tokens that look like a plain profile/bundle/package name. Anything with a
 #: version specifier, path separator, extras bracket, or flag is clearly a
-#: requirement, so strict mode and near-miss checks leave it alone.
-_PLAIN_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+#: requirement, so strict mode and near-miss checks leave it alone. Leading '-'
+#: (flags) and leading '.' (dot paths) are excluded.
+_PLAIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class Resolver:
