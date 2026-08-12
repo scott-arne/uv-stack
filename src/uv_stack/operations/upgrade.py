@@ -21,7 +21,7 @@ from uv_stack.commands import (
     uv_pip_sync,
 )
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import EnvError
+from uv_stack.errors import EnvError, UvStackError
 from uv_stack.fsutil import atomic_write
 from uv_stack.operations.create import ensure_env
 from uv_stack.render import render_environment_yml, render_requirements_in
@@ -122,41 +122,45 @@ def upgrade_env(
         planned.append(uv_pip_check(_DRY_RUN_PYTHON))
         return UpgradeResult(env_name=env_name, planned=planned, warnings=stack.warnings)
 
-    ensure_env(
-        config, runner, env_name, create=options.create, recreate=options.recreate
-    )
-
-    python = runner.run(micromamba_python_path(env_name), capture=True).stdout.strip()
-    if not python:
-        raise EnvError(
-            f"Could not determine the Python interpreter for env '{env_name}'.",
-            hint="Verify the micromamba environment was created successfully.",
-        )
-
-    # Compile to a temp lock, then atomically replace, so a failed compile never
-    # corrupts an existing lockfile.
-    tmp_fd, tmp_name = tempfile.mkstemp(
-        dir=lock.parent, prefix=lock.name + ".", suffix=".tmp"
-    )
-    os.close(tmp_fd)
-    tmp_lock = Path(tmp_name)
     try:
-        runner.run(
-            uv_pip_compile(
-                python,
-                requirements_in,
-                tmp_lock,
-                upgrade=upgrade_all,
-                upgrade_packages=options.upgrade_packages,
-            )
+        ensure_env(
+            config, runner, env_name, create=options.create, recreate=options.recreate
         )
-        tmp_lock.replace(lock)
-    except BaseException:
-        if tmp_lock.exists():
-            tmp_lock.unlink()
-        raise
 
-    runner.run(uv_pip_sync(python, lock))
-    runner.run(uv_pip_check(python))
+        python = runner.run(micromamba_python_path(env_name), capture=True).stdout.strip()
+        if not python:
+            raise EnvError(
+                f"Could not determine the Python interpreter for env '{env_name}'.",
+                hint="Verify the micromamba environment was created successfully.",
+            )
+
+        # Compile to a temp lock, then atomically replace, so a failed compile never
+        # corrupts an existing lockfile.
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            dir=lock.parent, prefix=lock.name + ".", suffix=".tmp"
+        )
+        os.close(tmp_fd)
+        tmp_lock = Path(tmp_name)
+        try:
+            runner.run(
+                uv_pip_compile(
+                    python,
+                    requirements_in,
+                    tmp_lock,
+                    upgrade=upgrade_all,
+                    upgrade_packages=options.upgrade_packages,
+                )
+            )
+            tmp_lock.replace(lock)
+        except BaseException:
+            if tmp_lock.exists():
+                tmp_lock.unlink()
+            raise
+
+        runner.run(uv_pip_sync(python, lock))
+        runner.run(uv_pip_check(python))
+    except UvStackError as error:
+        error.resolution_warnings = stack.warnings
+        raise
 
     return UpgradeResult(env_name=env_name, warnings=stack.warnings)

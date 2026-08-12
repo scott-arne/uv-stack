@@ -362,3 +362,48 @@ def test_init_project_strict_fails_fast(config_tree: ConfigRoot, tmp_path, monke
             ProjectOptions(python="3.12", strict=True), cwd=project_dir,
         )
     assert not (project_dir / "pyproject.toml").exists()
+
+
+def test_init_project_strict_fails_before_env_probe(config_tree: ConfigRoot, tmp_path, monkeypatch):
+    from uv_stack.errors import ResolutionError
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_strict_probe"
+    project_dir.mkdir()
+    rec = RecordingRunner(responder=_missing_env_responder)
+    with pytest.raises(ResolutionError):
+        init_project(
+            config_tree, rec, ["numpyy"],
+            ProjectOptions(python="main", strict=True), cwd=project_dir,
+        )
+    # No commands should have run (not even the env probe).
+    assert rec.commands == []
+
+
+def test_upgrade_env_attaches_warnings_to_tool_error(config_tree: ConfigRoot):
+    from uv_stack.errors import ToolError
+
+    # Stack with a near-miss token that will generate a warning.
+    config_tree.env_stack_path("main").write_text("standrd\n")
+
+    def _compile_failure_responder(cmd: Command) -> CommandResult:
+        # The env-existence probe succeeds.
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n")
+        # The compile command fails.
+        if "compile" in cmd.args:
+            raise ToolError(
+                "uv pip compile failed.",
+                command=cmd.args,
+                returncode=1,
+                detail="ERROR: Could not find a version that satisfies the requirement",
+            )
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=_compile_failure_responder)
+    with pytest.raises(ToolError) as excinfo:
+        upgrade_env(config_tree, rec, "main", UpgradeOptions())
+
+    # The error should carry the resolution warning.
+    assert excinfo.value.resolution_warnings
+    assert "did you mean 'standard'" in excinfo.value.resolution_warnings[0]

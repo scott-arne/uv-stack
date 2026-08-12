@@ -76,12 +76,14 @@ def init_project(
             hint="Use --force to add to the existing project.",
         )
 
-    # Resolve the interpreter up front so a bad env name fails before any
-    # scaffolding runs, and so both uv init and uv sync receive the same value.
-    python = resolve_project_python(config, runner, options.python)
-
+    # Resolve the stack first so --strict token errors are not preceded by
+    # external command execution or an unrelated EnvError.
     stack = Resolver(config, strict=options.strict).resolve(tokens)
     flat = render_requirements_flat(stack, config)
+
+    # Resolve the interpreter so a bad env name fails before any scaffolding
+    # runs, and so both uv init and uv sync receive the same value.
+    python = resolve_project_python(config, runner, options.python)
 
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-stack.", suffix=".txt")
     tmp_req = Path(tmp_name)

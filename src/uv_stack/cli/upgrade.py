@@ -39,6 +39,7 @@ def _run_upgrade(
         try:
             result = upgrade_env(config, runner, name, options)
         except UvStackError as error:
+            render_warnings(error.resolution_warnings)
             render_error(error)
             failures.append((name, error))
             if stop_on_error:
@@ -51,6 +52,8 @@ def _run_upgrade(
                 echo("  " + " ".join(command.args))
 
     if options.dry_run:
+        if failures:
+            sys.exit(1)
         return
 
     _print_summary(names, failures)

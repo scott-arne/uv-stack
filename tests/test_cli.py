@@ -124,7 +124,8 @@ def test_upgrade_dry_run(tmp_path: Path):
 def test_upgrade_all_dry_run_targets_every_env(tmp_path: Path):
     root = _two_failing_envs_root(tmp_path)
     result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "--all", "--dry-run"])
-    assert result.exit_code == 0
+    # Both envs fail at resolution, so dry-run exits nonzero.
+    assert result.exit_code == 1
     assert "Upgrading alpha" in result.output
     assert "Upgrading beta" in result.output
 
@@ -177,6 +178,24 @@ def test_upgrade_stop_on_error_aborts_after_first(tmp_path: Path):
     assert result.exit_code == 1
     assert "Upgrading alpha" in result.output
     assert "Upgrading beta" not in result.output
+
+
+def test_upgrade_dry_run_strict_exits_nonzero_on_failure(tmp_path: Path):
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    root = tmp_path / "python-envs"
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    env_dir = cfg.env_dir("test")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    # "numpyy" is a near-miss typo that will fail strict mode.
+    (env_dir / "stack.txt").write_text("numpyy\n")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "upgrade", "--dry-run", "--strict", "test"]
+    )
+    assert result.exit_code == 1
 
 
 # ---------------------------------------------------------------------------

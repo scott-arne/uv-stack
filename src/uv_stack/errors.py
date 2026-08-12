@@ -13,12 +13,15 @@ class UvStackError(Exception):
 
     :param message: Human-readable description of what went wrong.
     :param hint: Optional remediation hint shown alongside the message.
+    :ivar resolution_warnings: Non-fatal resolver advisories attached when a
+        downstream step fails after resolution succeeded.
     """
 
     def __init__(self, message: str, hint: str | None = None) -> None:
         super().__init__(message)
         self.message = message
         self.hint = hint
+        self.resolution_warnings: list[str] = []
 
 
 class ConfigError(UvStackError):
