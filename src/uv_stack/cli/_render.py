@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
@@ -72,7 +73,8 @@ def echo(message: str) -> None:
 
 def print_activation_hint(name: str) -> None:
     """Print how to enter or use a freshly built environment."""
+    quoted = shlex.quote(name)
     echo("Activate it:")
-    echo(f"  micromamba activate {name}")
+    echo(f"  micromamba activate {quoted}")
     echo("Or run one-offs without activating:")
-    echo(f"  micromamba run -n {name} python")
+    echo(f"  micromamba run -n {quoted} python")

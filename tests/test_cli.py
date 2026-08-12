@@ -726,3 +726,26 @@ def test_create_env_rejects_malformed_profile_before_scaffolding(
     )
     assert result.exit_code == 1
     assert not cfg.env_stack_path("fresh").exists()
+
+
+# ---------------------------------------------------------------------------
+# activation hints
+# ---------------------------------------------------------------------------
+
+
+def test_activation_hint_shell_quotes_names(capsys):
+    from uv_stack.cli._render import print_activation_hint
+
+    print_activation_hint("safe; touch pwn")
+    out = capsys.readouterr().out
+    assert "micromamba activate 'safe; touch pwn'" in out
+    assert "-n 'safe; touch pwn'" in out
+
+
+def test_activation_hint_leaves_safe_names_unquoted(capsys):
+    from uv_stack.cli._render import print_activation_hint
+
+    print_activation_hint("main")
+    out = capsys.readouterr().out
+    assert "micromamba activate main" in out
+    assert "-n main" in out
