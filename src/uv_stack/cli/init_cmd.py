@@ -10,6 +10,7 @@ from uv_stack.config import ConfigRoot
 from uv_stack.operations.init import init_config_root
 from uv_stack.operations.scaffold import write_env_sources, write_starter_profile
 from uv_stack.operations.upgrade import UpgradeOptions
+from uv_stack.resolver import Resolver
 
 
 @click.command("init")
@@ -52,6 +53,11 @@ def init(config: ConfigRoot, yes: bool) -> None:
         if not tokens:
             echo("No tokens given — skipping environment creation.")
         else:
+            # Validate before anything durable is written, mirroring
+            # 'stack create env': bad tokens or malformed profiles must not
+            # leave a half-created env behind.
+            resolver = Resolver(config)
+            resolver.flatten(resolver.resolve(tokens))
             for path in write_env_sources(config, name, tokens, python=python):
                 echo(f"Wrote {path}")
             scaffolded_env = name

@@ -1223,3 +1223,23 @@ def test_init_interactive_decline_build_prints_next_step(
     assert result.exit_code == 0
     assert "Build it with: stack create env main" in result.output
     assert "micromamba activate" not in result.output
+
+
+def test_init_rejects_bad_tokens_before_writing(tmp_path: Path, monkeypatch):
+    root = tmp_path / "python-envs"
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    runner = CliRunner()
+    # Prompts: seed starter? y | create env? y | name [main] | tokens: profile:ghost
+    # | python [3.12] — command errors at pre-validation before writing.
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "init"],
+        input="y\ny\n\nprofile:ghost\n\n",
+    )
+    assert result.exit_code == 1
+    from uv_stack.config import ConfigRoot
+
+    assert not ConfigRoot(root).env_stack_path("main").exists()
