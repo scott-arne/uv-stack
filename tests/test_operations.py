@@ -41,6 +41,15 @@ def test_env_micromamba_exists_false(config_tree: ConfigRoot):
     assert env_micromamba_exists(config_tree, rec, "main") is False
 
 
+def test_env_interpreter_path_and_none(config_tree: ConfigRoot):
+    from uv_stack.operations.create import env_interpreter
+
+    ok = RecordingRunner(responder=_existing_env_responder)
+    assert env_interpreter(config_tree, ok, "main") == "/envs/main/bin/python"
+    missing = RecordingRunner(responder=_missing_env_responder)
+    assert env_interpreter(config_tree, missing, "main") is None
+
+
 def test_ensure_env_missing_without_create_raises(config_tree: ConfigRoot):
     rec = RecordingRunner(responder=_missing_env_responder)
     with pytest.raises(EnvError):

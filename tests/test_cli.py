@@ -749,3 +749,45 @@ def test_activation_hint_leaves_safe_names_unquoted(capsys):
     out = capsys.readouterr().out
     assert "micromamba activate main" in out
     assert "-n main" in out
+
+
+# ---------------------------------------------------------------------------
+# show env config and interpreter
+# ---------------------------------------------------------------------------
+
+
+class _FakeProbeRunner:
+    """Stands in for SubprocessRunner in probe-only CLI paths."""
+
+    def __init__(self, stdout: str = "/envs/main/bin/python\n", returncode: int = 0):
+        self._stdout = stdout
+        self._returncode = returncode
+
+    def run(self, command, *, capture=False, check=True):
+        from uv_stack.runner import CommandResult
+
+        return CommandResult(returncode=self._returncode, stdout=self._stdout)
+
+
+def test_show_env_prints_config_and_interpreter(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.show.SubprocessRunner", lambda: _FakeProbeRunner()
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "show", "env", "main"])
+    assert result.exit_code == 0
+    assert f"Config: {root}/envs/main" in result.output
+    assert "Interpreter: /envs/main/bin/python" in result.output
+
+
+def test_show_env_interpreter_not_created(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.show.SubprocessRunner",
+        lambda: _FakeProbeRunner(stdout="", returncode=1),
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "show", "env", "main"])
+    assert result.exit_code == 0
+    assert "Interpreter: not created (run 'stack create env main')" in result.output

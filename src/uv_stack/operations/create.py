@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from uv_stack.commands import micromamba_create, micromamba_python_path, micromamba_remove
+from uv_stack.commands import (
+    micromamba_create,
+    micromamba_python_path,
+    micromamba_remove,
+)
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import EnvError
 from uv_stack.runner import Runner
@@ -59,3 +63,28 @@ def ensure_env(
             f"Micromamba environment '{env_name}' does not exist.",
             hint=f"Run 'stack create env {env_name}' to create it.",
         )
+
+
+def env_interpreter(
+    config: ConfigRoot, runner: Runner, env_name: str
+) -> str | None:
+    """Return the env's interpreter path, or None when it cannot be probed.
+
+    ``None`` covers both a missing environment and an unrunnable probe (e.g.
+    micromamba is not installed) — callers that need to distinguish should use
+    a richer probe.
+
+    :param config: Configuration root (unused beyond signature symmetry).
+    :param runner: Command runner.
+    :param env_name: Environment name.
+    """
+    try:
+        result = runner.run(
+            micromamba_python_path(env_name), capture=True, check=False
+        )
+    except OSError:
+        return None
+    path = result.stdout.strip()
+    if result.returncode != 0 or not path:
+        return None
+    return path

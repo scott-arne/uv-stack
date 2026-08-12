@@ -6,10 +6,17 @@ import rich_click as click
 
 from uv_stack.cli._render import echo
 from uv_stack.config import ConfigRoot
+from uv_stack.operations.create import env_interpreter
 from uv_stack.render import render_requirements_in
 from uv_stack.resolver import Resolver
+from uv_stack.runner import SubprocessRunner
 
 _KINDS = ("env", "profile", "bundle")
+
+
+def _probe_interpreter(config: ConfigRoot, name: str) -> str | None:
+    """Probe the env's interpreter via the operations layer."""
+    return env_interpreter(config, SubprocessRunner(), name)
 
 
 @click.command("show")
@@ -32,6 +39,12 @@ def _show_env(config: ConfigRoot, name: str) -> None:
     cfg = config.load_env(name)
     echo(f"Environment: {cfg.name}")
     echo(f"Python: {cfg.python}")
+    echo(f"Config: {config.env_dir(name)}")
+    interpreter = _probe_interpreter(config, name)
+    if interpreter:
+        echo(f"Interpreter: {interpreter}")
+    else:
+        echo(f"Interpreter: not created (run 'stack create env {name}')")
     echo("Stack:")
     for token in cfg.stack:
         echo(f"  {token}")
