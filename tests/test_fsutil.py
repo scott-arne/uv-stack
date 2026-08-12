@@ -4,7 +4,9 @@ import os
 import stat
 from pathlib import Path
 
-from uv_stack.fsutil import atomic_write
+import pytest
+
+from uv_stack.fsutil import atomic_write, atomic_write_new
 
 
 def test_atomic_write_creates_file(tmp_path: Path):
@@ -38,3 +40,31 @@ def _current_umask() -> int:
     umask = os.umask(0)
     os.umask(umask)
     return umask
+
+
+def test_atomic_write_new_creates_file(tmp_path: Path):
+    target = tmp_path / "new.txt"
+    atomic_write_new(target, "content\n")
+    assert target.read_text() == "content\n"
+
+
+def test_atomic_write_new_refuses_existing_file(tmp_path: Path):
+    target = tmp_path / "existing.txt"
+    target.write_text("original")
+    with pytest.raises(FileExistsError):
+        atomic_write_new(target, "replacement")
+    assert target.read_text() == "original"
+
+
+def test_atomic_write_new_leaves_no_temp_files_on_success(tmp_path: Path):
+    target = tmp_path / "clean.txt"
+    atomic_write_new(target, "x")
+    assert [p.name for p in tmp_path.iterdir()] == ["clean.txt"]
+
+
+def test_atomic_write_new_leaves_no_temp_files_on_failure(tmp_path: Path):
+    target = tmp_path / "clash.txt"
+    target.write_text("first")
+    with pytest.raises(FileExistsError):
+        atomic_write_new(target, "second")
+    assert [p.name for p in tmp_path.iterdir()] == ["clash.txt"]

@@ -33,3 +33,28 @@ def atomic_write(path: Path, text: str) -> None:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
         raise
+
+
+def atomic_write_new(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically, failing if ``path`` exists.
+
+    The content is written to a temporary file and published with
+    :func:`os.link`, which refuses to replace an existing target — the
+    no-clobber counterpart of :func:`atomic_write` for user-authored files.
+
+    :param path: Destination file (must not exist).
+    :param text: Content to write.
+    :raises FileExistsError: If ``path`` already exists at publication time.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp_name, 0o666 & ~umask)
+        os.link(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)

@@ -13,9 +13,38 @@ import yaml
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
-from uv_stack.fsutil import atomic_write
+from uv_stack.fsutil import atomic_write_new
 
 _OVERWRITE_HINT = "Edit the file directly or choose another name."
+
+
+def _validate_name(kind: str, name: str) -> None:
+    """Validate a profile/bundle/environment name.
+
+    :param kind: Type of entity ("profile", "bundle", "environment").
+    :param name: Name to validate.
+    :raises ConfigError: If name is invalid.
+    """
+    if not name or name == "." or name == ".." or "/" in name or "\\" in name:
+        raise ConfigError(
+            f"Invalid {kind} name: '{name}'",
+            hint="Names are file stems: no path separators or dot segments.",
+        )
+
+
+def _publish(path: Path, text: str, message: str, hint: str) -> None:
+    """Atomically publish ``text`` to ``path``, mapping FileExistsError.
+
+    :param path: Destination file.
+    :param text: Content to write.
+    :param message: ConfigError message if the target exists.
+    :param hint: ConfigError hint if the target exists.
+    :raises ConfigError: If the target already exists.
+    """
+    try:
+        atomic_write_new(path, text)
+    except FileExistsError as exc:
+        raise ConfigError(message, hint=hint) from exc
 
 
 def _render_yaml(
@@ -49,12 +78,18 @@ def write_profile(
     :returns: The path written.
     :raises ConfigError: If the profile already exists.
     """
+    _validate_name("profile", name)
     path = config.profile_path(name)
     if path.exists():
         raise ConfigError(
             f"Profile '{name}' already exists: {path}", hint=_OVERWRITE_HINT
         )
-    atomic_write(path, _render_yaml(description, list(tags or []), packages))
+    _publish(
+        path,
+        _render_yaml(description, list(tags or []), packages),
+        f"Profile '{name}' already exists: {path}",
+        _OVERWRITE_HINT,
+    )
     return path
 
 
@@ -76,12 +111,18 @@ def write_bundle(
     :returns: The path written.
     :raises ConfigError: If the bundle already exists.
     """
+    _validate_name("bundle", name)
     path = config.bundle_path(name)
     if path.exists():
         raise ConfigError(
             f"Bundle '{name}' already exists: {path}", hint=_OVERWRITE_HINT
         )
-    atomic_write(path, _render_yaml(description, list(tags or []), tokens))
+    _publish(
+        path,
+        _render_yaml(description, list(tags or []), tokens),
+        f"Bundle '{name}' already exists: {path}",
+        _OVERWRITE_HINT,
+    )
     return path
 
 
@@ -99,21 +140,49 @@ def write_env_sources(
     :param tokens: Stack tokens, one per ``stack.txt`` line.
     :param python: When given, also write ``python.txt`` with this version.
     :returns: The paths written, in order.
-    :raises ConfigError: If the environment already has a ``stack.txt``.
+    :raises ConfigError: If the environment already has a ``stack.txt`` or ``python.txt``.
     """
+    _validate_name("environment", name)
     stack_path = config.env_stack_path(name)
+    python_path = config.env_python_path(name) if python else None
+
+    # Preflight all targets before writing anything.
     if stack_path.exists():
         raise ConfigError(
             f"Environment '{name}' already has a stack.txt.",
             hint="Edit it directly, or omit TOKENS to rebuild the env.",
         )
+    if python_path and python_path.exists():
+        raise ConfigError(
+            f"Environment '{name}' already has a python.txt.",
+            hint="Edit it directly, or omit --python.",
+        )
+
     written: list[Path] = []
-    atomic_write(stack_path, "\n".join(tokens) + "\n")
+    stack_text = "\n".join(tokens) + "\n"
+    _publish(
+        stack_path,
+        stack_text,
+        f"Environment '{name}' already has a stack.txt.",
+        "Edit it directly, or omit TOKENS to rebuild the env.",
+    )
     written.append(stack_path)
+
     if python:
-        python_path = config.env_python_path(name)
-        atomic_write(python_path, python + "\n")
-        written.append(python_path)
+        try:
+            _publish(
+                python_path,  # type: ignore[arg-type]
+                python + "\n",
+                f"Environment '{name}' already has a python.txt.",
+                "Edit it directly, or omit --python.",
+            )
+            written.append(python_path)  # type: ignore[arg-type]
+        except BaseException:
+            # Rollback stack.txt if python.txt publication fails.
+            if stack_path.exists():
+                stack_path.unlink()
+            raise
+
     return written
 
 
@@ -139,5 +208,10 @@ def write_starter_profile(config: ConfigRoot) -> Path:
         raise ConfigError(
             f"Profile 'starter' already exists: {path}", hint=_OVERWRITE_HINT
         )
-    atomic_write(path, _STARTER_PROFILE)
+    _publish(
+        path,
+        _STARTER_PROFILE,
+        f"Profile 'starter' already exists: {path}",
+        _OVERWRITE_HINT,
+    )
     return path

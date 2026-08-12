@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
 from uv_stack.config import ConfigRoot
@@ -89,3 +91,89 @@ def test_write_starter_profile(config_tree: ConfigRoot):
     assert config_tree.load_profile("starter").includes == ["rich"]
     with pytest.raises(ConfigError):
         write_starter_profile(config_tree)
+
+
+def test_write_profile_rejects_path_traversal(config_tree: ConfigRoot):
+    with pytest.raises(ConfigError) as excinfo:
+        write_profile(config_tree, "a/b", ["pkg"])
+    assert "Invalid profile name: 'a/b'" in str(excinfo.value)
+
+
+def test_write_profile_rejects_dot_segments(config_tree: ConfigRoot):
+    with pytest.raises(ConfigError) as excinfo:
+        write_profile(config_tree, "..", ["pkg"])
+    assert "Invalid profile name: '..'" in str(excinfo.value)
+
+
+def test_write_profile_rejects_empty_name(config_tree: ConfigRoot):
+    with pytest.raises(ConfigError) as excinfo:
+        write_profile(config_tree, "", ["pkg"])
+    assert "Invalid profile name: ''" in str(excinfo.value)
+
+
+def test_write_bundle_rejects_path_traversal(config_tree: ConfigRoot):
+    with pytest.raises(ConfigError) as excinfo:
+        write_bundle(config_tree, "a/b", ["ds"])
+    assert "Invalid bundle name: 'a/b'" in str(excinfo.value)
+
+
+def test_write_bundle_rejects_dot_segments(config_tree: ConfigRoot):
+    with pytest.raises(ConfigError) as excinfo:
+        write_bundle(config_tree, "..", ["ds"])
+    assert "Invalid bundle name: '..'" in str(excinfo.value)
+
+
+def test_write_bundle_rejects_empty_name(config_tree: ConfigRoot):
+    with pytest.raises(ConfigError) as excinfo:
+        write_bundle(config_tree, "", ["ds"])
+    assert "Invalid bundle name: ''" in str(excinfo.value)
+
+
+def test_write_env_sources_rejects_path_traversal(config_tree: ConfigRoot):
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_sources(config_tree, "a/b", ["ds"])
+    assert "Invalid environment name: 'a/b'" in str(excinfo.value)
+
+
+def test_write_env_sources_rejects_dot_segments(config_tree: ConfigRoot):
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_sources(config_tree, "..", ["ds"])
+    assert "Invalid environment name: '..'" in str(excinfo.value)
+
+
+def test_write_env_sources_rejects_empty_name(config_tree: ConfigRoot):
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_sources(config_tree, "", ["ds"])
+    assert "Invalid environment name: ''" in str(excinfo.value)
+
+
+def test_write_env_sources_refuses_existing_python_txt(config_tree: ConfigRoot):
+    config_tree.env_python_path("orphan").parent.mkdir(parents=True, exist_ok=True)
+    config_tree.env_python_path("orphan").write_text("3.12\n")
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_sources(config_tree, "orphan", ["ds"], python="3.13")
+    assert "already has a python.txt" in str(excinfo.value)
+    assert not config_tree.env_stack_path("orphan").exists()
+
+
+def test_write_env_sources_rollback_on_python_failure(config_tree: ConfigRoot):
+    from uv_stack.fsutil import atomic_write_new
+
+    call_count = 0
+
+    def failing_write_new(path, text):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call (stack.txt) succeeds.
+            atomic_write_new(path, text)
+        else:
+            # Second call (python.txt) fails.
+            raise RuntimeError("Simulated failure")
+
+    with mock.patch("uv_stack.operations.scaffold.atomic_write_new", side_effect=failing_write_new):
+        with pytest.raises(RuntimeError):
+            write_env_sources(config_tree, "rollback-test", ["ds"], python="3.13")
+
+    assert not config_tree.env_stack_path("rollback-test").exists()
+    assert not config_tree.env_python_path("rollback-test").exists()
