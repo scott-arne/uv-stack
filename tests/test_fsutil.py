@@ -214,6 +214,10 @@ def test_atomic_write_new_falls_back_without_hardlinks(tmp_path, monkeypatch):
         target.stat().st_dev,
         target.stat().st_ino,
     )
+    # Returned stat reflects post-write content: size matches actual file.
+    expected_size = len(b"content\n")
+    assert stat_result.st_size == expected_size
+    assert stat_result.st_size == target.stat().st_size
     # Exclusive-create semantics preserved on the fallback path.
     with pytest.raises(FileExistsError):
         atomic_write_new(target, "other\n")

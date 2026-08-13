@@ -118,7 +118,9 @@ def atomic_write_new(path: Path, text: str) -> os.stat_result:
                 with os.fdopen(fallback_fd, "w") as handle:
                     handle.write(text)
                     handle.flush()
-                return created
+                    # Return post-write stat: same inode as 'created', but with
+                    # correct size/mtime after content flush.
+                    return os.fstat(handle.fileno())
             except BaseException:
                 # Never leave a partial no-clobber target behind: withdraw
                 # only while the path still names the inode we created.
