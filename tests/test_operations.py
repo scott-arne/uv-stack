@@ -584,3 +584,24 @@ def test_init_project_force_keeps_previously_owned_packages(
     assert tracking is not None
     # Previously uv-stack-owned names remain in the ledger.
     assert "numpy" in tracking.applied and "pandas" in tracking.applied
+
+
+def test_init_project_force_ownership_is_name_normalized(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    config_tree.profile_path("norm").write_text("includes:\n  - my.pkg\n")
+    project_dir = tmp_path / "proj_norm"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = ["My_Pkg"]\n'
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["norm"],
+        ProjectOptions(python="3.12", force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.applied == []  # my.pkg == My_Pkg canonically → user-owned

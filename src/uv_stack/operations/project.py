@@ -23,7 +23,7 @@ from uv_stack.operations.pyproject import (
     remove_tracking,
     write_tracking,
 )
-from uv_stack.parse import requirement_name
+from uv_stack.parse import canonical_name, requirement_name
 from uv_stack.render import render_requirements_flat
 from uv_stack.resolver import Resolver
 from uv_stack.runner import Command, Runner
@@ -99,8 +99,11 @@ def init_project(
         for entry in existing_tracking.applied:
             owned_name = requirement_name(entry)
             if owned_name:
-                previously_owned.add(owned_name)
-    user_owned = read_project_dependency_names(pyproject) - previously_owned
+                previously_owned.add(canonical_name(owned_name))
+    user_owned = (
+        {canonical_name(n) for n in read_project_dependency_names(pyproject)}
+        - previously_owned
+    )
 
     # Resolve the stack first so --strict token errors are not preceded by
     # external command execution or an unrelated EnvError.
@@ -132,7 +135,7 @@ def init_project(
             applied = [
                 package
                 for package in packages
-                if (requirement_name(package) or "") not in user_owned
+                if canonical_name(requirement_name(package) or "") not in user_owned
             ]
             write_tracking(
                 pyproject,

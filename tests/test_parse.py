@@ -51,3 +51,13 @@ def test_first_clean_line_returns_first_value(tmp_path: Path):
 )
 def test_requirement_name(requirement, expected):
     assert requirement_name(requirement) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, canonical",
+    [("My_Pkg", "my-pkg"), ("my.pkg", "my-pkg"), ("a--b__c..d", "a-b-c-d"), ("plain", "plain")],
+)
+def test_canonical_name(raw, canonical):
+    from uv_stack.parse import canonical_name
+
+    assert canonical_name(raw) == canonical

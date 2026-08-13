@@ -6,6 +6,7 @@ surrounding whitespace is insignificant, and blank lines are ignored.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -45,6 +46,17 @@ def first_clean_line(path: Path, default: str = "") -> str:
 
 #: Characters that terminate a distribution name inside a requirement string.
 _NAME_TERMINATORS = "[<>=!~;@ \t"
+
+_CANONICAL_RE = re.compile(r"[-_.]+")
+
+
+def canonical_name(name: str) -> str:
+    """PEP 503-normalized distribution name (lowercase, runs of ``-_.`` → ``-``).
+
+    :param name: A distribution name as written.
+    :returns: The canonical form used for ownership comparisons.
+    """
+    return _CANONICAL_RE.sub("-", name).lower()
 
 
 def requirement_name(requirement: str) -> str | None:
