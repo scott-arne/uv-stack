@@ -177,11 +177,11 @@ def create_profile(
     tags: tuple[str, ...],
 ) -> None:
     """Create profiles/NAME.yaml from PACKAGES."""
-    write_profile(
+    path = write_profile(
         config, name, list(packages), description=description, tags=list(tags)
     )
-    echo(f"Wrote profile {name}")
-    render_warnings(_bare_usage_warnings(config, name, "profile"), styled=False)
+    echo(f"Wrote {path}")
+    render_warnings(_bare_usage_warnings(config, name, "profile"))
 
 
 @create.command("bundle")
@@ -210,8 +210,8 @@ def create_bundle(
     # ...while existence of explicit references (recursively) is validated
     # without re-judging existing bundles' own contents.
     Resolver(config).resolve(list(tokens))
-    write_bundle(
+    path = write_bundle(
         config, name, list(tokens), description=description, tags=list(tags)
     )
-    echo(f"Wrote bundle {name}")
-    render_warnings(_bare_usage_warnings(config, name, "bundle", exclude_bundle=name), styled=False)
+    echo(f"Wrote {path}")
+    render_warnings(_bare_usage_warnings(config, name, "bundle", exclude_bundle=name))

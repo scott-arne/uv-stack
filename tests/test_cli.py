@@ -1532,10 +1532,10 @@ def test_create_profile_warns_on_bare_token_retarget(tmp_path: Path):
     )
     assert result.exit_code == 0
     combined = _combined_output(result)
-    assert (
-        "'httpx' is used as a bare token in envs/main/stack.txt; it now "
-        "resolves to this profile (use pkg:httpx there for the literal package)"
-    ) in combined
+    # Styled rendering may wrap; assert distinctive unwrappable fragments.
+    assert "'httpx' is used as a bare token" in combined
+    assert "envs/main/stack.txt" in combined
+    assert "use pkg:httpx there" in combined
 
 
 def test_create_bundle_warns_on_bare_token_in_other_bundle(tmp_path: Path):
@@ -1550,18 +1550,23 @@ def test_create_bundle_warns_on_bare_token_in_other_bundle(tmp_path: Path):
     )
     assert result.exit_code == 0
     combined = _combined_output(result)
-    assert "bundles/web.yaml" in combined and "resolves to this bundle" in combined
+    # Styled rendering may wrap; assert distinctive unwrappable fragments.
+    assert "'httpx' is used as a bare token" in combined
+    assert "bundles/web.yaml" in combined
+    assert "this bundle" in combined
 
 
 def test_create_bundle_does_not_warn_about_itself(tmp_path: Path):
     root = _seeded_root(tmp_path)
     runner = CliRunner()
-    # 'daily' includes bare 'ds'; creating bundle 'daily' must not scan itself.
+    # Create bundle 'daily' that includes its own name as a bare token.
+    # Self-exclusion logic must prevent a warning about bundles/daily.yaml.
     result = runner.invoke(
-        cli, ["--root", str(root), "create", "bundle", "daily", "ds"]
+        cli, ["--root", str(root), "create", "bundle", "daily", "pkg:numpy", "daily"]
     )
     assert result.exit_code == 0
-    assert "bundles/daily.yaml" not in _combined_output(result)
+    combined = _combined_output(result)
+    assert "used as a bare token in bundles/daily.yaml" not in combined
 
 
 def test_create_profile_no_warning_without_bare_usage(tmp_path: Path):
