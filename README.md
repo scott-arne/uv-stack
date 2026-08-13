@@ -376,5 +376,7 @@ All state lives under one directory, resolved in this order:
   `.bundle` files, or a `profiles.txt`, `stack doctor` will point at each
   leftover and tell you what to rename or convert.
 - **The `[tool.uv-stack]` table is tool-owned.** `stack refresh` rewrites
-  it wholesale; comments inside that one table are not preserved
-  (everything else in `pyproject.toml` is untouched, byte for byte).
+  it wholesale; comments inside that one table are not preserved. uv-stack's
+  own writes leave every other byte of `pyproject.toml` alone — but refresh
+  also runs `uv remove`/`uv add` under the hood, which edit
+  `[project.dependencies]` just as they would if you ran them yourself.
