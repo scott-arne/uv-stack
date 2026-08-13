@@ -33,18 +33,21 @@ def _bare_usage_warnings(
         "this {kind} (use pkg:{name} there for the literal package)"
     )
     for env in config.list_envs():
-        if name in read_clean_lines(config.env_stack_path(env)):
-            warnings.append(
-                template.format(name=name, location=f"envs/{env}/stack.txt", kind=kind)
-            )
+        try:
+            if name in read_clean_lines(config.env_stack_path(env)):
+                warnings.append(
+                    template.format(name=name, location=f"envs/{env}/stack.txt", kind=kind)
+                )
+        except (OSError, UnicodeDecodeError):
+            continue  # unreadable envs are doctor's job, not create's
     for bundle_name in config.list_bundles():
         if bundle_name == exclude_bundle:
             continue
         try:
             includes = config.load_bundle(bundle_name).includes
-        except UvStackError:
-            continue  # malformed bundles are doctor's job, not create's
-        if name in includes:
+        except (UvStackError, OSError, UnicodeDecodeError):
+            continue  # malformed/unreadable bundles are doctor's job, not create's
+        if any(token.strip() == name for token in includes):
             warnings.append(
                 template.format(
                     name=name, location=f"bundles/{bundle_name}.yaml", kind=kind

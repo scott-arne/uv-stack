@@ -1577,3 +1577,37 @@ def test_create_profile_no_warning_without_bare_usage(tmp_path: Path):
     )
     assert result.exit_code == 0
     assert "used as a bare token" not in _combined_output(result)
+
+
+def test_create_profile_warns_on_whitespace_padded_bundle_token(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    cfg.bundle_path("web").write_text('includes:\n  - " httpx "\n')
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "profile", "httpx", "httpx>=0.27"]
+    )
+    assert result.exit_code == 0
+    combined = _combined_output(result)
+    assert "'httpx' is used as a bare token" in combined
+    assert "bundles/web.yaml" in combined
+
+
+def test_create_profile_tolerates_corrupt_env(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    env_dir = cfg.env_dir("broken")
+    env_dir.mkdir(parents=True)
+    (env_dir / "stack.txt").write_bytes(b"\xff\xfe")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "profile", "something", "pkg:something"]
+    )
+    assert result.exit_code == 0
+    combined = _combined_output(result)
+    assert "Wrote" in combined
+    assert "Traceback" not in combined
