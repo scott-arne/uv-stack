@@ -122,3 +122,10 @@ def test_uv_sync_with_python():
     assert uv_sync("/envs/main/bin/python").args == [
         "uv", "sync", "--python", "/envs/main/bin/python",
     ]
+
+
+def test_uv_remove_always_no_sync():
+    from uv_stack.commands import uv_remove
+
+    cmd = uv_remove(["numpy", "pandas"])
+    assert cmd.args == ["uv", "remove", "--no-sync", "numpy", "pandas"]

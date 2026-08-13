@@ -136,3 +136,16 @@ def uv_sync(python: str | None = None) -> Command:
     if python:
         args += ["--python", python]
     return Command(args)
+
+
+def uv_remove(packages: Sequence[str]) -> Command:
+    """Build ``uv remove --no-sync`` for dropped stack-managed packages.
+
+    ``--no-sync`` is always included: bare ``uv remove`` syncs by default,
+    which would break ``stack refresh --no-sync``; refresh performs exactly
+    one final ``uv sync`` itself.
+
+    :param packages: Distribution names to remove.
+    :returns: The ``uv remove`` command.
+    """
+    return Command(["uv", "remove", "--no-sync", *packages])

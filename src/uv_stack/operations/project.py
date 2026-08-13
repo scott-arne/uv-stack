@@ -10,10 +10,10 @@ from __future__ import annotations
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from uv_stack.commands import micromamba_python_path, uv_add, uv_init, uv_sync
+from uv_stack.commands import micromamba_python_path, uv_add, uv_init, uv_remove, uv_sync
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError
 from uv_stack.models import ProjectTracking
@@ -224,3 +224,150 @@ def resolve_project_python(
 
 def _with_cwd(command: Command, cwd: Path) -> Command:
     return Command(command.args, cwd=cwd)
+
+
+#: Placeholder interpreter in dry-run plans when probing would be required.
+_DRY_RUN_PROJECT_PYTHON = "<project-python>"
+
+
+@dataclass
+class RefreshOptions:
+    """Options for ``stack refresh``.
+
+    :param python: Override (and record) the project interpreter spec.
+    :param strict: Fail when a bare token falls through to a literal package.
+    :param no_sync: Apply dependency changes but skip the final ``uv sync``.
+    :param dry_run: Plan only — no probe, no uv execution, no writes.
+    """
+
+    python: str | None = None
+    strict: bool = False
+    no_sync: bool = False
+    dry_run: bool = False
+
+
+@dataclass
+class RefreshResult:
+    """Outcome of :func:`refresh_project`.
+
+    :param warnings: Non-fatal resolution advisories.
+    :param added: Flattened requirements new to the applied ledger.
+    :param removed: Dropped ledger entries eligible for removal.
+    :param skipped_removals: Dropped entries never auto-removed (editables,
+        paths, direct references).
+    :param planned: The command plan (dry runs only).
+    """
+
+    warnings: list[str] = field(default_factory=list)
+    added: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+    skipped_removals: list[str] = field(default_factory=list)
+    planned: list[Command] = field(default_factory=list)
+
+
+def refresh_project(
+    config: ConfigRoot,
+    runner: Runner,
+    options: RefreshOptions,
+    *,
+    cwd: Path,
+) -> RefreshResult:
+    """Re-resolve a tracked project against the current profiles/bundles.
+
+    Refresh is deliberately NOT transactional: uv mutates ``pyproject.toml``
+    before the ledger write, so a mid-sequence failure leaves the old ledger
+    in place and the next refresh converges — removals are presence-filtered
+    and re-adding the full flat list is idempotent.
+
+    :param config: Configuration root.
+    :param runner: Command runner.
+    :param options: Refresh options.
+    :param cwd: The project directory.
+    :returns: A :class:`RefreshResult`.
+    :raises ConfigError: When no tracked project is present, the schema is
+        newer than this uv-stack, or the pyproject cannot be written.
+    """
+    pyproject = cwd / "pyproject.toml"
+    tracking = read_tracking(pyproject)
+    if tracking is None:
+        raise ConfigError(
+            "No tracked project here.",
+            hint=(
+                "Run inside a project created by 'stack create project' (or "
+                "add a [tool.uv-stack] table with 'stack' tokens)."
+            ),
+        )
+    if tracking.version > 1:
+        raise ConfigError(
+            f"This project was tracked by a newer uv-stack (schema {tracking.version}).",
+            hint="Upgrade uv-stack, or edit [tool.uv-stack] manually.",
+        )
+
+    resolver = Resolver(config, strict=options.strict)
+    stack = resolver.resolve(tracking.stack)
+    new_flat = resolver.flatten(stack)
+    flat_text = render_requirements_flat(stack, config)
+
+    dropped = [entry for entry in tracking.applied if entry not in new_flat]
+    removable_names: list[str] = []
+    skipped: list[str] = []
+    for entry in dropped:
+        name = requirement_name(entry)
+        if name is None:
+            skipped.append(entry)
+        else:
+            removable_names.append(name)
+    current_names = {canonical_name(n) for n in read_project_dependency_names(pyproject)}
+    names = [n for n in dict.fromkeys(removable_names) if canonical_name(n) in current_names]
+    added = [entry for entry in new_flat if entry not in tracking.applied]
+    removed = [entry for entry in dropped if requirement_name(entry) is not None]
+
+    spec_flag = options.python if options.python is not None else tracking.python
+
+    if options.dry_run:
+        selected = select_project_python(config, spec_flag)
+        shown = selected if _is_python_passthrough(selected) else _DRY_RUN_PROJECT_PYTHON
+        planned: list[Command] = []
+        if names:
+            planned.append(uv_remove(names))
+        planned.append(uv_add(Path("<stack-requirements>")))
+        if not options.no_sync:
+            planned.append(uv_sync(shown))
+        return RefreshResult(
+            warnings=stack.warnings,
+            added=added,
+            removed=removed,
+            skipped_removals=skipped,
+            planned=planned,
+        )
+
+    python = resolve_project_python(config, runner, spec_flag)
+    fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-refresh.", suffix=".txt")
+    tmp_req = Path(tmp_name)
+    try:
+        with open(fd, "w") as handle:
+            handle.write(flat_text)
+        if names:
+            runner.run(_with_cwd(uv_remove(names), cwd))
+        runner.run(_with_cwd(uv_add(tmp_req), cwd))
+        if not options.no_sync:
+            runner.run(_with_cwd(uv_sync(python), cwd))
+    finally:
+        if tmp_req.exists():
+            tmp_req.unlink()
+
+    write_tracking(
+        pyproject,
+        ProjectTracking(
+            version=1,
+            stack=tracking.stack,
+            python=options.python if options.python is not None else tracking.python,
+            applied=new_flat,
+        ),
+    )
+    return RefreshResult(
+        warnings=stack.warnings,
+        added=added,
+        removed=removed,
+        skipped_removals=skipped,
+    )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from uv_stack.commands import micromamba_create, micromamba_remove
@@ -605,3 +607,211 @@ def test_init_project_force_ownership_is_name_normalized(
     tracking = read_tracking(project_dir / "pyproject.toml")
     assert tracking is not None
     assert tracking.applied == []  # my.pkg == My_Pkg canonically → user-owned
+
+
+# ============================================================================
+# project refresh tests
+# ============================================================================
+
+
+def _tracked_project(tmp_path, tracking_text: str) -> Path:
+    project_dir = tmp_path / "proj_refresh"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pandas", "rdkit", "rich", "user-extra"]\n'
+        + tracking_text
+    )
+    return project_dir
+
+
+_TRACKING = (
+    "\n[tool.uv-stack]\nversion = 1\n"
+    'stack = ["standard"]\n'
+    'applied = ["numpy", "pandas", "rdkit", "rich"]\n'
+)
+
+
+def test_refresh_requires_tracked_project(config_tree: ConfigRoot, tmp_path):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    project_dir = tmp_path / "untracked"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        refresh_project(
+            config_tree, RecordingRunner(), RefreshOptions(), cwd=project_dir
+        )
+    assert "No tracked project here." in str(excinfo.value)
+
+
+def test_refresh_schema_version_guard(config_tree: ConfigRoot, tmp_path):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    project_dir = _tracked_project(
+        tmp_path, "\n[tool.uv-stack]\nversion = 2\nstack = []\napplied = []\n"
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        refresh_project(
+            config_tree, RecordingRunner(), RefreshOptions(), cwd=project_dir
+        )
+    assert "newer uv-stack (schema 2)" in str(excinfo.value)
+
+
+def test_refresh_removes_dropped_and_updates_ledger(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # Drop rdkit from the chem profile: refresh must remove it.
+    config_tree.profile_path("chem").write_text("includes:\n  - chemprop\n")
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    rec = RecordingRunner()
+    result = refresh_project(
+        config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir
+    )
+    argv = [" ".join(c.args) for c in rec.commands]
+    assert any(a == "uv remove --no-sync rdkit" for a in argv)
+    assert any("uv add --no-sync -r" in a for a in argv)
+    assert any(a == "uv sync --python 3.12" for a in argv)
+    assert result.removed == ["rdkit"]
+    assert "chemprop" in result.added
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "chemprop" in tracking.applied and "rdkit" not in tracking.applied
+    # user-extra was never in applied → untouched by construction.
+    assert "user-extra" not in result.removed
+
+
+def test_refresh_no_sync_runs_no_sync_anywhere(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    config_tree.profile_path("chem").write_text("includes:\n  - chemprop\n")
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    rec = RecordingRunner()
+    refresh_project(
+        config_tree, rec, RefreshOptions(python="3.12", no_sync=True), cwd=project_dir
+    )
+    argv = [" ".join(c.args) for c in rec.commands]
+    assert any(a.startswith("uv remove --no-sync") for a in argv)
+    assert not any(a.startswith("uv sync") for a in argv)
+
+
+def test_refresh_skips_non_name_removals(config_tree: ConfigRoot, tmp_path, monkeypatch):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["numpy", "pandas", "-e ./tool", "pkg @ https://h/x.whl"]\n'
+    )
+    project_dir = _tracked_project(tmp_path, tracking_text)
+    rec = RecordingRunner()
+    result = refresh_project(
+        config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir
+    )
+    assert result.skipped_removals == ["-e ./tool", "pkg @ https://h/x.whl"]
+    argv = [" ".join(c.args) for c in rec.commands]
+    assert not any("./tool" in a or "x.whl" in a for a in argv if a.startswith("uv remove"))
+
+
+def test_refresh_retry_after_partial_failure_is_idempotent(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.errors import ToolError
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    config_tree.profile_path("chem").write_text("includes:\n  - chemprop\n")
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+
+    def _fail_add(cmd: Command) -> CommandResult:
+        if "add" in cmd.args:
+            raise ToolError("add failed", command=cmd.args, returncode=1)
+        return CommandResult(returncode=0, stdout="")
+
+    with pytest.raises(ToolError):
+        refresh_project(
+            config_tree,
+            RecordingRunner(responder=_fail_add),
+            RefreshOptions(python="3.12"),
+            cwd=project_dir,
+        )
+    # Ledger unchanged after the failure.
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None and "rdkit" in tracking.applied
+    # Simulate uv having removed rdkit from [project.dependencies] before the
+    # failure, WITHOUT touching the [tool.uv-stack] ledger.
+    pyproject = project_dir / "pyproject.toml"
+    text = pyproject.read_text()
+    deps_line = 'dependencies = ["numpy", "pandas", "rdkit", "rich", "user-extra"]'
+    assert deps_line in text
+    pyproject.write_text(
+        text.replace(
+            deps_line, 'dependencies = ["numpy", "pandas", "rich", "user-extra"]', 1
+        )
+    )
+    tracking = read_tracking(pyproject)
+    assert tracking is not None and "rdkit" in tracking.applied  # ledger intact
+    # Retry with a healthy runner: presence filter skips the absent name.
+    rec = RecordingRunner()
+    refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    argv = [" ".join(c.args) for c in rec.commands]
+    assert not any(a.startswith("uv remove") for a in argv)
+
+
+def test_refresh_dry_run_plans_without_mutation(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    config_tree.profile_path("chem").write_text("includes:\n  - chemprop\n")
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["standard"]\npython = "main"\n'
+        'applied = ["numpy", "pandas", "rdkit", "rich"]\n'
+    )
+    project_dir = _tracked_project(tmp_path, tracking_text)
+    rec = RecordingRunner()
+    result = refresh_project(
+        config_tree, rec, RefreshOptions(dry_run=True), cwd=project_dir
+    )
+    assert rec.commands == []  # no probe, no uv execution
+    assert result.planned
+    plan_text = [" ".join(c.args) for c in result.planned]
+    # Recorded python "main" is an env name → placeholder, never probed.
+    assert any("<project-python>" in a for a in plan_text)
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None and "rdkit" in tracking.applied  # unchanged
+
+
+def test_refresh_python_flag_overrides_and_records(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\npython = "3.12"\n'
+        'applied = ["numpy", "pandas"]\n'
+    )
+    project_dir = _tracked_project(tmp_path, tracking_text)
+    rec = RecordingRunner()
+    refresh_project(
+        config_tree, rec, RefreshOptions(python="3.13"), cwd=project_dir
+    )
+    argv = [" ".join(c.args) for c in rec.commands]
+    assert any(a == "uv sync --python 3.13" for a in argv)
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None and tracking.python == "3.13"
