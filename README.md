@@ -56,11 +56,11 @@ uv tool install uv-stack
 Five minutes from nothing to a working, locked environment.
 
 ```bash
-# One guided command sets up everything (config tree, starter profile,
-# first environment) with prompts — or --yes to accept the defaults:
+# One guided command sets up everything with prompts — a config tree, a
+# commented 'starter' profile, and a 'main' environment (--yes accepts defaults):
 stack init
 
-# Prefer explicit steps? The same result by hand:
+# Prefer explicit steps? An equivalent setup by hand, with your own profile:
 stack config init
 stack create profile ds numpy pandas --description "Core data-science stack" --tag data
 stack create env main ds --python 3.12
