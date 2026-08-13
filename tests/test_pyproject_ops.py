@@ -160,3 +160,59 @@ def test_append_preserves_trailing_newlines(tmp_path: Path):
     pyproject.write_text(_BASE + "\n\n")
     write_tracking(pyproject, _tracking())
     assert pyproject.read_text().startswith(_BASE + "\n\n")
+
+
+def test_quoted_header_with_comment(tmp_path: Path):
+    """[tool."uv-stack"] with trailing comment matches and updates correctly."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        _BASE
+        + '\n[tool."uv-stack"]  # tracked by uv-stack\n'
+        + "version = 1\nstack = []\napplied = []\n"
+    )
+    loaded = read_tracking(pyproject)
+    assert loaded is not None
+    write_tracking(pyproject, _tracking())
+    text = pyproject.read_text()
+    assert text.count("[tool.") == 1  # Only one [tool.*] table present (the one we wrote)
+    assert read_tracking(pyproject) == _tracking()
+
+
+def test_quoted_header_replaces_in_place(tmp_path: Path):
+    """[tool."uv-stack"] is replaced, not duplicated."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_BASE + '\n[tool."uv-stack"]\nversion = 1\nstack = []\napplied = []\n')
+    write_tracking(pyproject, _tracking())
+    text = pyproject.read_text()
+    assert text.count("uv-stack") == 1  # Only one occurrence in the canonical header
+    assert "[tool.uv-stack]" in text
+
+
+def test_header_with_comment_removes(tmp_path: Path):
+    """[tool.uv-stack]   # comment can be removed."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        _BASE
+        + "\n[tool.uv-stack]   # tracked by uv-stack\n"
+        + "version = 1\nstack = []\napplied = []\n"
+    )
+    assert remove_tracking(pyproject) is True
+    assert "[tool.uv-stack]" not in pyproject.read_text()
+
+
+def test_inline_table_python_is_config_error(tmp_path: Path):
+    """python = { value = "3.12" } (inline table) is rejected."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_BASE + '\n[tool.uv-stack]\nstack = []\npython = { value = "3.12" }\n')
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert "inline table" in str(excinfo.value)
+
+
+def test_inline_table_bogus_is_config_error(tmp_path: Path):
+    """bogus = { x = 1 } (inline table) is rejected."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_BASE + "\n[tool.uv-stack]\nstack = []\nbogus = { x = 1 }\n")
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert "inline table" in str(excinfo.value)

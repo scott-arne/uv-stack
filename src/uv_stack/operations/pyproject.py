@@ -9,6 +9,7 @@ the no-corruption guarantee that lets us avoid a TOML-writer dependency.
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -20,6 +21,25 @@ from uv_stack.models import ProjectTracking
 from uv_stack.parse import requirement_name
 
 _HEADER = "[tool.uv-stack]"
+
+_HEADER_RE = re.compile(
+    r"^\[\s*tool\s*\.\s*(?:\"uv-stack\"|'uv-stack'|uv-stack)\s*\]\s*(?:#.*)?$"
+)
+
+_SUBTABLE_RE = re.compile(
+    r"^\[\s*tool\s*\.\s*(?:\"uv-stack\"|'uv-stack'|uv-stack)\s*\.\s*"
+    r"(?:\"(?P<dq>[^\"]+)\"|'(?P<sq>[^']+)'|(?P<bare>[A-Za-z0-9_-]+))"
+)
+
+
+def _subtable_keys(text: str) -> set[str]:
+    """Collect first-segment keys of actual [tool.uv-stack.<key>...] headers."""
+    keys: set[str] = set()
+    for line in text.split("\n"):
+        match = _SUBTABLE_RE.match(line.strip())
+        if match:
+            keys.add(match.group("dq") or match.group("sq") or match.group("bare"))
+    return keys
 
 
 def read_tracking(pyproject: Path) -> ProjectTracking | None:
@@ -34,8 +54,9 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     """
     if not pyproject.is_file():
         return None
+    text = pyproject.read_text()
     try:
-        data = tomllib.loads(pyproject.read_text())
+        data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(
             f"Invalid TOML in {pyproject}: {exc}", hint="Fix the TOML syntax."
@@ -48,7 +69,21 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
             f"[tool.uv-stack] in {pyproject} must be a table.",
             hint="Replace the scalar/array value with a [tool.uv-stack] table.",
         )
-    scalars = {key: value for key, value in table.items() if not isinstance(value, dict)}
+    subtable_keys = _subtable_keys(text)
+    scalars = {}
+    for key, value in table.items():
+        if isinstance(value, dict):
+            if key in subtable_keys:
+                # Foreign subtable: tolerated and preserved on write.
+                continue
+            else:
+                # Inline table: schema violation.
+                raise ConfigError(
+                    f"Invalid [tool.uv-stack] table in {pyproject}: "
+                    f"'{key}' must not be an inline table.",
+                    hint="Check the fields against the schema (version, stack, python, applied).",
+                )
+        scalars[key] = value
     if not scalars:
         # Header-only, or an implicit parent created solely by foreign
         # subtables (e.g. after remove_tracking left [tool.uv-stack.extra]
@@ -96,7 +131,7 @@ def _find_span(lines: list[str]) -> tuple[int, int] | None:
     """
     start = None
     for index, line in enumerate(lines):
-        if line.strip() == _HEADER:
+        if _HEADER_RE.match(line.strip()):
             start = index
             break
     if start is None:
