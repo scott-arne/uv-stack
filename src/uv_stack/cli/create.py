@@ -32,7 +32,11 @@ def _bare_usage_warnings(
         "'{name}' is used as a bare token in {location}; it now resolves to "
         "this {kind} (use pkg:{name} there for the literal package)"
     )
-    for env in config.list_envs():
+    try:
+        envs = config.list_envs()
+    except OSError:
+        envs = []
+    for env in envs:
         try:
             if name in read_clean_lines(config.env_stack_path(env)):
                 warnings.append(
@@ -40,7 +44,11 @@ def _bare_usage_warnings(
                 )
         except (OSError, UnicodeDecodeError):
             continue  # unreadable envs are doctor's job, not create's
-    for bundle_name in config.list_bundles():
+    try:
+        bundles = config.list_bundles()
+    except OSError:
+        bundles = []
+    for bundle_name in bundles:
         if bundle_name == exclude_bundle:
             continue
         try:

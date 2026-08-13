@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import rich_click
 from click.testing import CliRunner
 
@@ -1603,6 +1604,26 @@ def test_create_profile_tolerates_corrupt_env(tmp_path: Path):
     env_dir = cfg.env_dir("broken")
     env_dir.mkdir(parents=True)
     (env_dir / "stack.txt").write_bytes(b"\xff\xfe")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "profile", "something", "pkg:something"]
+    )
+    assert result.exit_code == 0
+    combined = _combined_output(result)
+    assert "Wrote" in combined
+    assert "Traceback" not in combined
+
+
+def test_create_profile_tolerates_unreadable_bundles_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    def _raise_permission_error(*args, **kwargs):
+        raise PermissionError("mock unreadable bundles directory")
+
+    monkeypatch.setattr(ConfigRoot, "list_bundles", _raise_permission_error)
     runner = CliRunner()
     result = runner.invoke(
         cli, ["--root", str(root), "create", "profile", "something", "pkg:something"]
