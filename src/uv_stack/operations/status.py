@@ -131,7 +131,9 @@ def env_status(config: ConfigRoot, runner: Runner, name: str) -> EnvStatus:
     else:
         lock_stale = lock_mtime < reference_mtime if reference_mtime > 0 else False
 
-    if sources_changed:
+    if not lock_present:
+        state = "never built"
+    elif sources_changed:
         state = "sources changed"
     elif lock_stale:
         state = "lock stale"

@@ -180,3 +180,39 @@ def test_status_lock_deleted_after_build_is_never_built(config_tree: ConfigRoot)
     )
     assert status.state == "never built"
     assert status.lock_present is False
+
+
+def test_status_lock_race_condition(config_tree: ConfigRoot):
+    """Race condition: lock vanishes between is_file() and stat().
+
+    When the lock passes the initial is_file() check but disappears before
+    _mtime_or_none() stats it, lock_present is set to False and state should
+    be "never built", not "ok".
+    """
+    from pathlib import Path
+    from unittest.mock import patch
+
+    _built(config_tree)
+    lock = config_tree.env_lock("main")
+    assert lock.is_file()
+
+    # Monkeypatch Path.stat to raise FileNotFoundError on the call from _mtime_or_none(lock)
+    original_stat = Path.stat
+    call_count = {"count": 0}
+
+    def counting_stat(self, *, follow_symlinks=True):
+        call_count["count"] += 1
+        # Raise on the call to stat the lock file via _mtime_or_none (after is_file check)
+        if self == lock and call_count["count"] > 2:
+            raise FileNotFoundError(f"Lock {self} vanished")
+        return original_stat(self, follow_symlinks=follow_symlinks)
+
+    with patch.object(Path, "stat", counting_stat):
+        status = env_status(
+            config_tree, RecordingRunner(responder=_existing_env_responder), "main"
+        )
+
+    assert status.state == "never built"
+    assert status.lock_present is False
+    assert status.created is True
+    assert status.python == "3.12"
