@@ -9,11 +9,48 @@ import rich_click as click
 from uv_stack.cli._render import console, echo, print_activation_hint, render_warnings
 from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
+from uv_stack.errors import UvStackError
 from uv_stack.operations.project import ProjectOptions, init_project
 from uv_stack.operations.scaffold import write_bundle, write_env_sources, write_profile
 from uv_stack.operations.upgrade import UpgradeOptions
+from uv_stack.parse import read_clean_lines
 from uv_stack.resolver import Resolver
 from uv_stack.runner import SubprocessRunner
+
+
+def _bare_usage_warnings(
+    config: ConfigRoot, name: str, kind: str, *, exclude_bundle: str | None = None
+) -> list[str]:
+    """Warn where ``name`` is already used as a bare token.
+
+    A new profile/bundle takes precedence over the literal package a bare
+    token used to resolve to; these warnings point at each usage without
+    blocking creation (refusal was deliberately rejected in review).
+    """
+    warnings: list[str] = []
+    template = (
+        "'{name}' is used as a bare token in {location}; it now resolves to "
+        "this {kind} (use pkg:{name} there for the literal package)"
+    )
+    for env in config.list_envs():
+        if name in read_clean_lines(config.env_stack_path(env)):
+            warnings.append(
+                template.format(name=name, location=f"envs/{env}/stack.txt", kind=kind)
+            )
+    for bundle_name in config.list_bundles():
+        if bundle_name == exclude_bundle:
+            continue
+        try:
+            includes = config.load_bundle(bundle_name).includes
+        except UvStackError:
+            continue  # malformed bundles are doctor's job, not create's
+        if name in includes:
+            warnings.append(
+                template.format(
+                    name=name, location=f"bundles/{bundle_name}.yaml", kind=kind
+                )
+            )
+    return warnings
 
 
 @click.group("create")
@@ -140,10 +177,11 @@ def create_profile(
     tags: tuple[str, ...],
 ) -> None:
     """Create profiles/NAME.yaml from PACKAGES."""
-    path = write_profile(
+    write_profile(
         config, name, list(packages), description=description, tags=list(tags)
     )
-    echo(f"Wrote {path}")
+    echo(f"Wrote profile {name}")
+    render_warnings(_bare_usage_warnings(config, name, "profile"), styled=False)
 
 
 @create.command("bundle")
@@ -172,7 +210,8 @@ def create_bundle(
     # ...while existence of explicit references (recursively) is validated
     # without re-judging existing bundles' own contents.
     Resolver(config).resolve(list(tokens))
-    path = write_bundle(
+    write_bundle(
         config, name, list(tokens), description=description, tags=list(tags)
     )
-    echo(f"Wrote {path}")
+    echo(f"Wrote bundle {name}")
+    render_warnings(_bare_usage_warnings(config, name, "bundle", exclude_bundle=name), styled=False)

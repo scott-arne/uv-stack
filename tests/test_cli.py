@@ -1518,3 +1518,57 @@ def test_refresh_in_help_panels():
     result = runner.invoke(cli, ["--help"], prog_name="stack")
     assert result.exit_code == 0
     assert "refresh" in result.output
+
+
+def test_create_profile_warns_on_bare_token_retarget(tmp_path: Path):
+    root = _env_root(tmp_path)  # env 'main' stack.txt contains '@standard'
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    cfg.env_stack_path("main").write_text("@standard\nhttpx\n")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "profile", "httpx", "httpx>=0.27"]
+    )
+    assert result.exit_code == 0
+    combined = _combined_output(result)
+    assert (
+        "'httpx' is used as a bare token in envs/main/stack.txt; it now "
+        "resolves to this profile (use pkg:httpx there for the literal package)"
+    ) in combined
+
+
+def test_create_bundle_warns_on_bare_token_in_other_bundle(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    cfg.bundle_path("web").write_text("includes:\n  - httpx\n")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "bundle", "httpx", "pkg:httpx"]
+    )
+    assert result.exit_code == 0
+    combined = _combined_output(result)
+    assert "bundles/web.yaml" in combined and "resolves to this bundle" in combined
+
+
+def test_create_bundle_does_not_warn_about_itself(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    # 'daily' includes bare 'ds'; creating bundle 'daily' must not scan itself.
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "bundle", "daily", "ds"]
+    )
+    assert result.exit_code == 0
+    assert "bundles/daily.yaml" not in _combined_output(result)
+
+
+def test_create_profile_no_warning_without_bare_usage(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "profile", "viz2", "matplotlib"]
+    )
+    assert result.exit_code == 0
+    assert "used as a bare token" not in _combined_output(result)
