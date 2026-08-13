@@ -170,3 +170,28 @@ def test_atomic_write_detects_concurrent_swap(tmp_path: Path, monkeypatch: pytes
     # Should rewrite due to identity mismatch, mtime changes
     assert target.stat().st_mtime > stamped
     assert target.read_text() == "same\n"
+
+
+def test_atomic_write_degrades_without_nofollow_nonblock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify graceful degradation when O_NOFOLLOW/O_NONBLOCK are unavailable."""
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
+
+    target = tmp_path / "file.txt"
+    atomic_write(target, "content\n")
+    assert target.read_text() == "content\n"
+
+    old_mtime = target.stat().st_mtime
+    os.utime(target, (old_mtime - 100, old_mtime - 100))
+    stamped = target.stat().st_mtime
+
+    # Identical content → mtime preserved
+    atomic_write(target, "content\n")
+    assert target.stat().st_mtime == stamped
+
+    # Changed content → rewritten
+    atomic_write(target, "changed\n")
+    assert target.stat().st_mtime > stamped
+    assert target.read_text() == "changed\n"

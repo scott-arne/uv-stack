@@ -30,7 +30,9 @@ def atomic_write(path: Path, text: str) -> None:
     # and path identity is rechecked so a concurrent swap falls through to a
     # real write.
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        # O_NOFOLLOW/O_NONBLOCK degrade to 0 when absent; identity recheck covers symlinks.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
         try:
             st_fd = os.fstat(fd)
             if stat.S_ISREG(st_fd.st_mode) and st_fd.st_nlink == 1:
