@@ -1465,8 +1465,48 @@ def test_refresh_dry_run_prints_plan(tmp_path: Path, monkeypatch):
     assert "uv add" in result.output
 
 
+def test_refresh_flags_pass_through_to_refresh_project(tmp_path: Path, monkeypatch):
+    from uv_stack.operations.project import RefreshOptions, RefreshResult
+    root = _seeded_root(tmp_path)
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    captured: dict = {}
+
+    def fake_refresh(config, runner, options, *, cwd):
+        captured["options"] = options
+        captured["cwd"] = cwd
+        return RefreshResult()
+
+    monkeypatch.setattr("uv_stack.cli.refresh_cmd.refresh_project", fake_refresh)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "refresh", "--python", "3.13", "--strict", "--no-sync"]
+    )
+    assert result.exit_code == 0
+    opts: RefreshOptions = captured["options"]
+    assert opts.python == "3.13"
+    assert opts.strict is True
+    assert opts.no_sync is True
+    assert opts.dry_run is False
+    assert captured["cwd"] == project_dir
+
+    result2 = runner.invoke(cli, ["--root", str(root), "refresh", "--dry-run"])
+    assert result2.exit_code == 0
+    opts2: RefreshOptions = captured["options"]
+    assert opts2.dry_run is True
+
+
 def test_refresh_in_help_panels():
     runner = CliRunner()
-    result = runner.invoke(cli, ["--help"])
+    result = runner.invoke(cli, ["--help"], prog_name="stack")
     assert result.exit_code == 0
-    assert "refresh" in result.output
+    output = result.output
+    assert "Environments" in output
+    # Verify all three commands appear in the Environments panel together.
+    env_start = output.index("Environments")
+    next_panel = output.find("\n\n", env_start)
+    env_section = output[env_start:next_panel] if next_panel != -1 else output[env_start:]
+    assert "refresh" in env_section
+    assert "upgrade" in env_section
+    assert "create" in env_section
