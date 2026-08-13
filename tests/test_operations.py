@@ -981,3 +981,84 @@ def test_refresh_preserves_user_owned_dependencies(
     assert "numpy" not in tracking.applied
     # pandas was in old applied and is in new_flat → should be in applied.
     assert "pandas" in tracking.applied
+
+
+def test_refresh_user_owned_never_in_temp_requirements_file(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # User owns numpy<2 in [project.dependencies] (absent from old applied).
+    # Stack resolves to include numpy and pandas.
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = []\n'
+    )
+    project_dir = tmp_path / "proj_ownership_file"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy<2"]\n' + tracking_text
+    )
+
+    captured_file_content = None
+
+    def capture_responder(cmd: Command) -> CommandResult:
+        nonlocal captured_file_content
+        if "add" in cmd.args and "--no-sync" in cmd.args:
+            # Capture the temp requirements file content.
+            for arg in cmd.args:
+                if arg.startswith("/") and arg.endswith(".txt"):
+                    req_file = Path(arg)
+                    if req_file.exists():
+                        captured_file_content = req_file.read_text()
+                    break
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=capture_responder)
+    result = refresh_project(
+        config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir
+    )
+    # Assert temp file content lacks any numpy line, contains pandas.
+    assert captured_file_content is not None
+    lines = [ln.strip() for ln in captured_file_content.splitlines() if ln.strip()]
+    assert "pandas" in lines
+    assert not any("numpy" in ln for ln in lines)
+    # Assert result.warnings has one message naming numpy.
+    assert any("numpy" in w and "user-owned" in w for w in result.warnings)
+    # Final tracking.applied excludes numpy.
+    from uv_stack.operations.pyproject import read_tracking
+
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "numpy" not in tracking.applied
+    assert "pandas" in tracking.applied
+
+
+def test_refresh_direct_reference_in_skipped_removals_not_removed(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # Applied containing `pkg @ file:wheel.whl` that the stack drops.
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["numpy", "pandas", "pkg @ file:wheel.whl"]\n'
+    )
+    project_dir = tmp_path / "proj_directref_removed"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pandas", "pkg @ file:wheel.whl"]\n' + tracking_text
+    )
+    rec = RecordingRunner()
+    result = refresh_project(
+        config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir
+    )
+    # Assert it appears in skipped_removals and NOT in removed.
+    assert "pkg @ file:wheel.whl" in result.skipped_removals
+    assert "pkg @ file:wheel.whl" not in result.removed

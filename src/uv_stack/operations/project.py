@@ -306,7 +306,6 @@ def refresh_project(
     resolver = Resolver(config, strict=options.strict)
     stack = resolver.resolve(tracking.stack)
     new_flat = resolver.flatten(stack)
-    flat_text = render_requirements_flat(stack, config)
 
     # Ownership: names currently owned by uv-stack (from the old ledger).
     owned = {
@@ -319,9 +318,25 @@ def refresh_project(
         {canonical_name(n) for n in read_project_dependency_names(pyproject)} - owned
     )
 
-    dropped = [entry for entry in tracking.applied if entry not in new_flat]
+    # Filter out user-owned dependencies from stack adds BEFORE rendering or writing.
+    stack_adds = [
+        p
+        for p in new_flat
+        if canonical_name(requirement_name(p) or "") not in user_owned
+    ]
+    # Build warnings for ownership-filtered entries.
+    warnings = list(stack.warnings)
+    for entry in new_flat:
+        name = requirement_name(entry)
+        if name and canonical_name(name) in user_owned:
+            warnings.append(
+                f"Skipping stack requirement '{entry}': '{name}' is user-owned in this project."
+            )
+
+    dropped = [entry for entry in tracking.applied if entry not in stack_adds]
     removable_names: list[str] = []
     skipped: list[str] = []
+    removed: list[str] = []
     for entry in dropped:
         # Direct references (name @ url) contain '@' — skip before calling requirement_name.
         if "@" in entry:
@@ -332,10 +347,10 @@ def refresh_project(
                 skipped.append(entry)
             else:
                 removable_names.append(name)
+                removed.append(entry)
     current_names = {canonical_name(n) for n in read_project_dependency_names(pyproject)}
     names = [n for n in dict.fromkeys(removable_names) if canonical_name(n) in current_names]
-    added = [entry for entry in new_flat if entry not in tracking.applied]
-    removed = [entry for entry in dropped if requirement_name(entry) is not None]
+    added = [entry for entry in stack_adds if entry not in tracking.applied]
 
     spec_flag = options.python if options.python is not None else tracking.python
 
@@ -349,7 +364,7 @@ def refresh_project(
         if not options.no_sync:
             planned.append(uv_sync(shown))
         return RefreshResult(
-            warnings=stack.warnings,
+            warnings=warnings,
             added=added,
             removed=removed,
             skipped_removals=skipped,
@@ -360,8 +375,11 @@ def refresh_project(
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-refresh.", suffix=".txt")
     tmp_req = Path(tmp_name)
     try:
+        # Render only stack-owned dependencies to the temp requirements file.
         with open(fd, "w") as handle:
-            handle.write(flat_text)
+            for entry in stack_adds:
+                handle.write(entry)
+                handle.write("\n")
         if names:
             runner.run(_with_cwd(uv_remove(names), cwd))
         runner.run(_with_cwd(uv_add(tmp_req), cwd))
@@ -377,15 +395,11 @@ def refresh_project(
             version=1,
             stack=tracking.stack,
             python=options.python if options.python is not None else tracking.python,
-            applied=[
-                p
-                for p in new_flat
-                if canonical_name(requirement_name(p) or "") not in user_owned
-            ],
+            applied=stack_adds,
         ),
     )
     return RefreshResult(
-        warnings=stack.warnings,
+        warnings=warnings,
         added=added,
         removed=removed,
         skipped_removals=skipped,
