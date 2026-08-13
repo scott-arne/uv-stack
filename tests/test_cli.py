@@ -1405,3 +1405,68 @@ def test_create_project_no_track_flag(tmp_path: Path, monkeypatch):
     )
     assert result.exit_code == 0
     assert captured["track"] is False
+
+
+# ---------------------------------------------------------------------------
+# refresh
+# ---------------------------------------------------------------------------
+
+
+def _tracked_project_dir(tmp_path: Path) -> Path:
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pandas", "rdkit", "rich"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["standard"]\n'
+        'applied = ["numpy", "pandas", "rdkit", "rich"]\n'
+    )
+    return project_dir
+
+
+def test_refresh_outside_project_fails_with_hint(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "refresh"])
+    assert result.exit_code == 1
+    assert "No tracked project here." in _combined_output(result)
+
+
+def test_refresh_happy_path_prints_summary(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    ConfigRoot(root).profile_path("chem").write_text("includes:\n  - chemprop\n")
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    monkeypatch.setattr(
+        "uv_stack.cli.refresh_cmd.SubprocessRunner", lambda: _FakeProbeRunner()
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "refresh", "--python", "3.12"])
+    assert result.exit_code == 0
+    assert "Removed (1): rdkit" in result.output
+    assert "chemprop" in result.output  # listed under Added
+    assert "Project refreshed." in result.output
+
+
+def test_refresh_dry_run_prints_plan(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "refresh", "--dry-run"])
+    assert result.exit_code == 0
+    assert "Planned commands:" in result.output
+    assert "uv add" in result.output
+
+
+def test_refresh_in_help_panels():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--help"])
+    assert result.exit_code == 0
+    assert "refresh" in result.output
