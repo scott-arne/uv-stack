@@ -1242,3 +1242,27 @@ def test_refresh_sync_failure_after_add_ledger_written(
     tracking = read_tracking(project_dir / "pyproject.toml")
     assert tracking is not None
     assert "chemprop" in tracking.applied
+
+
+def test_refresh_preflight_validation_blocks_mutation(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """Pre-flight validation failure raises before any uv commands run."""
+    from uv_stack.errors import ConfigError
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    rec = RecordingRunner()
+    # Monkeypatch validate_tracking_write to raise ConfigError.
+    monkeypatch.setattr(
+        "uv_stack.operations.project.validate_tracking_write",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ConfigError("Refusing to write pyproject.toml: result would not parse.")
+        ),
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert "would not parse" in str(excinfo.value)
+    # Zero uv commands should have been recorded (pre-flight blocks mutation).
+    assert len(rec.commands) == 0

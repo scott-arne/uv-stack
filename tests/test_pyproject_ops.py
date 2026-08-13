@@ -11,6 +11,7 @@ from uv_stack.operations.pyproject import (
     read_tracking,
     remove_tracking,
     render_tracking,
+    validate_tracking_write,
     write_tracking,
 )
 
@@ -301,8 +302,30 @@ def test_replace_at_eof_preserves_trailing_newline(tmp_path: Path):
     write_tracking(pyproject, ProjectTracking(version=1, stack=[], applied=[]))
     result = pyproject.read_text()
     assert result.endswith("\n"), "trailing newline lost on identical replace"
-    # write_tracking with a changed table should also end with exactly one newline
+    # write_tracking with a changed table should also end with exactly newline
     write_tracking(pyproject, _tracking())
     result = pyproject.read_text()
     assert result.endswith("\n"), "trailing newline lost on changed replace"
     assert not result.endswith("\n\n"), "extra newline added"
+
+
+def test_validate_tracking_write_accepts_valid_result(tmp_path: Path):
+    """validate_tracking_write does not raise when the result would parse."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_BASE)
+    validate_tracking_write(pyproject, _tracking())  # should not raise
+    assert pyproject.read_text() == _BASE  # untouched
+
+
+def test_validate_tracking_write_rejects_unparseable_result(tmp_path: Path, monkeypatch):
+    """validate_tracking_write raises ConfigError when result would not parse."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_BASE)
+    monkeypatch.setattr(
+        "uv_stack.operations.pyproject.render_tracking",
+        lambda tracking: "[tool.uv-stack\nbroken",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        validate_tracking_write(pyproject, _tracking())
+    assert "would not parse" in str(excinfo.value)
+    assert pyproject.read_text() == _BASE  # untouched

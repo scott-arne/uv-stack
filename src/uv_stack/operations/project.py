@@ -21,6 +21,7 @@ from uv_stack.operations.pyproject import (
     read_project_dependency_names,
     read_tracking,
     remove_tracking,
+    validate_tracking_write,
     write_tracking,
 )
 from uv_stack.parse import canonical_name, ownership_name, requirement_name
@@ -134,6 +135,19 @@ def init_project(
         # tracked create BEFORE any fallible uv step, so a failed add can
         # never leave an old ledger behind.
         remove_tracking(pyproject)
+
+    # Pre-flight: validate the tracking write BEFORE any uv mutations, so a
+    # deterministic TOML validation failure doesn't leave dependencies mutated
+    # with the old ledger intact.
+    if options.track:
+        validate_tracking_write(
+            pyproject,
+            ProjectTracking(
+                stack=list(tokens),
+                python=options.python,
+                applied=stack_adds,
+            ),
+        )
 
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-stack.", suffix=".txt")
     tmp_req = Path(tmp_name)
@@ -284,10 +298,13 @@ def refresh_project(
 ) -> RefreshResult:
     """Re-resolve a tracked project against the current profiles/bundles.
 
-    Refresh is deliberately NOT transactional: uv mutates ``pyproject.toml``
-    before the ledger write, so a mid-sequence failure leaves the old ledger
-    in place and the next refresh converges — removals are presence-filtered
-    and re-adding the full flat list is idempotent.
+    Failure semantics: ``uv remove`` or ``uv add`` failure leaves the old
+    ledger in place (retry converges via presence-filtered removal +
+    idempotent re-add); after a successful add the new ledger is written
+    before sync, so a sync failure leaves deps and ledger consistent. A
+    write_tracking filesystem failure after add is the residual window
+    (pre-flight validation minimizes it); manually editing
+    [tool.uv-stack].applied recovers ownership.
 
     :param config: Configuration root.
     :param runner: Command runner.
@@ -364,6 +381,18 @@ def refresh_project(
 
     spec_flag = options.python if options.python is not None else tracking.python
 
+    # Pre-flight: validate the tracking write BEFORE any uv mutations, so a
+    # deterministic TOML validation failure doesn't leave dependencies mutated
+    # with the old ledger intact.
+    new_tracking = ProjectTracking(
+        version=1,
+        stack=tracking.stack,
+        python=options.python if options.python is not None else tracking.python,
+        applied=stack_adds,
+    )
+    if not options.dry_run:
+        validate_tracking_write(pyproject, new_tracking)
+
     if options.dry_run:
         selected = select_project_python(config, spec_flag)
         shown = selected if _is_python_passthrough(selected) else _DRY_RUN_PROJECT_PYTHON
@@ -393,15 +422,7 @@ def refresh_project(
         if names:
             runner.run(_with_cwd(uv_remove(names), cwd))
         runner.run(_with_cwd(uv_add(tmp_req), cwd))
-        write_tracking(
-            pyproject,
-            ProjectTracking(
-                version=1,
-                stack=tracking.stack,
-                python=options.python if options.python is not None else tracking.python,
-                applied=stack_adds,
-            ),
-        )
+        write_tracking(pyproject, new_tracking)
         if not options.no_sync:
             runner.run(_with_cwd(uv_sync(python), cwd))
     finally:

@@ -201,6 +201,23 @@ def _validate_result(text: str, pyproject: Path) -> None:
         ) from exc
 
 
+def validate_tracking_write(pyproject: Path, tracking: ProjectTracking) -> None:
+    """Pre-flight validation for tracking writes without side effects.
+
+    Renders and splices the tracking table into the current file content and
+    validates that the result would parse, but does not write anything. Used
+    before mutating dependencies to detect deterministic TOML validation
+    failures before any external commands run.
+
+    :param pyproject: Path to pyproject.toml.
+    :param tracking: The tracking table to validate.
+    :raises ConfigError: If the spliced result would not parse.
+    """
+    text = _read_exact(pyproject) if pyproject.is_file() else ""
+    new_text = _splice(text, render_tracking(tracking))
+    _validate_result(new_text, pyproject)
+
+
 def write_tracking(pyproject: Path, tracking: ProjectTracking) -> None:
     """Publish the tracking table, preserving everything outside its span.
 
