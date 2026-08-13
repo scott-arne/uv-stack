@@ -815,3 +815,169 @@ def test_refresh_python_flag_overrides_and_records(
     assert any(a == "uv sync --python 3.13" for a in argv)
     tracking = read_tracking(project_dir / "pyproject.toml")
     assert tracking is not None and tracking.python == "3.13"
+
+
+def test_refresh_convergence_simulates_dependency_file_mutation(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    import json
+    import re
+
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # Drop rdkit from the chem profile: refresh should remove it and add chemprop.
+    config_tree.profile_path("chem").write_text("includes:\n  - chemprop\n")
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+
+    def mutating_responder(cmd: Command) -> CommandResult:
+        """Simulate uv add/remove mutating [project.dependencies]."""
+        if "remove" in cmd.args and "--no-sync" in cmd.args:
+            # Extract names after --no-sync.
+            idx = cmd.args.index("--no-sync")
+            names_to_remove = set(cmd.args[idx + 1 :])
+            text = pyproject.read_text()
+            # Parse dependencies array from the line.
+            match = re.search(r'dependencies\s*=\s*(\[.*?\])', text, re.DOTALL)
+            if match:
+                deps = json.loads(match.group(1))
+                deps = [d for d in deps if d not in names_to_remove]
+                new_line = f"dependencies = {json.dumps(deps)}"
+                text = text[: match.start()] + new_line + text[match.end() :]
+                pyproject.write_text(text)
+            # Assert cwd equals project dir.
+            assert cmd.cwd == project_dir
+            return CommandResult(returncode=0, stdout="")
+        elif "add" in cmd.args and "--no-sync" in cmd.args:
+            # Find the temp requirements file.
+            req_file = None
+            for arg in cmd.args:
+                if arg.startswith("/") and arg.endswith(".txt"):
+                    req_file = Path(arg)
+                    break
+            if req_file and req_file.exists():
+                text = pyproject.read_text()
+                match = re.search(r'dependencies\s*=\s*(\[.*?\])', text, re.DOTALL)
+                if match:
+                    deps = json.loads(match.group(1))
+                    # Add non-comment lines from the requirements file.
+                    for line in req_file.read_text().splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            if line not in deps:
+                                deps.append(line)
+                    new_line = f"dependencies = {json.dumps(deps)}"
+                    text = text[: match.start()] + new_line + text[match.end() :]
+                    pyproject.write_text(text)
+            assert cmd.cwd == project_dir
+            return CommandResult(returncode=0, stdout="")
+        elif cmd.args[0] == "uv" and cmd.args[1] == "sync":
+            assert cmd.cwd == project_dir
+            return CommandResult(returncode=0, stdout="")
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=mutating_responder)
+    refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    # After refresh: [project.dependencies] should contain chemprop and not rdkit.
+    text = pyproject.read_text()
+    match = re.search(r'dependencies\s*=\s*(\[.*?\])', text, re.DOTALL)
+    assert match
+    deps = json.loads(match.group(1))
+    assert "chemprop" in deps
+    assert "rdkit" not in deps
+    # Tracking.applied should match (excludes user-extra which was never in applied).
+    tracking = read_tracking(pyproject)
+    assert tracking is not None
+    assert "chemprop" in tracking.applied and "rdkit" not in tracking.applied
+    # All uv commands ran with cwd=project_dir (verified by the responder assertions).
+
+
+def test_refresh_canonical_presence_filter_uses_original_name(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    config_tree.profile_path("norm").write_text("includes:\n  - my.pkg\n")
+    # Tracking has old applied entry `my.pkg` (stack drops it).
+    # [project.dependencies] spells it `My_Pkg` (canonical match, different spelling).
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["norm"]\n'
+        'applied = ["my.pkg"]\n'
+    )
+    project_dir = tmp_path / "proj_canonical"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["My_Pkg"]\n' + tracking_text
+    )
+    rec = RecordingRunner()
+    # Drop my.pkg from the profile so refresh removes it.
+    config_tree.profile_path("norm").write_text("includes:\n  - other-package\n")
+    refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    argv = [" ".join(c.args) for c in rec.commands]
+    # uv remove must receive the ORIGINAL extracted name `my.pkg`, not the canonical form.
+    assert any("my.pkg" in a for a in argv if a.startswith("uv remove"))
+
+
+def test_refresh_direct_reference_skipped_before_requirement_name(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # Applied contains a direct reference with '@' but no slash: `pkg @ file:wheel.whl`.
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["numpy", "pandas", "pkg @ file:wheel.whl"]\n'
+    )
+    project_dir = tmp_path / "proj_directref"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pandas", "pkg @ file:wheel.whl"]\n' + tracking_text
+    )
+    rec = RecordingRunner()
+    result = refresh_project(
+        config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir
+    )
+    # The direct reference must be in skipped_removals, not removed.
+    assert "pkg @ file:wheel.whl" in result.skipped_removals
+    argv = [" ".join(c.args) for c in rec.commands]
+    # uv remove argv must NOT mention "pkg".
+    assert not any("remove" in a and "pkg" in a for a in argv)
+
+
+def test_refresh_preserves_user_owned_dependencies(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # Tracked project: old applied lacks numpy.
+    # [project.dependencies] contains user-owned numpy.
+    # Stack resolves to include numpy → after refresh, new applied must still exclude numpy.
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["pandas"]\n'
+    )
+    project_dir = tmp_path / "proj_ownership"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pandas"]\n' + tracking_text
+    )
+    rec = RecordingRunner()
+    refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    # numpy is user-owned → must NOT be in applied.
+    assert "numpy" not in tracking.applied
+    # pandas was in old applied and is in new_flat → should be in applied.
+    assert "pandas" in tracking.applied

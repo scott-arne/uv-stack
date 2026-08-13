@@ -308,15 +308,30 @@ def refresh_project(
     new_flat = resolver.flatten(stack)
     flat_text = render_requirements_flat(stack, config)
 
+    # Ownership: names currently owned by uv-stack (from the old ledger).
+    owned = {
+        canonical_name(n)
+        for n in (requirement_name(e) for e in tracking.applied)
+        if n
+    }
+    # Names in [project.dependencies] NOT in the old ledger are user-owned.
+    user_owned = (
+        {canonical_name(n) for n in read_project_dependency_names(pyproject)} - owned
+    )
+
     dropped = [entry for entry in tracking.applied if entry not in new_flat]
     removable_names: list[str] = []
     skipped: list[str] = []
     for entry in dropped:
-        name = requirement_name(entry)
-        if name is None:
+        # Direct references (name @ url) contain '@' — skip before calling requirement_name.
+        if "@" in entry:
             skipped.append(entry)
         else:
-            removable_names.append(name)
+            name = requirement_name(entry)
+            if name is None:
+                skipped.append(entry)
+            else:
+                removable_names.append(name)
     current_names = {canonical_name(n) for n in read_project_dependency_names(pyproject)}
     names = [n for n in dict.fromkeys(removable_names) if canonical_name(n) in current_names]
     added = [entry for entry in new_flat if entry not in tracking.applied]
@@ -362,7 +377,11 @@ def refresh_project(
             version=1,
             stack=tracking.stack,
             python=options.python if options.python is not None else tracking.python,
-            applied=new_flat,
+            applied=[
+                p
+                for p in new_flat
+                if canonical_name(requirement_name(p) or "") not in user_owned
+            ],
         ),
     )
     return RefreshResult(
