@@ -1245,6 +1245,25 @@ def test_init_rejects_bad_tokens_before_writing(tmp_path: Path, monkeypatch):
     assert not ConfigRoot(root).env_stack_path("main").exists()
 
 
+def test_init_decline_build_still_surfaces_warnings(tmp_path: Path, monkeypatch):
+    root = tmp_path / "python-envs"
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    runner = CliRunner()
+    # Prompts: seed starter? y | create env? y | name [main] | tokens: startr
+    # (near-miss of the seeded 'starter' profile) | python [3.12] | build now? n
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "init"],
+        input="y\ny\n\nstartr\n\nn\n",
+    )
+    assert result.exit_code == 0
+    assert result.output.count("did you mean 'starter'") == 1
+    assert "Build it with: stack create env main" in result.output
+
+
 # ---------------------------------------------------------------------------
 # completion
 # ---------------------------------------------------------------------------
