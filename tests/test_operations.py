@@ -510,3 +510,33 @@ def test_init_project_tracking_not_written_when_add_fails(
             config_tree, rec, ["ds"], ProjectOptions(python="3.12"), cwd=project_dir
         )
     assert read_tracking(project_dir / "pyproject.toml") is None
+
+
+def test_init_project_no_track_removes_table_even_when_add_fails(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.errors import ToolError
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_notrack_addfail"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = []\n'
+        "\n[tool.uv-stack]\nversion = 1\nstack = [\"ds\"]\napplied = []\n"
+    )
+
+    def _fail_add(cmd: Command) -> CommandResult:
+        if "add" in cmd.args:
+            raise ToolError("add failed", command=cmd.args, returncode=1)
+        return CommandResult(returncode=0, stdout="")
+
+    with pytest.raises(ToolError):
+        init_project(
+            config_tree,
+            RecordingRunner(responder=_fail_add),
+            ["ds"],
+            ProjectOptions(python="3.12", force=True, track=False),
+            cwd=project_dir,
+        )
+    assert read_tracking(project_dir / "pyproject.toml") is None

@@ -94,6 +94,12 @@ def init_project(
     # runs, and so both uv init and uv sync receive the same value.
     python = resolve_project_python(config, runner, options.python)
 
+    if not options.track:
+        # Opting out is authoritative: clear stale metadata from a previous
+        # tracked create BEFORE any fallible uv step, so a failed add can
+        # never leave an old ledger behind.
+        remove_tracking(pyproject)
+
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-stack.", suffix=".txt")
     tmp_req = Path(tmp_name)
     try:
@@ -112,10 +118,6 @@ def init_project(
                     applied=packages,
                 ),
             )
-        else:
-            # Opting out is authoritative: a stale table from a previous
-            # tracked create must not feed a later 'stack refresh'.
-            remove_tracking(pyproject)
         if not options.no_sync:
             runner.run(_with_cwd(uv_sync(python), cwd))
     finally:
