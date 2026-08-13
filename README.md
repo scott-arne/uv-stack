@@ -304,11 +304,13 @@ stack refresh              # apply profile/bundle changes to this project
 stack refresh --dry-run    # see the add/remove delta first
 ```
 
-Refresh is safe by construction: uv-stack only ever removes packages it
-previously added (they're recorded in the table's `applied` list), so
-dependencies you added yourself with `uv add` are never touched. Day to
-day, the project is still a normal `uv` project — `uv add`, `uv sync`,
-and `uv run` all work as usual.
+Refresh removes only packages recorded in the table's `applied` list — the
+ones uv-stack itself added. Dependencies whose names uv-stack never applied
+are never touched. One caveat: ownership is by package name, so if you
+re-pin a stack-applied package yourself (say `uv add 'numpy<2'` after a
+profile applied `numpy`), uv-stack still owns that name and a later refresh
+may rewrite or remove it. Day to day, the project is still a normal `uv`
+project — `uv add`, `uv sync`, and `uv run` all work as usual.
 
 ## Configuration reference
 
