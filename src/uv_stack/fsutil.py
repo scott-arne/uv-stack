@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -14,18 +15,27 @@ def atomic_write(path: Path, text: str) -> None:
     moved into place with :func:`os.replace`, so a crash mid-write never leaves
     a partially-written target.
 
-    Identical content is not rewritten (the mtime is preserved).
+    Identical content is not rewritten (the mtime is preserved) when the target is
+    a regular, un-hardlinked file and the exact bytes match.
 
     :param path: Destination file.
     :param text: Content to write.
     """
     # Skip identical rewrites: generated files keep their mtime, so
     # mtime-based staleness checks (stack status) see no phantom drift
-    # after a dry-run re-render.
+    # after a dry-run re-render. Only a regular, un-hardlinked file may
+    # be skipped — symlinks, extra links, and special files must still
+    # be replaced — and the comparison is on exact bytes so newline
+    # differences count as changes.
     try:
-        if path.read_text() == text:
+        st = os.lstat(path)
+        if (
+            stat.S_ISREG(st.st_mode)
+            and st.st_nlink == 1
+            and path.read_bytes() == text.encode()
+        ):
             return
-    except (FileNotFoundError, OSError):
+    except OSError:
         pass
 
     path.parent.mkdir(parents=True, exist_ok=True)

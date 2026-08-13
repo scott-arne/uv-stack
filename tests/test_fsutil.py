@@ -85,3 +85,58 @@ def test_atomic_write_skips_identical_content(tmp_path: Path):
     assert target.stat().st_mtime == stamped  # untouched
     atomic_write(target, "different\n")
     assert target.read_text() == "different\n"
+
+
+def test_atomic_write_crlf_exactness(tmp_path: Path):
+    target = tmp_path / "crlf.txt"
+    target.write_bytes(b"same\r\n")
+    old_mtime = target.stat().st_mtime
+    os.utime(target, (old_mtime - 100, old_mtime - 100))
+    stamped = target.stat().st_mtime
+    atomic_write(target, "same\r\n")
+    assert target.stat().st_mtime == stamped  # skip: CRLF match
+    assert target.read_bytes() == b"same\r\n"
+    atomic_write(target, "same\n")
+    assert target.stat().st_mtime > stamped  # rewritten
+    assert target.read_bytes() == b"same\n"
+
+
+def test_atomic_write_replaces_symlink(tmp_path: Path):
+    external = tmp_path / "target.txt"
+    external.write_text("content")
+    link = tmp_path / "link.txt"
+    link.symlink_to(external)
+    assert link.is_symlink()
+    atomic_write(link, "content")
+    assert not link.is_symlink()
+    assert link.is_file()
+    assert link.read_text() == "content"
+    assert external.read_text() == "content"  # unchanged
+
+
+def test_atomic_write_isolates_hardlink(tmp_path: Path):
+    original = tmp_path / "a.txt"
+    original.write_text("old")
+    sibling = tmp_path / "b.txt"
+    os.link(original, sibling)
+    assert original.stat().st_nlink == 2
+    atomic_write(original, "old")
+    assert original.stat().st_nlink == 1  # rewritten, isolated
+    assert sibling.read_text() == "old"  # keeps old inode
+
+
+def test_atomic_write_repairs_corrupt_file(tmp_path: Path):
+    target = tmp_path / "corrupt.txt"
+    target.write_bytes(b"\xff\xfe")
+    atomic_write(target, "x\n")
+    assert target.read_text() == "x\n"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
+def test_atomic_write_replaces_fifo(tmp_path: Path):
+    fifo = tmp_path / "pipe.txt"
+    os.mkfifo(fifo)
+    assert stat.S_ISFIFO(fifo.stat().st_mode)
+    atomic_write(fifo, "x\n")
+    assert stat.S_ISREG(fifo.stat().st_mode)
+    assert fifo.read_text() == "x\n"
