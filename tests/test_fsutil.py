@@ -140,3 +140,33 @@ def test_atomic_write_replaces_fifo(tmp_path: Path):
     atomic_write(fifo, "x\n")
     assert stat.S_ISREG(fifo.stat().st_mode)
     assert fifo.read_text() == "x\n"
+
+
+def test_atomic_write_detects_concurrent_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    target = tmp_path / "swapped.txt"
+    atomic_write(target, "same\n")
+    old_mtime = target.stat().st_mtime
+    os.utime(target, (old_mtime - 100, old_mtime - 100))
+    stamped = target.stat().st_mtime
+
+    # Simulate concurrent swap: intercept lstat only during atomic_write
+    original_lstat = os.lstat
+    intercept_active = [True]
+
+    def fake_lstat(path, *args, **kwargs):
+        result = original_lstat(path, *args, **kwargs)
+        path_str = str(path) if isinstance(path, Path) else path
+        if intercept_active[0] and path_str == str(target):
+            # First lstat call during atomic_write is the identity recheck
+            # Return a modified stat_result with different inode to simulate swap
+            values = list(result)
+            values[1] = result.st_ino + 999  # st_ino at index 1
+            return os.stat_result(tuple(values))
+        return result
+
+    monkeypatch.setattr(os, "lstat", fake_lstat)
+    atomic_write(target, "same\n")
+    intercept_active[0] = False  # disable interception for assertions
+    # Should rewrite due to identity mismatch, mtime changes
+    assert target.stat().st_mtime > stamped
+    assert target.read_text() == "same\n"

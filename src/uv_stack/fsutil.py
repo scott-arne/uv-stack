@@ -26,15 +26,25 @@ def atomic_write(path: Path, text: str) -> None:
     # after a dry-run re-render. Only a regular, un-hardlinked file may
     # be skipped — symlinks, extra links, and special files must still
     # be replaced — and the comparison is on exact bytes so newline
-    # differences count as changes.
+    # differences count as changes. The skip is bound to one file descriptor
+    # and path identity is rechecked so a concurrent swap falls through to a
+    # real write.
     try:
-        st = os.lstat(path)
-        if (
-            stat.S_ISREG(st.st_mode)
-            and st.st_nlink == 1
-            and path.read_bytes() == text.encode()
-        ):
-            return
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            st_fd = os.fstat(fd)
+            if stat.S_ISREG(st_fd.st_mode) and st_fd.st_nlink == 1:
+                with os.fdopen(fd, "rb") as handle:
+                    fd = -1  # ownership transferred to file object
+                    current_bytes = handle.read()
+                if current_bytes == text.encode():
+                    # Re-verify path identity: same inode as the fd we read from?
+                    st_path = os.lstat(path)
+                    if (st_fd.st_dev, st_fd.st_ino) == (st_path.st_dev, st_path.st_ino):
+                        return  # identical content, verified no swap
+        finally:
+            if fd != -1:
+                os.close(fd)
     except OSError:
         pass
 
