@@ -1388,3 +1388,20 @@ def test_help_contains_no_rest_double_backticks():
         result = runner.invoke(cli, args)
         assert result.exit_code == 0
         assert "``" not in result.output, f"double backticks in: {args}"
+
+
+def test_create_project_no_track_flag(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    captured: dict[str, object] = {}
+
+    def _fake_init(config, runner, tokens, options, *, cwd):
+        captured["track"] = options.track
+        return []
+
+    monkeypatch.setattr("uv_stack.cli.create.init_project", _fake_init)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "project", "ds", "--no-track"]
+    )
+    assert result.exit_code == 0
+    assert captured["track"] is False

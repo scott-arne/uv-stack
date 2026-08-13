@@ -416,3 +416,97 @@ def test_upgrade_env_attaches_warnings_to_tool_error(config_tree: ConfigRoot):
     # The error should carry the resolution warning.
     assert excinfo.value.resolution_warnings
     assert "did you mean 'standard'" in excinfo.value.resolution_warnings[0]
+
+
+# ============================================================================
+# project tracking tests
+# ============================================================================
+
+
+def test_init_project_records_tracking(config_tree: ConfigRoot, tmp_path, monkeypatch):
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_track"
+    project_dir.mkdir()
+    rec = RecordingRunner()
+    init_project(
+        config_tree, rec, ["standard", "pkg:httpx"],
+        ProjectOptions(python="3.12"), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["standard", "pkg:httpx"]
+    assert tracking.python == "3.12"
+    # applied is the flattened list: ds+chem+utils profiles then inline.
+    assert tracking.applied == ["numpy", "pandas", "rdkit", "rich", "httpx"]
+
+
+def test_init_project_no_python_flag_records_none(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_nopython"
+    project_dir.mkdir()
+    init_project(config_tree, RecordingRunner(), ["ds"], ProjectOptions(), cwd=project_dir)
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None and tracking.python is None
+
+
+def test_init_project_no_track_writes_nothing(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_notrack"
+    project_dir.mkdir()
+    init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(track=False), cwd=project_dir,
+    )
+    assert read_tracking(project_dir / "pyproject.toml") is None
+
+
+def test_init_project_force_no_track_removes_stale_table(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_forcenotrack"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = []\n'
+        "\n[tool.uv-stack]\nversion = 1\nstack = [\"ds\"]\napplied = []\n"
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(force=True, track=False), cwd=project_dir,
+    )
+    assert read_tracking(project_dir / "pyproject.toml") is None
+
+
+def test_init_project_tracking_not_written_when_add_fails(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.errors import ToolError
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_addfail"
+    project_dir.mkdir()
+
+    def _fail_add(cmd: Command) -> CommandResult:
+        if "add" in cmd.args:
+            raise ToolError("add failed", command=cmd.args, returncode=1)
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=_fail_add)
+    with pytest.raises(ToolError):
+        init_project(
+            config_tree, rec, ["ds"], ProjectOptions(python="3.12"), cwd=project_dir
+        )
+    assert read_tracking(project_dir / "pyproject.toml") is None

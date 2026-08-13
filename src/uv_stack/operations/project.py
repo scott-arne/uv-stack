@@ -16,6 +16,8 @@ from pathlib import Path
 from uv_stack.commands import micromamba_python_path, uv_add, uv_init, uv_sync
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError
+from uv_stack.models import ProjectTracking
+from uv_stack.operations.pyproject import remove_tracking, write_tracking
 from uv_stack.render import render_requirements_flat
 from uv_stack.resolver import Resolver
 from uv_stack.runner import Command, Runner
@@ -42,6 +44,7 @@ class ProjectOptions:
     :param no_sync: Add dependencies but skip ``uv sync``.
     :param force: Allow adding to an existing ``pyproject.toml``.
     :param strict: Fail when a bare token falls through to a literal package.
+    :param track: Record [tool.uv-stack] tracking metadata.
     """
 
     python: str | None = None
@@ -49,6 +52,7 @@ class ProjectOptions:
     no_sync: bool = False
     force: bool = False
     strict: bool = False
+    track: bool = True
 
 
 def init_project(
@@ -60,6 +64,9 @@ def init_project(
     cwd: Path,
 ) -> list[str]:
     """Initialize a uv project in ``cwd`` from resolved stack ``tokens``.
+
+    Tracking metadata is recorded after ``uv add`` succeeds unless ``track`` is
+    false, in which case any existing table is removed.
 
     :param config: Configuration root.
     :param runner: Command runner.
@@ -78,8 +85,10 @@ def init_project(
 
     # Resolve the stack first so --strict token errors are not preceded by
     # external command execution or an unrelated EnvError.
-    stack = Resolver(config, strict=options.strict).resolve(tokens)
+    resolver = Resolver(config, strict=options.strict)
+    stack = resolver.resolve(tokens)
     flat = render_requirements_flat(stack, config)
+    packages = resolver.flatten(stack)
 
     # Resolve the interpreter so a bad env name fails before any scaffolding
     # runs, and so both uv init and uv sync receive the same value.
@@ -94,6 +103,19 @@ def init_project(
         if not pyproject.is_file():
             runner.run(_with_cwd(uv_init(python, options.name), cwd))
         runner.run(_with_cwd(uv_add(tmp_req), cwd))
+        if options.track:
+            write_tracking(
+                pyproject,
+                ProjectTracking(
+                    stack=list(tokens),
+                    python=options.python,
+                    applied=packages,
+                ),
+            )
+        else:
+            # Opting out is authoritative: a stale table from a previous
+            # tracked create must not feed a later 'stack refresh'.
+            remove_tracking(pyproject)
         if not options.no_sync:
             runner.run(_with_cwd(uv_sync(python), cwd))
     finally:

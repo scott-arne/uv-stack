@@ -89,6 +89,12 @@ def create_env(
 @click.option("--no-sync", is_flag=True, help="Add dependencies but do not sync.")
 @click.option("--force", is_flag=True, help="Add to an existing pyproject.toml.")
 @click.option(
+    "--no-track",
+    "no_track",
+    is_flag=True,
+    help="Do not record [tool.uv-stack] tracking metadata.",
+)
+@click.option(
     "--strict",
     is_flag=True,
     help="Fail if an unqualified token falls through to a literal package.",
@@ -101,10 +107,18 @@ def create_project(
     name: str | None,
     no_sync: bool,
     force: bool,
+    no_track: bool,
     strict: bool,
 ) -> None:
     """Create a uv project from the resolved stack TOKENS."""
-    options = ProjectOptions(python=python, name=name, no_sync=no_sync, force=force, strict=strict)
+    options = ProjectOptions(
+        python=python,
+        name=name,
+        no_sync=no_sync,
+        force=force,
+        track=not no_track,
+        strict=strict,
+    )
     warnings = init_project(
         config, SubprocessRunner(), list(tokens), options, cwd=Path.cwd()
     )
