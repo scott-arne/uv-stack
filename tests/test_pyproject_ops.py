@@ -216,3 +216,36 @@ def test_inline_table_bogus_is_config_error(tmp_path: Path):
     with pytest.raises(ConfigError) as excinfo:
         read_tracking(pyproject)
     assert "inline table" in str(excinfo.value)
+
+
+def test_quoted_dotted_header_read_write_remove(tmp_path: Path):
+    """["tool"."uv-stack"] header: read, write replaces in place, remove works."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        _BASE + '\n["tool"."uv-stack"]\nversion = 1\nstack = []\napplied = []\n'
+    )
+    loaded = read_tracking(pyproject)
+    assert loaded is not None and loaded.version == 1
+    write_tracking(pyproject, _tracking())
+    text = pyproject.read_text()
+    assert text.count("[tool.uv-stack]") == 1  # Canonical form, no duplicate
+    assert '["tool"."uv-stack"]' not in text  # Replaced, not preserved
+    assert read_tracking(pyproject) == _tracking()
+    assert remove_tracking(pyproject) is True
+    assert "[tool.uv-stack]" not in pyproject.read_text()
+
+
+def test_quoted_dotted_subtable_preserved(tmp_path: Path):
+    """["tool"."uv-stack"."extra"] subtable tolerated and preserved."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        _BASE
+        + "\n[tool.uv-stack]\nversion = 1\nstack = []\napplied = []\n"
+        + '\n["tool"."uv-stack"."extra"]\ncustom = true\n'
+    )
+    loaded = read_tracking(pyproject)
+    assert loaded is not None and loaded.stack == []
+    write_tracking(pyproject, _tracking())
+    text = pyproject.read_text()
+    assert '["tool"."uv-stack"."extra"]' in text and "custom = true" in text
+    assert read_tracking(pyproject) == _tracking()

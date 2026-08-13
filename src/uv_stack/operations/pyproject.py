@@ -9,7 +9,6 @@ the no-corruption guarantee that lets us avoid a TOML-writer dependency.
 from __future__ import annotations
 
 import json
-import re
 import tomllib
 from pathlib import Path
 
@@ -21,24 +20,38 @@ from uv_stack.models import ProjectTracking
 from uv_stack.parse import requirement_name
 
 _HEADER = "[tool.uv-stack]"
+_UV_STACK_PATH = ("tool", "uv-stack")
 
-_HEADER_RE = re.compile(
-    r"^\[\s*tool\s*\.\s*(?:\"uv-stack\"|'uv-stack'|uv-stack)\s*\]\s*(?:#.*)?$"
-)
 
-_SUBTABLE_RE = re.compile(
-    r"^\[\s*tool\s*\.\s*(?:\"uv-stack\"|'uv-stack'|uv-stack)\s*\.\s*"
-    r"(?:\"(?P<dq>[^\"]+)\"|'(?P<sq>[^']+)'|(?P<bare>[A-Za-z0-9_-]+))"
-)
+def _header_path(line: str) -> tuple[str, ...] | None:
+    """Dotted-key path of a table-header line, or None if not a header.
+
+    A standalone ``[a.b]`` line is complete TOML, so parsing it with
+    :mod:`tomllib` yields the exact key path under every quoting and escape
+    form the format allows (trailing comments included).
+    """
+    stripped = line.strip()
+    if not stripped.startswith("[") or stripped.startswith("[["):
+        return None
+    try:
+        parsed = tomllib.loads(stripped)
+    except tomllib.TOMLDecodeError:
+        return None
+    path: list[str] = []
+    node: object = parsed
+    while isinstance(node, dict) and len(node) == 1:
+        key, node = next(iter(node.items()))
+        path.append(key)
+    return tuple(path)
 
 
 def _subtable_keys(text: str) -> set[str]:
     """Collect first-segment keys of actual [tool.uv-stack.<key>...] headers."""
     keys: set[str] = set()
     for line in text.split("\n"):
-        match = _SUBTABLE_RE.match(line.strip())
-        if match:
-            keys.add(match.group("dq") or match.group("sq") or match.group("bare"))
+        path = _header_path(line)
+        if path is not None and len(path) > 2 and path[:2] == _UV_STACK_PATH:
+            keys.add(path[2])
     return keys
 
 
@@ -131,7 +144,7 @@ def _find_span(lines: list[str]) -> tuple[int, int] | None:
     """
     start = None
     for index, line in enumerate(lines):
-        if _HEADER_RE.match(line.strip()):
+        if _header_path(line) == _UV_STACK_PATH:
             start = index
             break
     if start is None:
