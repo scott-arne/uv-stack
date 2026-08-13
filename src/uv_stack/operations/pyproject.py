@@ -23,6 +23,13 @@ _HEADER = "[tool.uv-stack]"
 _UV_STACK_PATH = ("tool", "uv-stack")
 
 
+def _read_exact(pyproject: Path) -> str:
+    """Read without newline translation so CRLF content outside the owned
+    span survives a splice byte-for-byte."""
+    with pyproject.open(encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
 def _header_path(line: str) -> tuple[str, ...] | None:
     """Dotted-key path of a table-header line, or None if not a header.
 
@@ -198,7 +205,7 @@ def write_tracking(pyproject: Path, tracking: ProjectTracking) -> None:
     :raises ConfigError: If the spliced result would not parse (nothing is
         written in that case).
     """
-    text = pyproject.read_text() if pyproject.is_file() else ""
+    text = _read_exact(pyproject) if pyproject.is_file() else ""
     new_text = _splice(text, render_tracking(tracking))
     _validate_result(new_text, pyproject)
     atomic_write(pyproject, new_text)
@@ -208,7 +215,7 @@ def remove_tracking(pyproject: Path) -> bool:
     """Delete the owned table; ``False`` when no table (or file) existed."""
     if not pyproject.is_file():
         return False
-    text = pyproject.read_text()
+    text = _read_exact(pyproject)
     if _find_span(text.split("\n")) is None:
         return False
     new_text = _splice(text, None)

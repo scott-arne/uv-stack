@@ -249,3 +249,28 @@ def test_quoted_dotted_subtable_preserved(tmp_path: Path):
     text = pyproject.read_text()
     assert '["tool"."uv-stack"."extra"]' in text and "custom = true" in text
     assert read_tracking(pyproject) == _tracking()
+
+
+def test_crlf_content_outside_span_preserved(tmp_path: Path):
+    pyproject = tmp_path / "pyproject.toml"
+    crlf_base = _BASE.replace("\n", "\r\n")
+    pyproject.write_bytes(crlf_base.encode())
+    write_tracking(pyproject, _tracking())
+    raw = pyproject.read_bytes()
+    assert raw.startswith(crlf_base.encode())  # untouched CRLF prefix
+    assert read_tracking(pyproject) == _tracking()
+    assert remove_tracking(pyproject) is True
+    assert pyproject.read_bytes().startswith(crlf_base.encode())
+
+
+def test_crlf_replace_in_place(tmp_path: Path):
+    pyproject = tmp_path / "pyproject.toml"
+    content = (
+        _BASE + "\n[tool.uv-stack]\nversion = 1\nstack = []\napplied = []\n"
+        + "\n[tool.ruff]\nline-length = 100\n"
+    ).replace("\n", "\r\n")
+    pyproject.write_bytes(content.encode())
+    write_tracking(pyproject, _tracking())
+    raw = pyproject.read_bytes()
+    assert b"[tool.ruff]\r\nline-length = 100" in raw  # following table intact
+    assert read_tracking(pyproject) == _tracking()
