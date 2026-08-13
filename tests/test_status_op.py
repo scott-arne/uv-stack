@@ -154,3 +154,29 @@ def test_status_not_created_early_return_when_requirements_missing(
     )
     assert status.state == "not created"
     assert status.created is False
+
+
+def test_status_requirements_in_deleted_after_build_is_sources_changed(
+    config_tree: ConfigRoot,
+):
+    """Generated file deleted after build → sources changed (not crash)."""
+    _built(config_tree)
+    config_tree.env_requirements_in("main").unlink()
+    status = env_status(
+        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
+    )
+    assert status.state == "sources changed"
+
+
+def test_status_lock_deleted_after_build_is_never_built(config_tree: ConfigRoot):
+    """Lock deleted but sources unchanged → never built (not ok)."""
+    _built(config_tree)
+    lock = config_tree.env_lock("main")
+    # Sanity check: lock exists.
+    assert lock.is_file()
+    lock.unlink()
+    status = env_status(
+        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
+    )
+    assert status.state == "never built"
+    assert status.lock_present is False

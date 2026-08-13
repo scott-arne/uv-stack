@@ -152,10 +152,12 @@ def create_bundle(
     strict: bool,
 ) -> None:
     """Create bundles/NAME.yaml from stack TOKENS."""
-    # Full resolution (not classify) so explicit profile:/bundle: references
-    # must exist before anything durable is written.
-    stack = Resolver(config, strict=strict).resolve(list(tokens))
-    render_warnings(stack.warnings)
+    # Strict and near-miss rules apply to the DIRECT tokens only...
+    direct = Resolver(config, strict=strict).classify(list(tokens))
+    render_warnings(direct.warnings)
+    # ...while existence of explicit references (recursively) is validated
+    # without re-judging existing bundles' own contents.
+    Resolver(config).resolve(list(tokens))
     path = write_bundle(
         config, name, list(tokens), description=description, tags=list(tags)
     )

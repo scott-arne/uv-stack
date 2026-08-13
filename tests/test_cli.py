@@ -595,6 +595,38 @@ def test_create_bundle_rejects_missing_explicit_bundle(tmp_path: Path):
     assert not ConfigRoot(root).bundle_exists("daily")
 
 
+def test_create_bundle_strict_accepts_existing_bundle_with_bare_package(tmp_path: Path):
+    """Strict mode applies to direct tokens only; existing bundle with bare package is OK."""
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    # Create bundle 'web' containing bare 'httpx'.
+    cfg.bundle_path("web").write_text("includes:\n  - httpx\n")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "bundle", "app", "--strict", "web"]
+    )
+    assert result.exit_code == 0
+    assert cfg.bundle_exists("app")
+    assert cfg.load_bundle("app").includes == ["web"]
+
+
+def test_create_bundle_strict_rejects_direct_bare_near_miss(tmp_path: Path):
+    """Strict mode rejects direct bare near-miss even if existing bundles are fine."""
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    cfg.bundle_path("web").write_text("includes:\n  - httpx\n")
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "bundle", "app", "--strict", "numpyy"]
+    )
+    assert result.exit_code == 1
+    assert not cfg.bundle_exists("app")
+
+
 def test_create_env_with_tokens_scaffolds_and_builds(tmp_path: Path, monkeypatch):
     root = _seeded_root(tmp_path)
     calls: list[tuple[list[str], object]] = []

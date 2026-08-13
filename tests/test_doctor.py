@@ -424,3 +424,36 @@ def test_move_no_replace_identity_check_in_rename(config_tree: ConfigRoot, monke
     assert profiles_txt.read_text() == "@replaced\n"
     # Link withdrawn.
     assert not stack_txt.exists()
+
+
+def test_repair_conversion_source_replaced_between_read_and_move(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """Source replaced after read but before move → skipped, no YAML left, replacement intact."""
+    from uv_stack.operations import doctor
+    from uv_stack.parse import read_clean_lines as original_read
+
+    legacy = config_tree.profiles_dir / "race.in"
+    legacy.write_text("numpy\n")
+    findings = diagnose(config_tree)
+
+    # Monkeypatch read_clean_lines to replace the source after reading.
+    def race_read(path):
+        result = original_read(path)
+        if path == legacy:
+            # Replace source with new inode.
+            path.unlink()
+            path.write_text("pandas\n")
+        return result
+
+    monkeypatch.setattr(doctor, "read_clean_lines", race_read)
+
+    actions = repair(config_tree, findings)
+    skipped = [a for a in actions if a.finding.kind == "legacy-profile"]
+    assert skipped and not skipped[0].applied
+    assert "changed during conversion" in skipped[0].reason
+    # No YAML left.
+    assert not (config_tree.profiles_dir / "race.yaml").exists()
+    # Replacement intact.
+    assert legacy.exists()
+    assert legacy.read_text() == "pandas\n"

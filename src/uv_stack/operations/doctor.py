@@ -285,8 +285,10 @@ def _fix_python_txt(config: ConfigRoot, finding: Finding) -> RepairAction:
 def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
     assert finding.path is not None and finding.dest is not None
     description = f"convert {finding.path} to {finding.dest}"
-    # Revalidate the source first.
-    if not finding.path.is_file():
+    # Lstat the source for identity binding.
+    try:
+        src_identity_before = finding.path.lstat()
+    except FileNotFoundError:
         return RepairAction(
             finding, description, applied=False,
             reason=f"{finding.path.name} no longer exists",
@@ -332,6 +334,42 @@ def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
         return RepairAction(
             finding, description, applied=False,
             reason=f"{finding.dest.name} already exists",
+        )
+    # Lstat source again immediately before move to detect replacement.
+    try:
+        src_identity_after = finding.path.lstat()
+    except FileNotFoundError:
+        # Source vanished after read but before move.
+        try:
+            current_stat = finding.dest.lstat()
+            if (current_stat.st_dev, current_stat.st_ino) == (
+                dest_stat.st_dev,
+                dest_stat.st_ino,
+            ):
+                finding.dest.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
+        return RepairAction(
+            finding, description, applied=False,
+            reason=f"{finding.path.name} vanished during conversion",
+        )
+    if (src_identity_before.st_dev, src_identity_before.st_ino) != (
+        src_identity_after.st_dev,
+        src_identity_after.st_ino
+    ):
+        # Source replaced after read: withdraw the YAML.
+        try:
+            current_stat = finding.dest.lstat()
+            if (current_stat.st_dev, current_stat.st_ino) == (
+                dest_stat.st_dev,
+                dest_stat.st_ino,
+            ):
+                finding.dest.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
+        return RepairAction(
+            finding, description, applied=False,
+            reason=f"{finding.path.name} changed during conversion",
         )
     # Move the source to backup with no-replace semantics.
     try:

@@ -10,6 +10,7 @@ an error.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from uv_stack.commands import micromamba_python_path
 from uv_stack.config import ConfigRoot
@@ -17,6 +18,20 @@ from uv_stack.errors import UvStackError
 from uv_stack.render import render_environment_yml, render_requirements_in
 from uv_stack.resolver import Resolver
 from uv_stack.runner import Runner
+
+
+def _read_text_or_none(path: Path) -> str | None:
+    try:
+        return path.read_text()
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _mtime_or_none(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except (FileNotFoundError, OSError):
+        return None
 
 
 @dataclass
@@ -92,30 +107,29 @@ def env_status(config: ConfigRoot, runner: Runner, name: str) -> EnvStatus:
             name=name,
             python=env.python,
             created=created,
-            lock_present=lock_present,
+            lock_present=False,
             state="never built",
         )
 
     req_path = config.env_requirements_in(name)
     yml_path = config.env_environment_yml(name)
-    sources_changed = (
-        not req_path.is_file()
-        or req_path.read_text() != expected_req
-        or not yml_path.is_file()
-        or yml_path.read_text() != expected_yml
-    )
+    actual_req = _read_text_or_none(req_path)
+    actual_yml = _read_text_or_none(yml_path)
+    sources_changed = actual_req != expected_req or actual_yml != expected_yml
 
     # Compute lock-staleness reference as max mtime of requirements.in
     # and requirements.local.in (when present).
     local_req = config.env_local_path(name)
-    req_mtime = req_path.stat().st_mtime if req_path.is_file() else 0
-    local_mtime = local_req.stat().st_mtime if local_req.is_file() else 0
+    req_mtime = _mtime_or_none(req_path) or 0
+    local_mtime = _mtime_or_none(local_req) or 0
     reference_mtime = max(req_mtime, local_mtime)
-    try:
-        lock_stale = lock.stat().st_mtime < reference_mtime if reference_mtime > 0 else False
-    except FileNotFoundError:
+    lock_mtime = _mtime_or_none(lock)
+    if lock_mtime is None:
         # Lock vanished between the is_file() check and here.
+        lock_present = False
         lock_stale = False
+    else:
+        lock_stale = lock_mtime < reference_mtime if reference_mtime > 0 else False
 
     if sources_changed:
         state = "sources changed"
