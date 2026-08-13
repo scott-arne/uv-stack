@@ -648,6 +648,52 @@ def test_init_project_force_filters_user_owned_from_temp_file(
     assert any("numpy" in w and "user-owned" in w for w in warnings)
 
 
+def test_init_project_force_schema_version_guard_track_true(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """init_project --force with track=True must reject newer tracking schemas."""
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_schema_guard_track"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = []\n'
+        "\n[tool.uv-stack]\nversion = 2\nstack = [\"ds\"]\napplied = []\n"
+    )
+    rec = RecordingRunner()
+    with pytest.raises(ConfigError) as excinfo:
+        init_project(
+            config_tree, rec, ["ds"],
+            ProjectOptions(python="3.12", force=True, track=True),
+            cwd=project_dir,
+        )
+    assert "newer uv-stack (schema 2)" in str(excinfo.value)
+    # Zero uv commands should have run (guard fires before any mutation).
+    assert len(rec.commands) == 0
+
+
+def test_init_project_force_schema_version_guard_track_false(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """init_project --force with track=False must also reject newer tracking schemas."""
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_schema_guard_notrack"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = []\n'
+        "\n[tool.uv-stack]\nversion = 2\nstack = [\"ds\"]\napplied = []\n"
+    )
+    rec = RecordingRunner()
+    with pytest.raises(ConfigError) as excinfo:
+        init_project(
+            config_tree, rec, ["ds"],
+            ProjectOptions(python="3.12", force=True, track=False),
+            cwd=project_dir,
+        )
+    assert "newer uv-stack (schema 2)" in str(excinfo.value)
+    # Zero uv commands should have run (guard fires before any mutation).
+    assert len(rec.commands) == 0
+
+
 # ============================================================================
 # project refresh tests
 # ============================================================================

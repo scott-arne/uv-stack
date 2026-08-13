@@ -96,6 +96,12 @@ def init_project(
     previously_owned: set[str] = set()
     existing_tracking = read_tracking(pyproject) if pyproject.is_file() else None
     if existing_tracking is not None:
+        if existing_tracking.version > 1:
+            raise ConfigError(
+                f"This project was tracked by a newer uv-stack "
+                f"(schema {existing_tracking.version}).",
+                hint="Upgrade uv-stack, or edit [tool.uv-stack] manually.",
+            )
         for entry in existing_tracking.applied:
             owned_name = ownership_name(entry)
             if owned_name:
