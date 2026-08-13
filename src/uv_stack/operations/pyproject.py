@@ -227,7 +227,11 @@ def remove_tracking(pyproject: Path) -> bool:
 def read_project_dependency_names(pyproject: Path) -> set[str]:
     """Distribution names currently in ``[project.dependencies]``.
 
-    Used by refresh's presence filter so removal retries are idempotent.
+    Used by refresh to determine ownership: names returned here are considered
+    user-owned and must not be auto-removed or adopted into the applied ledger.
+    Includes names from PEP 508 direct references (``pkg @ https://...``).
+    VCS-style entries (``git+https://...``) remain excluded.
+
     Unreadable/missing files yield the empty set (refresh's own tracking
     read reports real errors).
     """
@@ -239,7 +243,13 @@ def read_project_dependency_names(pyproject: Path) -> set[str]:
     names: set[str] = set()
     for dependency in dependencies:
         if isinstance(dependency, str):
-            name = requirement_name(dependency)
+            # PEP 508 direct references have form: name[extras] @ url
+            # Extract name from text before first @ (if any).
+            if "@" in dependency:
+                head = dependency.split("@", 1)[0].strip()
+                name = requirement_name(head)
+            else:
+                name = requirement_name(dependency)
             if name:
                 names.add(name)
     return names

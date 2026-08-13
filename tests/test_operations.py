@@ -1037,6 +1037,60 @@ def test_refresh_user_owned_never_in_temp_requirements_file(
     assert "pandas" in tracking.applied
 
 
+def test_refresh_user_owned_direct_reference_not_adopted(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # User owns `numpy @ https://h/x.whl` in [project.dependencies] (absent from old applied).
+    # Stack resolves to include numpy and pandas (ds stack).
+    # After refresh: numpy must not land in applied (user-owned direct ref).
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = []\n'
+    )
+    project_dir = tmp_path / "proj_directref_ownership"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy @ https://h/x.whl"]\n' + tracking_text
+    )
+
+    captured_file_content = None
+
+    def capture_responder(cmd: Command) -> CommandResult:
+        nonlocal captured_file_content
+        if "add" in cmd.args and "--no-sync" in cmd.args:
+            # Capture the temp requirements file content.
+            for arg in cmd.args:
+                if arg.startswith("/") and arg.endswith(".txt"):
+                    req_file = Path(arg)
+                    if req_file.exists():
+                        captured_file_content = req_file.read_text()
+                    break
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=capture_responder)
+    result = refresh_project(
+        config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir
+    )
+    # Assert temp file content has no numpy line, contains pandas.
+    assert captured_file_content is not None
+    lines = [ln.strip() for ln in captured_file_content.splitlines() if ln.strip()]
+    assert "pandas" in lines
+    assert not any("numpy" in ln for ln in lines)
+    # Assert result.warnings has one message naming numpy.
+    assert any("numpy" in w and "user-owned" in w for w in result.warnings)
+    # Final tracking.applied excludes numpy.
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "numpy" not in tracking.applied
+    assert "pandas" in tracking.applied
+
+
 def test_refresh_direct_reference_in_skipped_removals_not_removed(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):

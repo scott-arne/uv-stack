@@ -136,6 +136,20 @@ def test_read_project_dependency_names(tmp_path: Path):
     assert read_project_dependency_names(tmp_path / "nope.toml") == set()
 
 
+def test_read_project_dependency_names_includes_direct_references(tmp_path: Path):
+    """Direct reference names are included; VCS entries excluded."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "demo"\nversion = "0.1.0"\n'
+        'dependencies = ["pkg @ https://h/x.whl", "numpy>=2", "git+https://h/r.git@v1"]\n'
+    )
+    names = read_project_dependency_names(pyproject)
+    assert "pkg" in names
+    assert "numpy" in names
+    # VCS entry still returns None from requirement_name → excluded
+    assert len(names) == 2
+
+
 def test_read_scalar_uv_stack_is_config_error(tmp_path: Path):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(_BASE + '\n[tool]\nuv-stack = "bad"\n')
