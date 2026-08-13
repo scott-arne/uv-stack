@@ -185,6 +185,7 @@ Files `stack` generates (never edit these):
 | `stack create profile NAME PKG...` | Write a new profile YAML (`--description`, `--tag`) |
 | `stack create bundle NAME TOKEN...` | Write a new bundle YAML (`--description`, `--tag`) |
 | `stack upgrade [NAMES]...` | Re-render, re-lock, and sync environments |
+| `stack refresh` | Re-resolve a tracked project against current profiles/bundles |
 | `stack status [NAMES]...` | Per-env build state: drift, lock freshness, existence |
 | `stack list env\|profile\|bundle` | Tables of what exists (`--tag` filters, `--json` for scripts) |
 | `stack show env\|profile\|bundle [NAME]` | Details for one item (`NAME` defaults to `main` for envs) |
@@ -293,9 +294,21 @@ Choosing the project's interpreter with `--python`:
 - With no `--python`, the default comes from `$UV_STACK_PROJECT_PYTHON`, then
   `<config-root>/project-python.txt`, then `3.12`.
 
-Projects are a **one-shot handoff**: the stack tokens are not recorded in the
-project. After creation, manage it with `uv` directly (`uv add`, `uv sync`,
-`uv run`). `stack upgrade` applies only to named environments.
+New projects are **tracked** by default: `stack create project` records
+your tokens in a `[tool.uv-stack]` table inside `pyproject.toml`
+(`--no-track` opts out for one-shot scaffolds). When your profiles or
+bundles change later, re-resolve the project in place:
+
+```bash
+stack refresh              # apply profile/bundle changes to this project
+stack refresh --dry-run    # see the add/remove delta first
+```
+
+Refresh is safe by construction: uv-stack only ever removes packages it
+previously added (they're recorded in the table's `applied` list), so
+dependencies you added yourself with `uv add` are never touched. Day to
+day, the project is still a normal `uv` project — `uv add`, `uv sync`,
+and `uv run` all work as usual.
 
 ## Configuration reference
 
@@ -360,3 +373,6 @@ All state lives under one directory, resolved in this order:
 - **Migrating old configs.** If you previously used `.in` profiles,
   `.bundle` files, or a `profiles.txt`, `stack doctor` will point at each
   leftover and tell you what to rename or convert.
+- **The `[tool.uv-stack]` table is tool-owned.** `stack refresh` rewrites
+  it wholesale; comments inside that one table are not preserved
+  (everything else in `pyproject.toml` is untouched, byte for byte).
