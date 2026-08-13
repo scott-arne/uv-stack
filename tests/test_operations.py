@@ -540,3 +540,47 @@ def test_init_project_no_track_removes_table_even_when_add_fails(
             cwd=project_dir,
         )
     assert read_tracking(project_dir / "pyproject.toml") is None
+
+
+def test_init_project_force_does_not_adopt_user_dependencies(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_force_adopt"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = ["numpy"]\n'
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(python="3.12", force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "pandas" in tracking.applied  # ds brings numpy+pandas
+    assert "numpy" not in tracking.applied  # user-owned, never adopted
+
+
+def test_init_project_force_keeps_previously_owned_packages(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_force_owned"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = ["numpy", "pandas"]\n'
+        "\n[tool.uv-stack]\nversion = 1\nstack = [\"ds\"]\n"
+        'applied = ["numpy", "pandas"]\n'
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(python="3.12", force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    # Previously uv-stack-owned names remain in the ledger.
+    assert "numpy" in tracking.applied and "pandas" in tracking.applied

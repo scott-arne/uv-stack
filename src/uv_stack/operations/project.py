@@ -17,7 +17,13 @@ from uv_stack.commands import micromamba_python_path, uv_add, uv_init, uv_sync
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError
 from uv_stack.models import ProjectTracking
-from uv_stack.operations.pyproject import remove_tracking, write_tracking
+from uv_stack.operations.pyproject import (
+    read_project_dependency_names,
+    read_tracking,
+    remove_tracking,
+    write_tracking,
+)
+from uv_stack.parse import requirement_name
 from uv_stack.render import render_requirements_flat
 from uv_stack.resolver import Resolver
 from uv_stack.runner import Command, Runner
@@ -83,6 +89,19 @@ def init_project(
             hint="Use --force to add to the existing project.",
         )
 
+    # Ownership snapshot: names already in [project.dependencies] that a
+    # PREVIOUS uv-stack create owned stay ours (force over a tracked
+    # project); anything else pre-existing is user-owned and must never
+    # enter the removal ledger.
+    previously_owned: set[str] = set()
+    existing_tracking = read_tracking(pyproject) if pyproject.is_file() else None
+    if existing_tracking is not None:
+        for entry in existing_tracking.applied:
+            owned_name = requirement_name(entry)
+            if owned_name:
+                previously_owned.add(owned_name)
+    user_owned = read_project_dependency_names(pyproject) - previously_owned
+
     # Resolve the stack first so --strict token errors are not preceded by
     # external command execution or an unrelated EnvError.
     resolver = Resolver(config, strict=options.strict)
@@ -110,12 +129,17 @@ def init_project(
             runner.run(_with_cwd(uv_init(python, options.name), cwd))
         runner.run(_with_cwd(uv_add(tmp_req), cwd))
         if options.track:
+            applied = [
+                package
+                for package in packages
+                if (requirement_name(package) or "") not in user_owned
+            ]
             write_tracking(
                 pyproject,
                 ProjectTracking(
                     stack=list(tokens),
                     python=options.python,
-                    applied=packages,
+                    applied=applied,
                 ),
             )
         if not options.no_sync:
