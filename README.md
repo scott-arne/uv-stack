@@ -56,26 +56,16 @@ uv tool install uv-stack
 Five minutes from nothing to a working, locked environment.
 
 ```bash
-# 1. Create the config tree (default location: ~/.config/python-envs)
+# One guided command sets up everything (config tree, starter profile,
+# first environment) with prompts — or --yes to accept the defaults:
+stack init
+
+# Prefer explicit steps? The same result by hand:
 stack config init
+stack create profile ds numpy pandas --description "Core data-science stack" --tag data
+stack create env main ds --python 3.12
 
-# 2. Define a profile — a reusable, named group of packages
-cat > ~/.config/python-envs/profiles/ds.yaml <<'EOF'
-description: Core data-science stack
-tags: [data, core]
-includes:
-  - numpy
-  - pandas
-EOF
-
-# 3. Define an environment that uses it
-mkdir -p ~/.config/python-envs/envs/main
-echo "ds" > ~/.config/python-envs/envs/main/stack.txt
-
-# 4. Build it
-stack create env main
-
-# 5. Use it
+# Use it (stack prints this hint after every successful create env):
 micromamba activate main
 # ...or run things in it without activating:
 micromamba run -n main python
@@ -88,8 +78,8 @@ create the `main` environment (Python 3.12 by default), compiled a pinned
 `uv pip sync`, and verified consistency with `uv pip check`.
 
 From now on, changing what's installed is always the same two steps: edit a
-source file (a profile, a bundle, or `stack.txt`), then run
-`stack upgrade main`.
+source file (a profile, a bundle, or stack.txt), then run stack upgrade main.
+Check what needs rebuilding at any time with stack status.
 
 ## How it works
 
@@ -190,13 +180,18 @@ Files `stack` generates (never edit these):
 
 | Command | What it does |
 | --- | --- |
-| `stack create env NAME` | Create the micromamba env and build it (add `--recreate` to wipe it first) |
+| `stack init` | Guided first-run setup (config tree, starter profile, first env) |
+| `stack create env NAME [TOKENS]...` | Scaffold (optional) and build an environment (`--recreate` wipes it first) |
+| `stack create profile NAME PKG...` | Write a new profile YAML (`--description`, `--tag`) |
+| `stack create bundle NAME TOKEN...` | Write a new bundle YAML (`--description`, `--tag`) |
 | `stack upgrade [NAMES]...` | Re-render, re-lock, and sync environments |
-| `stack list env\|profile\|bundle` | Tables of what exists (`--tag` filters profiles/bundles) |
+| `stack status [NAMES]...` | Per-env build state: drift, lock freshness, existence |
+| `stack list env\|profile\|bundle` | Tables of what exists (`--tag` filters, `--json` for scripts) |
 | `stack show env\|profile\|bundle [NAME]` | Details for one item (`NAME` defaults to `main` for envs) |
 | `stack resolve [--full] TOKENS...` | Classify tokens, or expand them to a flat package list |
-| `stack doctor` | Detect layout/config problems and print suggested fixes |
-| `stack config init` | Create missing config directories |
+| `stack doctor [--fix]` | Detect problems; `--fix` applies the safe repairs |
+| `stack completion bash\|zsh\|fish` | Print the shell-completion script |
+| `stack config init` | Create missing config directories (bare primitive) |
 
 ### Upgrading
 
@@ -243,6 +238,36 @@ stack doctor
 `doctor` never changes anything — it reports problems (missing directories,
 legacy file formats, environments in the wrong place) with a suggested `fix:`
 line for each.
+
+### Watching for drift
+
+```bash
+stack status
+```
+
+Shows one row per environment: whether the micromamba env exists, whether a
+lock is present, and whether your sources changed since the last build
+(`sources changed` means "run `stack upgrade`"). `--json` makes every
+inspection command (`list`, `show`, `resolve`, `status`, `doctor`)
+script-friendly.
+
+### Typo protection
+
+A bare token that matches no profile or bundle becomes a literal PyPI
+package. If it looks like a near-miss of one of your names, `stack` warns
+(`did you mean 'standard'?`). Add `--strict` to `upgrade`, `create env`,
+`create project`, `create bundle`, or `resolve` to turn any unqualified
+fallthrough into an error, and use the `pkg:` prefix to say "yes, really a
+package."
+
+### Shell completion
+
+```bash
+# zsh — add to ~/.zshrc:
+eval "$(stack completion zsh)"
+```
+
+Tab-completes commands, options, and your environment/profile/bundle names.
 
 ## Creating projects
 
@@ -328,6 +353,10 @@ All state lives under one directory, resolved in this order:
 - **Name collisions.** A bare token prefers a profile over a bundle over a
   literal package. When a package name collides with one of your profile or
   bundle names, force the package with `pkg:<name>`.
+- **`doctor --fix` is conservative.** It only applies safe repairs (creating
+  missing directories, renaming legacy files, converting `.in`/`.bundle`
+  files to YAML with a `.bak` backup). Anything destructive stays a printed
+  suggestion.
 - **Migrating old configs.** If you previously used `.in` profiles,
   `.bundle` files, or a `profiles.txt`, `stack doctor` will point at each
   leftover and tell you what to rename or convert.
