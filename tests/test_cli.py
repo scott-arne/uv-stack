@@ -1313,3 +1313,27 @@ def test_complete_show_names_dispatches_on_kind(tmp_path: Path):
     ctx = _click.Context(cli)
     ctx.params = {"root": str(root), "kind": "profile"}
     assert complete_show_names(ctx, None, "d") == ["ds"]
+
+
+def test_help_contains_no_rest_double_backticks():
+    runner = CliRunner()
+    for args in (
+        ["--help"],
+        ["upgrade", "--help"],
+        ["create", "--help"],
+        ["create", "env", "--help"],
+        ["create", "project", "--help"],
+        ["create", "profile", "--help"],
+        ["create", "bundle", "--help"],
+        ["list", "--help"],
+        ["show", "--help"],
+        ["resolve", "--help"],
+        ["status", "--help"],
+        ["doctor", "--help"],
+        ["config", "--help"],
+        ["init", "--help"],
+        ["completion", "--help"],
+    ):
+        result = runner.invoke(cli, args)
+        assert result.exit_code == 0
+        assert "``" not in result.output, f"double backticks in: {args}"

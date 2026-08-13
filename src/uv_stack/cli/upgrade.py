@@ -138,13 +138,13 @@ def upgrade(
 ) -> None:
     """Render, compile, sync, and check one or more existing environments.
 
-    Pass NAMES to upgrade specific environments, or ``--all`` to upgrade every
+    Pass NAMES to upgrade specific environments, or '--all' to upgrade every
     discovered environment. With neither, all environments are upgraded as well
-    (the implicit form of ``--all``). Upgrading all environments prompts for
+    (the implicit form of '--all'). Upgrading all environments prompts for
     confirmation unless -y is given. By default the batch continues past a
-    failing environment and reports a ``✓``/``✗`` summary; ``--stop-on-error``
+    failing environment and reports a ✓/✗ summary; '--stop-on-error'
     aborts at the first failure. To create a missing environment, use
-    ``stack create env``.
+    'stack create env'.
     """
     if all_envs and names:
         raise click.UsageError("--all cannot be combined with explicit environment NAMES.")
