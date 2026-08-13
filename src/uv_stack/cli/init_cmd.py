@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import rich_click as click
 
-from uv_stack.cli._render import echo, print_activation_hint
+from uv_stack.cli._render import echo, print_activation_hint, render_warnings
 from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
 from uv_stack.operations.init import init_config_root
@@ -57,13 +57,17 @@ def init(config: ConfigRoot, yes: bool) -> None:
             # 'stack create env': bad tokens or malformed profiles must not
             # leave a half-created env behind.
             resolver = Resolver(config)
-            resolver.flatten(resolver.resolve(tokens))
+            stack = resolver.resolve(tokens)
+            resolver.flatten(stack)
             for path in write_env_sources(config, name, tokens, python=python):
                 echo(f"Wrote {path}")
             scaffolded_env = name
             if yes or click.confirm("Build it now?", default=True):
                 _run_upgrade(config, [name], UpgradeOptions(create=True))
                 built_env = name
+            else:
+                # User declined the build; render warnings once here.
+                render_warnings(stack.warnings)
 
     echo("")
     echo("Next steps:")

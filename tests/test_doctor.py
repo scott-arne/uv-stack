@@ -132,6 +132,38 @@ def test_repair_converts_legacy_bundle(config_tree: ConfigRoot):
     assert (config_tree.bundles_dir / "oldb.bundle.bak").is_file()
 
 
+def test_repair_skips_legacy_profile_when_bundle_exists_for_stem(config_tree: ConfigRoot):
+    """Legacy profiles/old.in skipped when bundles/old.yaml exists (shadow guard)."""
+    # Create existing bundle.
+    (config_tree.bundles_dir / "old.yaml").write_text("includes:\n- pandas\n")
+    # Create legacy profile with same stem.
+    legacy = config_tree.profiles_dir / "old.in"
+    legacy.write_text("numpy\n")
+    actions = repair(config_tree, diagnose(config_tree))
+    skipped = [a for a in actions if a.finding.kind == "legacy-profile"]
+    assert skipped and not skipped[0].applied
+    assert "would shadow the existing bundle" in skipped[0].reason
+    # Legacy file intact, no profiles/old.yaml created.
+    assert legacy.exists()
+    assert not (config_tree.profiles_dir / "old.yaml").exists()
+
+
+def test_repair_skips_legacy_bundle_when_profile_exists_for_stem(config_tree: ConfigRoot):
+    """Legacy bundles/old.bundle skipped when profiles/old.yaml exists (shadow guard)."""
+    # Create existing profile.
+    (config_tree.profiles_dir / "old.yaml").write_text("includes:\n- numpy\n")
+    # Create legacy bundle with same stem.
+    legacy = config_tree.bundles_dir / "old.bundle"
+    legacy.write_text("ds\n")
+    actions = repair(config_tree, diagnose(config_tree))
+    skipped = [a for a in actions if a.finding.kind == "legacy-bundle"]
+    assert skipped and not skipped[0].applied
+    assert "would be shadowed by the existing profile" in skipped[0].reason
+    # Legacy file intact, no bundles/old.yaml created.
+    assert legacy.exists()
+    assert not (config_tree.bundles_dir / "old.yaml").exists()
+
+
 def test_repair_moves_misplaced_env(config_tree: ConfigRoot):
     stray = config_tree.root / "straggler"
     stray.mkdir()
@@ -283,11 +315,6 @@ def test_finish_move_normal_case(tmp_path: Path):
     assert dst.read_text() == "content\n"
 
 
-def test_finish_move_dst_exists_before_link(tmp_path: Path):
-    """Destination exists before link → FileExistsError from os.link (not tested here)."""
-    # This scenario is tested by the file-rename skip tests; _finish_move
-    # is only called after a successful os.link.
-    pass
 
 
 def test_finish_move_src_replaced_after_link(tmp_path: Path):

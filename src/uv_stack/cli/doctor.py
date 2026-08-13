@@ -47,7 +47,6 @@ def doctor(config_root: ConfigRoot, fix: bool, as_json: bool) -> None:
         return
 
     actions: list[RepairAction] = []
-    findings = diagnose(config_root)
     # Repairing can reveal new fixable findings (creating the root exposes
     # the missing subdirectories), so iterate to a fixed point. The bound
     # only guards against a pathological repair that never converges.

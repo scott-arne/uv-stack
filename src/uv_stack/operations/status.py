@@ -111,7 +111,11 @@ def env_status(config: ConfigRoot, runner: Runner, name: str) -> EnvStatus:
     req_mtime = req_path.stat().st_mtime if req_path.is_file() else 0
     local_mtime = local_req.stat().st_mtime if local_req.is_file() else 0
     reference_mtime = max(req_mtime, local_mtime)
-    lock_stale = lock.stat().st_mtime < reference_mtime if reference_mtime > 0 else False
+    try:
+        lock_stale = lock.stat().st_mtime < reference_mtime if reference_mtime > 0 else False
+    except FileNotFoundError:
+        # Lock vanished between the is_file() check and here.
+        lock_stale = False
 
     if sources_changed:
         state = "sources changed"

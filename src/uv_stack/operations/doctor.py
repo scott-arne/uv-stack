@@ -296,6 +296,21 @@ def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
             finding, description, applied=False,
             reason=f"{finding.dest.name} already exists",
         )
+    # Cross-kind shadow guard: skip if the opposite kind exists for the stem.
+    stem = finding.path.stem
+    if finding.kind == "legacy-profile":
+        if config.bundle_exists(stem):
+            return RepairAction(
+                finding, description, applied=False,
+                reason=f"profile '{stem}' would shadow the existing bundle",
+            )
+    elif finding.kind == "legacy-bundle":
+        if config.profile_exists(stem):
+            return RepairAction(
+                finding, description, applied=False,
+                reason=f"bundle '{stem}' would be shadowed by the existing profile",
+            )
+
     # Path.rename would silently replace an existing backup on POSIX; a
     # repair pass must never destroy user content, so skip instead.
     backup = finding.path.with_name(finding.path.name + ".bak")
