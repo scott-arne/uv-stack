@@ -195,3 +195,68 @@ def test_atomic_write_degrades_without_nofollow_nonblock(
     atomic_write(target, "changed\n")
     assert target.stat().st_mtime > stamped
     assert target.read_text() == "changed\n"
+
+
+def test_atomic_write_new_falls_back_without_hardlinks(tmp_path, monkeypatch):
+    import errno
+    import os as _os
+
+    from uv_stack.fsutil import atomic_write_new
+
+    def _no_link(src, dst, **kwargs):
+        raise OSError(errno.EPERM, "hard links not supported")
+
+    monkeypatch.setattr(_os, "link", _no_link)
+    target = tmp_path / "made.txt"
+    stat_result = atomic_write_new(target, "content\n")
+    assert target.read_text() == "content\n"
+    assert (stat_result.st_dev, stat_result.st_ino) == (
+        target.stat().st_dev,
+        target.stat().st_ino,
+    )
+    # Exclusive-create semantics preserved on the fallback path.
+    with pytest.raises(FileExistsError):
+        atomic_write_new(target, "other\n")
+
+
+def test_atomic_write_new_fallback_cleans_partial_on_failure(tmp_path, monkeypatch):
+    import errno
+    import os as _os
+
+    from uv_stack.fsutil import atomic_write_new
+
+    def _no_link(src, dst, **kwargs):
+        raise OSError(errno.EPERM, "hard links not supported")
+
+    monkeypatch.setattr(_os, "link", _no_link)
+
+    real_fdopen = _os.fdopen
+
+    class _ExplodingWriter:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+            return False
+
+        def write(self, text):
+            raise OSError("disk full")
+
+    calls = {"count": 0}
+
+    def _fdopen(fd, *args, **kwargs):
+        handle = real_fdopen(fd, *args, **kwargs)
+        calls["count"] += 1
+        if calls["count"] == 2:  # 1st fdopen = temp file; 2nd = the fallback
+            return _ExplodingWriter(handle)
+        return handle
+
+    monkeypatch.setattr(_os, "fdopen", _fdopen)
+    target = tmp_path / "partial.txt"
+    with pytest.raises(OSError):
+        atomic_write_new(target, "content\n")
+    assert not target.exists()  # partial target withdrawn

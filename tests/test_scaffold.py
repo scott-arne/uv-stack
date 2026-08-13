@@ -229,3 +229,13 @@ def test_write_env_sources_rollback_preserves_concurrent_replacement(config_tree
     assert stack_path.exists()
     assert stack_path.read_text() == "REPLACED\n"
     assert not config_tree.env_python_path("concurrent-test").exists()
+
+
+@pytest.mark.parametrize("bad", ["pkg:x", "@x", "a b", "-x", "a\tb"])
+def test_validate_name_rejects_token_shaped_names(config_tree: ConfigRoot, bad):
+    with pytest.raises(ConfigError):
+        write_profile(config_tree, bad, ["numpy"])
+    with pytest.raises(ConfigError):
+        write_bundle(config_tree, bad, ["ds"])
+    with pytest.raises(ConfigError):
+        write_env_sources(config_tree, bad, ["ds"])

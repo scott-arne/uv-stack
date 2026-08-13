@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import tempfile
 from pathlib import Path
+
+#: os.link failures that mean "this filesystem cannot hard-link" — fall back
+#: to exclusive create. EEXIST is deliberately absent: that is the no-clobber
+#: contract, never a fallback trigger.
+_LINK_FALLBACK_ERRNOS = frozenset(
+    {errno.EPERM, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK}
+    | ({getattr(errno, "ENOTSUP")} if hasattr(errno, "ENOTSUP") else set())  # noqa: B009
+)
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -74,6 +83,8 @@ def atomic_write_new(path: Path, text: str) -> os.stat_result:
     The content is written to a temporary file and published with
     :func:`os.link`, which refuses to replace an existing target — the
     no-clobber counterpart of :func:`atomic_write` for user-authored files.
+    Falls back to an exclusive O_CREAT|O_EXCL create on filesystems without
+    hard links; FileExistsError semantics are identical on both paths.
 
     :param path: Destination file (must not exist).
     :param text: Content to write.
@@ -91,7 +102,33 @@ def atomic_write_new(path: Path, text: str) -> os.stat_result:
         # Capture the identity before linking: the temp file IS the published inode
         # once linked — os.link creates a second name for the same inode.
         identity = os.stat(tmp_name)
-        os.link(tmp_name, path)
+        try:
+            os.link(tmp_name, path)
+        except FileExistsError:
+            raise
+        except OSError as error:
+            if error.errno not in _LINK_FALLBACK_ERRNOS:
+                raise
+            # Link-less filesystem (FAT/exFAT, some network mounts): fall
+            # back to exclusive create — still no-clobber, losing only the
+            # write-then-publish atomicity of the content.
+            fallback_fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+            created = os.fstat(fallback_fd)
+            try:
+                with os.fdopen(fallback_fd, "w") as handle:
+                    handle.write(text)
+                    handle.flush()
+                return created
+            except BaseException:
+                # Never leave a partial no-clobber target behind: withdraw
+                # only while the path still names the inode we created.
+                try:
+                    current = path.lstat()
+                    if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                        path.unlink(missing_ok=True)
+                except FileNotFoundError:
+                    pass
+                raise
         return identity
     finally:
         if os.path.exists(tmp_name):

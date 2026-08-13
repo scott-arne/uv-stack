@@ -26,10 +26,22 @@ def _validate_name(kind: str, name: str) -> None:
     :param name: Name to validate.
     :raises ConfigError: If name is invalid.
     """
-    if not name or name == "." or name == ".." or "/" in name or "\\" in name:
+    if (
+        not name
+        or name in (".", "..")
+        or "/" in name
+        or "\\" in name
+        or ":" in name
+        or "@" in name
+        or name.startswith("-")
+        or any(char.isspace() for char in name)
+    ):
         raise ConfigError(
             f"Invalid {kind} name: '{name}'",
-            hint="Names are file stems: no path separators or dot segments.",
+            hint=(
+                "Names are file stems: no path separators, dot segments, "
+                "':', '@', whitespace, or leading '-'."
+            ),
         )
 
 
