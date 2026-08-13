@@ -41,3 +41,26 @@ def first_clean_line(path: Path, default: str = "") -> str:
     """
     lines = read_clean_lines(path)
     return lines[0] if lines else default
+
+
+#: Characters that terminate a distribution name inside a requirement string.
+_NAME_TERMINATORS = "[<>=!~;@ \t"
+
+
+def requirement_name(requirement: str) -> str | None:
+    """Return the distribution name of a plain requirement string.
+
+    Entries that are not plain names — flags/editables (leading ``-``) and
+    paths/archives/direct references (containing ``/`` or ``\\``) — return
+    ``None``; callers must never auto-remove those.
+
+    :param requirement: A requirement string such as ``pkg[extra]>=1``.
+    :returns: The leading distribution name, or ``None``.
+    """
+    req = requirement.strip()
+    if not req or req.startswith("-") or "/" in req or "\\" in req:
+        return None
+    for index, char in enumerate(req):
+        if char in _NAME_TERMINATORS:
+            return req[:index].strip() or None
+    return req

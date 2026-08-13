@@ -78,3 +78,24 @@ class ClassifiedTokens(BaseModel):
 
     entries: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class ProjectTracking(BaseModel):
+    """The ``[tool.uv-stack]`` project tracking table.
+
+    ``applied`` is the removal ledger: refresh may only ever remove packages
+    recorded there, so user-added dependencies are never touched.
+
+    :param version: Tracking schema version (always 1 for this release).
+    :param stack: The create-time stack tokens, verbatim.
+    :param python: The raw ``--python`` value when one was given; ``None``
+        keeps the project portable (machine defaults apply).
+    :param applied: The flattened requirements uv-stack last applied.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = 1
+    stack: list[str]
+    python: str | None = None
+    applied: list[str] = Field(default_factory=list)

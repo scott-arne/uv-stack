@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from uv_stack.parse import clean_line, first_clean_line, read_clean_lines
+import pytest
+
+from uv_stack.parse import clean_line, first_clean_line, read_clean_lines, requirement_name
 
 
 def test_clean_line_strips_comment_and_whitespace():
@@ -30,3 +32,22 @@ def test_first_clean_line_returns_first_value(tmp_path: Path):
     f = tmp_path / "python.txt"
     f.write_text("\n3.11\n3.10\n")
     assert first_clean_line(f, default="3.12") == "3.11"
+
+
+@pytest.mark.parametrize(
+    "requirement, expected",
+    [
+        ("numpy", "numpy"),
+        ("numpy>=2", "numpy"),
+        ("pkg[extra]==1.0", "pkg"),
+        ("pkg ; python_version<'3.13'", "pkg"),
+        ("pkg @ https://host/x.whl", None),   # slash → not a plain name
+        ("./dist/x.tar.gz", None),
+        ("-e ./tool", None),
+        ("--pre", None),
+        ("", None),
+        ("   ", None),
+    ],
+)
+def test_requirement_name(requirement, expected):
+    assert requirement_name(requirement) == expected
