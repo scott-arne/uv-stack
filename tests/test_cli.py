@@ -1258,6 +1258,22 @@ def test_completion_zsh_prints_script(tmp_path: Path):
     assert "_STACK_COMPLETE" in result.output
 
 
+def test_completion_bash_prints_script():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["completion", "bash"])
+    assert result.exit_code == 0
+    assert result.output.startswith("# Requires bash >= 4.4.")
+    assert "_STACK_COMPLETE" in result.output
+
+
+def test_completion_fish_prints_script():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["completion", "fish"])
+    assert result.exit_code == 0
+    assert result.output.startswith("# Add to ~/.config/fish/config.fish")
+    assert "_STACK_COMPLETE" in result.output
+
+
 def test_completion_requires_shell_argument():
     runner = CliRunner()
     result = runner.invoke(cli, ["completion"])

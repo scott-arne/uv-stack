@@ -7,7 +7,7 @@ import rich_click as click
 from uv_stack.cli._render import echo
 
 _INSTALL_HINTS = {
-    "bash": '# Add to ~/.bashrc: eval "$(stack completion bash)"',
+    "bash": '# Requires bash >= 4.4. Add to ~/.bashrc: eval "$(stack completion bash)"',
     "zsh": '# Add to ~/.zshrc: eval "$(stack completion zsh)"',
     "fish": "# Add to ~/.config/fish/config.fish: stack completion fish | source",
 }
