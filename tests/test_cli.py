@@ -1596,6 +1596,39 @@ def test_create_profile_warns_on_whitespace_padded_bundle_token(tmp_path: Path):
     assert "bundles/web.yaml" in combined
 
 
+def test_create_profile_warns_on_case_variant_retarget(tmp_path: Path):
+    """Case-variant retargeting warning on case-insensitive filesystems."""
+    root = _env_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    # Env stack contains bare "httpx" (lowercase).
+    cfg.env_stack_path("main").write_text("@standard\nhttpx\n")
+
+    # Detect whether the filesystem is case-insensitive.
+    # Write a lowercase profile and check if uppercase path resolves to it.
+    sentinel = cfg.profile_path("sentinel_lowercase")
+    sentinel.write_text("includes: []\n")
+    case_insensitive = cfg.profile_path("SENTINEL_LOWERCASE").is_file()
+    sentinel.unlink()
+
+    runner = CliRunner()
+    # Create profile "HTTPX" (uppercase).
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "profile", "HTTPX", "httpx>=0.27"]
+    )
+    assert result.exit_code == 0
+    combined = _combined_output(result)
+
+    if case_insensitive:
+        # On case-insensitive filesystems, the bare "httpx" now retargets to "HTTPX".
+        assert "'HTTPX' is used as a bare token" in combined
+        assert "envs/main/stack.txt" in combined
+    else:
+        # On case-sensitive filesystems, no retarget occurs.
+        assert "used as a bare token" not in combined
+
+
 def test_create_profile_tolerates_corrupt_env(tmp_path: Path):
     root = _seeded_root(tmp_path)
     from uv_stack.config import ConfigRoot

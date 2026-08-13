@@ -32,13 +32,29 @@ def _bare_usage_warnings(
         "'{name}' is used as a bare token in {location}; it now resolves to "
         "this {kind} (use pkg:{name} there for the literal package)"
     )
+
+    def _matches(token: str) -> bool:
+        """Check if token matches the created name, accounting for case-insensitive filesystems."""
+        if token == name:
+            return True
+        if token.casefold() == name.casefold():
+            try:
+                if kind == "profile":
+                    return config.profile_path(token).is_file()
+                else:  # kind == "bundle"
+                    return config.bundle_path(token).is_file()
+            except OSError:
+                return False
+        return False
+
     try:
         envs = config.list_envs()
     except OSError:
         envs = []
     for env in envs:
         try:
-            if name in read_clean_lines(config.env_stack_path(env)):
+            tokens = read_clean_lines(config.env_stack_path(env))
+            if any(_matches(token) for token in tokens):
                 warnings.append(
                     template.format(name=name, location=f"envs/{env}/stack.txt", kind=kind)
                 )
@@ -55,7 +71,7 @@ def _bare_usage_warnings(
             includes = config.load_bundle(bundle_name).includes
         except (UvStackError, OSError, UnicodeDecodeError):
             continue  # malformed/unreadable bundles are doctor's job, not create's
-        if any(token.strip() == name for token in includes):
+        if any(_matches(token.strip()) for token in includes):
             warnings.append(
                 template.format(
                     name=name, location=f"bundles/{bundle_name}.yaml", kind=kind
