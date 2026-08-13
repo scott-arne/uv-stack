@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from uv_stack.errors import ConfigError
 from uv_stack.fsutil import atomic_write
 from uv_stack.models import ProjectTracking
-from uv_stack.parse import requirement_name
+from uv_stack.parse import ownership_name
 
 _HEADER = "[tool.uv-stack]"
 _UV_STACK_PATH = ("tool", "uv-stack")
@@ -245,13 +245,7 @@ def read_project_dependency_names(pyproject: Path) -> set[str]:
     names: set[str] = set()
     for dependency in dependencies:
         if isinstance(dependency, str):
-            # PEP 508 direct references have form: name[extras] @ url
-            # Extract name from text before first @ (if any).
-            if "@" in dependency:
-                head = dependency.split("@", 1)[0].strip()
-                name = requirement_name(head)
-            else:
-                name = requirement_name(dependency)
+            name = ownership_name(dependency)
             if name:
                 names.add(name)
     return names

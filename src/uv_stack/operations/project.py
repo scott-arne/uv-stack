@@ -23,7 +23,7 @@ from uv_stack.operations.pyproject import (
     remove_tracking,
     write_tracking,
 )
-from uv_stack.parse import canonical_name, requirement_name
+from uv_stack.parse import canonical_name, ownership_name, requirement_name
 from uv_stack.resolver import Resolver
 from uv_stack.runner import Command, Runner
 
@@ -96,7 +96,7 @@ def init_project(
     existing_tracking = read_tracking(pyproject) if pyproject.is_file() else None
     if existing_tracking is not None:
         for entry in existing_tracking.applied:
-            owned_name = requirement_name(entry)
+            owned_name = ownership_name(entry)
             if owned_name:
                 previously_owned.add(canonical_name(owned_name))
     user_owned = (
@@ -320,7 +320,7 @@ def refresh_project(
     # Ownership: names currently owned by uv-stack (from the old ledger).
     owned = {
         canonical_name(n)
-        for n in (requirement_name(e) for e in tracking.applied)
+        for n in (ownership_name(e) for e in tracking.applied)
         if n
     }
     # Names in [project.dependencies] NOT in the old ledger are user-owned.
@@ -393,21 +393,20 @@ def refresh_project(
         if names:
             runner.run(_with_cwd(uv_remove(names), cwd))
         runner.run(_with_cwd(uv_add(tmp_req), cwd))
+        write_tracking(
+            pyproject,
+            ProjectTracking(
+                version=1,
+                stack=tracking.stack,
+                python=options.python if options.python is not None else tracking.python,
+                applied=stack_adds,
+            ),
+        )
         if not options.no_sync:
             runner.run(_with_cwd(uv_sync(python), cwd))
     finally:
         if tmp_req.exists():
             tmp_req.unlink()
-
-    write_tracking(
-        pyproject,
-        ProjectTracking(
-            version=1,
-            stack=tracking.stack,
-            python=options.python if options.python is not None else tracking.python,
-            applied=stack_adds,
-        ),
-    )
     return RefreshResult(
         warnings=warnings,
         added=added,

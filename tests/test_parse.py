@@ -61,3 +61,22 @@ def test_canonical_name(raw, canonical):
     from uv_stack.parse import canonical_name
 
     assert canonical_name(raw) == canonical
+
+
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        ("numpy>=2", "numpy"),
+        ("pkg[extra]==1.0", "pkg"),
+        ("pkg @ https://host/x.whl", "pkg"),  # PEP 508 direct reference
+        ("pkg[extra] @ https://host/x.whl", "pkg"),  # with extras
+        ("git+https://h/r.git@v1", None),  # VCS → contains /
+        ("-e ./tool", None),  # editable
+        ("./dist/x.tar.gz", None),  # path
+        ("", None),
+    ],
+)
+def test_ownership_name(entry, expected):
+    from uv_stack.parse import ownership_name
+
+    assert ownership_name(entry) == expected

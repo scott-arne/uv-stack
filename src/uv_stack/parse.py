@@ -76,3 +76,21 @@ def requirement_name(requirement: str) -> str | None:
         if char in _NAME_TERMINATORS:
             return req[:index].strip() or None
     return req
+
+
+def ownership_name(entry: str) -> str | None:
+    """Extract the distribution name for ownership tracking.
+
+    Handles PEP 508 direct references (``pkg @ url``) by extracting the name
+    before the ``@``. VCS entries (``git+https://...``), editables (``-e``),
+    and paths (containing ``/`` or ``\\``) return ``None``.
+
+    :param entry: A ledger entry or requirement string.
+    :returns: The distribution name for ownership comparison, or ``None``.
+    """
+    entry = entry.strip()
+    if "@" in entry:
+        # PEP 508 direct reference: "name @ url" or "name[extras] @ url"
+        head = entry.split("@", 1)[0].strip()
+        return requirement_name(head)
+    return requirement_name(entry)

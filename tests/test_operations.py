@@ -1155,3 +1155,90 @@ def test_refresh_direct_reference_in_skipped_removals_not_removed(
     # Assert it appears in skipped_removals and NOT in removed.
     assert "pkg @ file:wheel.whl" in result.skipped_removals
     assert "pkg @ file:wheel.whl" not in result.removed
+
+
+def test_refresh_direct_reference_owned_not_classified_user_owned(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """Old ledger and current deps both have 'pkg @ url', stack resolves
+    pkg==1.0 → NOT user-owned."""
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    config_tree.profile_path("directref").write_text("includes:\n  - pkg==1.0\n")
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["directref"]\n'
+        'applied = ["pkg @ https://h/x.whl"]\n'
+    )
+    project_dir = tmp_path / "proj_directref_owned"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["pkg @ https://h/x.whl"]\n' + tracking_text
+    )
+
+    captured_file_content = None
+
+    def capture_responder(cmd: Command) -> CommandResult:
+        nonlocal captured_file_content
+        if "add" in cmd.args and "--no-sync" in cmd.args:
+            for arg in cmd.args:
+                if arg.startswith("/") and arg.endswith(".txt"):
+                    req_file = Path(arg)
+                    if req_file.exists():
+                        captured_file_content = req_file.read_text()
+                    break
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=capture_responder)
+    result = refresh_project(
+        config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir
+    )
+    # pkg should NOT be classified user-owned (it was in old ledger).
+    assert not any("pkg" in w and "user-owned" in w for w in result.warnings)
+    # Temp file should contain pkg==1.0.
+    assert captured_file_content is not None
+    assert "pkg==1.0" in captured_file_content
+    # New ledger should contain pkg==1.0.
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "pkg==1.0" in tracking.applied
+
+
+def test_refresh_sync_failure_after_add_ledger_written(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """Ledger written after uv add succeeds, before uv sync → sync failure keeps new ledger."""
+    from uv_stack.errors import ToolError
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    config_tree.profile_path("chem").write_text("includes:\n  - chemprop\n")
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+
+    def _fail_sync(cmd: Command) -> CommandResult:
+        if cmd.args[0] == "uv" and cmd.args[1] == "sync":
+            raise ToolError("sync failed", command=cmd.args, returncode=1)
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=_fail_sync)
+    with pytest.raises(ToolError):
+        refresh_project(
+            config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir
+        )
+    # Ledger was written after successful add → contains chemprop.
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "chemprop" in tracking.applied
+    # Second refresh converges: chemprop is NOT classified user-owned.
+    rec2 = RecordingRunner()
+    result = refresh_project(
+        config_tree, rec2, RefreshOptions(python="3.12"), cwd=project_dir
+    )
+    assert not any("chemprop" in w and "user-owned" in w for w in result.warnings)
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "chemprop" in tracking.applied
