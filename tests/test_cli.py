@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import rich_click
 from click.testing import CliRunner
 
 from uv_stack.cli import cli
@@ -1498,15 +1499,22 @@ def test_refresh_flags_pass_through_to_refresh_project(tmp_path: Path, monkeypat
 
 
 def test_refresh_in_help_panels():
+    """Refresh command must appear in the Environments panel.
+
+    Asserts structurally against COMMAND_GROUPS so the test fails if refresh is
+    registered but placed in a different panel.
+    """
+    # Structural assertion: the Environments group must contain exactly the
+    # three listed commands in order.
+    command_groups = rich_click.rich_click.COMMAND_GROUPS.get("stack", [])
+    env_group = next((g for g in command_groups if g["name"] == "Environments"), None)
+    assert env_group is not None, "Environments panel not found in COMMAND_GROUPS"
+    assert env_group["commands"] == ["upgrade", "create", "refresh"], (
+        f"Expected ['upgrade', 'create', 'refresh'], got {env_group['commands']}"
+    )
+
+    # Lightweight smoke assertion: help renders correctly and refresh appears.
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"], prog_name="stack")
     assert result.exit_code == 0
-    output = result.output
-    assert "Environments" in output
-    # Verify all three commands appear in the Environments panel together.
-    env_start = output.index("Environments")
-    next_panel = output.find("\n\n", env_start)
-    env_section = output[env_start:next_panel] if next_panel != -1 else output[env_start:]
-    assert "refresh" in env_section
-    assert "upgrade" in env_section
-    assert "create" in env_section
+    assert "refresh" in result.output
