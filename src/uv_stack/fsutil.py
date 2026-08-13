@@ -14,9 +14,20 @@ def atomic_write(path: Path, text: str) -> None:
     moved into place with :func:`os.replace`, so a crash mid-write never leaves
     a partially-written target.
 
+    Identical content is not rewritten (the mtime is preserved).
+
     :param path: Destination file.
     :param text: Content to write.
     """
+    # Skip identical rewrites: generated files keep their mtime, so
+    # mtime-based staleness checks (stack status) see no phantom drift
+    # after a dry-run re-render.
+    try:
+        if path.read_text() == text:
+            return
+    except (FileNotFoundError, OSError):
+        pass
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:

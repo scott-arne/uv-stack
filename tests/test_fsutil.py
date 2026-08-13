@@ -73,3 +73,15 @@ def test_atomic_write_new_leaves_no_temp_files_on_failure(tmp_path: Path):
     with pytest.raises(FileExistsError):
         atomic_write_new(target, "second")
     assert [p.name for p in tmp_path.iterdir()] == ["clash.txt"]
+
+
+def test_atomic_write_skips_identical_content(tmp_path: Path):
+    target = tmp_path / "gen.txt"
+    atomic_write(target, "same\n")
+    old = target.stat().st_mtime
+    os.utime(target, (old - 100, old - 100))
+    stamped = target.stat().st_mtime
+    atomic_write(target, "same\n")
+    assert target.stat().st_mtime == stamped  # untouched
+    atomic_write(target, "different\n")
+    assert target.read_text() == "different\n"

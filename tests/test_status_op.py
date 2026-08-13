@@ -216,3 +216,19 @@ def test_status_lock_race_condition(config_tree: ConfigRoot):
     assert status.lock_present is False
     assert status.created is True
     assert status.python == "3.12"
+
+
+def test_dry_run_upgrade_keeps_status_ok(config_tree: ConfigRoot):
+    _built(config_tree)
+    # A dry-run re-renders identical content; with write-if-unchanged the
+    # mtimes stay put and status must remain "ok", not "lock stale".
+    upgrade_env(
+        config_tree,
+        RecordingRunner(responder=_existing_env_responder),
+        "main",
+        UpgradeOptions(dry_run=True),
+    )
+    status = env_status(
+        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
+    )
+    assert status.state == "ok"
