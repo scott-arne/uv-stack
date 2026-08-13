@@ -184,7 +184,9 @@ def _splice(text: str, table_text: str | None) -> str:
             separator = "\n\n"
         return text + separator + table_text
     start, end = span
-    if table_lines and end < len(lines):
+    # Append separator when content follows OR when we're at EOF and the
+    # original ended with a newline (preserving the trailing-newline phantom).
+    if table_lines and (end < len(lines) or (end == len(lines) and text.endswith("\n"))):
         table_lines = [*table_lines, ""]
     return "\n".join([*lines[:start], *table_lines, *lines[end:]])
 

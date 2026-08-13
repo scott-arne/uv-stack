@@ -609,6 +609,45 @@ def test_init_project_force_ownership_is_name_normalized(
     assert tracking.applied == []  # my.pkg == My_Pkg canonically → user-owned
 
 
+def test_init_project_force_filters_user_owned_from_temp_file(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_user_filter"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = ["numpy<2"]\n'
+    )
+    captured_req: str | None = None
+
+    def capture_responder(cmd: Command) -> CommandResult:
+        nonlocal captured_req
+        if "add" in cmd.args and "-r" in cmd.args:
+            req_idx = cmd.args.index("-r")
+            req_path = Path(cmd.args[req_idx + 1])
+            if req_path.exists():
+                captured_req = req_path.read_text()
+        return CommandResult(returncode=0, stdout="")
+
+    warnings = init_project(
+        config_tree, RecordingRunner(responder=capture_responder), ["ds"],
+        ProjectOptions(python="3.12", force=True), cwd=project_dir,
+    )
+    # ds brings both numpy and pandas
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "pandas" in tracking.applied
+    assert "numpy" not in tracking.applied  # user-owned, excluded from ledger
+    # temp requirements file must not contain numpy
+    assert captured_req is not None
+    assert "pandas" in captured_req
+    assert "numpy" not in captured_req
+    # warning emitted for the excluded entry
+    assert any("numpy" in w and "user-owned" in w for w in warnings)
+
+
 # ============================================================================
 # project refresh tests
 # ============================================================================

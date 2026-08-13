@@ -288,3 +288,21 @@ def test_crlf_replace_in_place(tmp_path: Path):
     raw = pyproject.read_bytes()
     assert b"[tool.ruff]\r\nline-length = 100" in raw  # following table intact
     assert read_tracking(pyproject) == _tracking()
+
+
+def test_replace_at_eof_preserves_trailing_newline(tmp_path: Path):
+    """When [tool.uv-stack] is the LAST table, replacing it preserves the final newline."""
+    pyproject = tmp_path / "pyproject.toml"
+    # create-shaped file: table last, file ends with newline
+    pyproject.write_text(_BASE + "\n[tool.uv-stack]\nversion = 1\nstack = []\napplied = []\n")
+    original = pyproject.read_text()
+    assert original.endswith("\n")  # precondition: original has trailing newline
+    # write_tracking with an identical table should be byte-identical
+    write_tracking(pyproject, ProjectTracking(version=1, stack=[], applied=[]))
+    result = pyproject.read_text()
+    assert result.endswith("\n"), "trailing newline lost on identical replace"
+    # write_tracking with a changed table should also end with exactly one newline
+    write_tracking(pyproject, _tracking())
+    result = pyproject.read_text()
+    assert result.endswith("\n"), "trailing newline lost on changed replace"
+    assert not result.endswith("\n\n"), "extra newline added"

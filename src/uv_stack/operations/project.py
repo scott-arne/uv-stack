@@ -24,7 +24,6 @@ from uv_stack.operations.pyproject import (
     write_tracking,
 )
 from uv_stack.parse import canonical_name, requirement_name
-from uv_stack.render import render_requirements_flat
 from uv_stack.resolver import Resolver
 from uv_stack.runner import Command, Runner
 
@@ -109,8 +108,22 @@ def init_project(
     # external command execution or an unrelated EnvError.
     resolver = Resolver(config, strict=options.strict)
     stack = resolver.resolve(tokens)
-    flat = render_requirements_flat(stack, config)
     packages = resolver.flatten(stack)
+
+    # Filter out user-owned dependencies from stack adds BEFORE rendering or writing.
+    stack_adds = [
+        p
+        for p in packages
+        if canonical_name(requirement_name(p) or "") not in user_owned
+    ]
+    # Build warnings for ownership-filtered entries.
+    warnings = list(stack.warnings)
+    for entry in packages:
+        name = requirement_name(entry)
+        if name and canonical_name(name) in user_owned:
+            warnings.append(
+                f"Skipping stack requirement '{entry}': '{name}' is user-owned in this project."
+            )
 
     # Resolve the interpreter so a bad env name fails before any scaffolding
     # runs, and so both uv init and uv sync receive the same value.
@@ -126,23 +139,20 @@ def init_project(
     tmp_req = Path(tmp_name)
     try:
         with open(fd, "w") as handle:
-            handle.write(flat)
+            for entry in stack_adds:
+                handle.write(entry)
+                handle.write("\n")
 
         if not pyproject.is_file():
             runner.run(_with_cwd(uv_init(python, options.name), cwd))
         runner.run(_with_cwd(uv_add(tmp_req), cwd))
         if options.track:
-            applied = [
-                package
-                for package in packages
-                if canonical_name(requirement_name(package) or "") not in user_owned
-            ]
             write_tracking(
                 pyproject,
                 ProjectTracking(
                     stack=list(tokens),
                     python=options.python,
-                    applied=applied,
+                    applied=stack_adds,
                 ),
             )
         if not options.no_sync:
@@ -151,7 +161,7 @@ def init_project(
         if tmp_req.exists():
             tmp_req.unlink()
 
-    return stack.warnings
+    return warnings
 
 
 def select_project_python(config: ConfigRoot, flag: str | None) -> str:

@@ -1381,6 +1381,7 @@ def test_help_contains_no_rest_double_backticks():
         ["list", "--help"],
         ["show", "--help"],
         ["resolve", "--help"],
+        ["refresh", "--help"],
         ["status", "--help"],
         ["doctor", "--help"],
         ["config", "--help"],
