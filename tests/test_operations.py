@@ -514,8 +514,8 @@ def test_init_add_failure_leaves_pending_intent(
         )
     stale = read_tracking(project_dir / "pyproject.toml")
     assert stale is not None
-    assert stale.applied == []          # final ledger never written
-    assert stale.pending is not None    # intent record present for the retry
+    assert stale.applied == []
+    assert stale.pending == ["numpy", "pandas"]
 
 
 def test_init_project_no_track_removes_table_even_when_add_fails(
@@ -1348,10 +1348,8 @@ def test_refresh_writes_pending_before_first_uv_command(config_tree: ConfigRoot,
     refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
     first = snapshots[0]
     assert first is not None
-    # The table seen by the FIRST uv command already carries pending with the
-    # OLD applied ledger intact.
-    assert first.pending is not None
-    assert "rdkit" in first.applied  # old ledger unchanged at pending time
+    assert first.pending == ["numpy", "pandas", "rdkit", "rich"]
+    assert "rdkit" in first.applied
 
 
 def test_refresh_pending_cleared_on_success(config_tree: ConfigRoot, tmp_path):
@@ -1645,7 +1643,7 @@ def test_init_pending_between_init_and_add(config_tree: ConfigRoot, tmp_path: Pa
     init_project(config_tree, rec, ["numpy"], ProjectOptions(python="3.12"), cwd=project_dir)
     assert pending_at_add and pending_at_add[0] is not None
     assert pending_at_add[0].applied == []
-    assert pending_at_add[0].pending is not None
+    assert pending_at_add[0].pending == ["numpy"]
     final = read_tracking(pyproject)
     assert final is not None and final.pending is None
 
@@ -1710,6 +1708,50 @@ def test_init_force_user_pin_survives(config_tree: ConfigRoot, tmp_path: Path):
     assert '"numpy<2"' in pyproject.read_text()
 
 
+def test_init_force_triple_crash_carries_owned_orphan(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    # Triple-crash scenario: crashed init left applied=["chemprop"],
+    # pending=["numpy"] (fresh target), deps contain both, stack resolves ["numpy"].
+    # --force retry completes → final applied contains BOTH chemprop AND numpy,
+    # pending None; a follow-up refresh removes chemprop (reported in result.removed).
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    pyproject = project_dir / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["chemprop", "numpy"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["numpy"]\n'
+        'applied = ["chemprop"]\n'
+        'pending = ["numpy"]\n'
+    )
+    rec = RecordingRunner()
+    init_project(
+        config_tree,
+        rec,
+        ["numpy"],
+        ProjectOptions(python="3.12", force=True),
+        cwd=project_dir,
+    )
+    after = read_tracking(pyproject)
+    assert after is not None
+    assert "chemprop" in after.applied
+    assert "numpy" in after.applied
+    assert after.pending is None
+    # Follow-up refresh removes chemprop.
+    rec2 = RecordingRunner()
+    result = refresh_project(config_tree, rec2, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert "chemprop" in result.removed
+    final = read_tracking(pyproject)
+    assert final is not None
+    assert "chemprop" not in final.applied
+    assert "numpy" in final.applied
+
+
 def test_init_force_same_stack_retry_keeps_pending_package_owned(
     config_tree: ConfigRoot, tmp_path
 ):
@@ -1750,8 +1792,7 @@ def test_init_preflight_blocks_before_any_command(
 ):
     from uv_stack.errors import ConfigError
 
-    # Closes the recorded gap: init's tracked-path pre-flight fires before
-    # uv init/uv add, exactly like refresh's.
+    # Pre-flight fires before uv init/uv add AND before any env probe.
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
     import uv_stack.operations.project as project_mod
@@ -1760,7 +1801,7 @@ def test_init_preflight_blocks_before_any_command(
         raise ConfigError("pre-flight rejected")
 
     monkeypatch.setattr(project_mod, "validate_tracking_write", exploding_validate)
-    rec = RecordingRunner()
+    rec = RecordingRunner(responder=_existing_env_responder)
     with pytest.raises(ConfigError):
-        init_project(config_tree, rec, ["numpy"], ProjectOptions(python="3.12"), cwd=project_dir)
+        init_project(config_tree, rec, ["numpy"], ProjectOptions(python="main"), cwd=project_dir)
     assert len(rec.commands) == 0

@@ -206,9 +206,24 @@ def init_project(
         else []
     )
 
-    # Resolve the interpreter so a bad env name fails before any scaffolding
-    # runs, and so both uv init and uv sync receive the same value.
-    python = resolve_project_python(config, runner, options.python)
+    # Resume-only carry: when RESUMING a pending run (not a fresh --force
+    # reset), carry forward previously-owned entries from applied that would
+    # otherwise vanish silently (the orphan was adopted into applied in a
+    # PREVIOUS retry that then crashed, so it is skipped by _adopt_orphans
+    # above and not in stack_adds either). The carried entries ride to the next
+    # refresh, whose dropped-diff removes or reports them loudly.
+    carried = []
+    if previous_pending:
+        stack_names = {
+            canonical_name(n) for n in (ownership_name(e) for e in stack_adds) if n
+        }
+        carried = [
+            e
+            for e in previous_applied
+            if (n := ownership_name(e))
+            and canonical_name(n) in dep_names
+            and canonical_name(n) not in stack_names
+        ]
 
     if not options.track:
         remove_tracking(pyproject)
@@ -223,12 +238,16 @@ def init_project(
     final_tracking = ProjectTracking(
         stack=list(tokens),
         python=options.python,
-        applied=[*stack_adds, *adopted],
+        applied=[*stack_adds, *adopted, *carried],
         pending=None,
     )
     if options.track:
         # Pre-flight the FIRST write this run will attempt.
         validate_tracking_write(pyproject, pending_tracking)
+
+    # Resolve the interpreter so a bad env name fails before any scaffolding
+    # runs, and so both uv init and uv sync receive the same value.
+    python = resolve_project_python(config, runner, options.python)
 
     # write_tracking on a missing pyproject would CREATE it and suppress
     # uv init, so fresh projects must initialize first (spec §2.2).
