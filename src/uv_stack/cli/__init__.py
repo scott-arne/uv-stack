@@ -78,7 +78,10 @@ class UvStackGroup(click.RichGroup):
     "--root",
     "root",
     default=None,
-    help="Config root. Defaults to $UV_ENV_ROOT or ~/.config/python-envs.",
+    help=(
+        "Config root. Defaults to $UV_STACK_ROOT (or legacy $UV_ENV_ROOT) or "
+        "~/.config/python-envs."
+    ),
 )
 @click.pass_context
 def cli(ctx: click.Context, root: str | None) -> None:
