@@ -275,3 +275,34 @@ def test_atomic_write_publishes_exact_bytes_for_crlf_text(tmp_path):
     target2 = tmp_path / "crlf_new.txt"
     atomic_write_new(target2, "a\r\nb\n")
     assert target2.read_bytes() == b"a\r\nb\n"
+
+
+def test_atomic_write_new_fallback_publishes_exact_crlf_bytes(tmp_path, monkeypatch):
+    import errno
+    import os as _os
+
+    from uv_stack.fsutil import atomic_write_new
+
+    def _no_link(src, dst, **kwargs):
+        raise OSError(errno.EPERM, "hard links not supported")
+
+    monkeypatch.setattr(_os, "link", _no_link)
+    target = tmp_path / "crlf_fallback.txt"
+    atomic_write_new(target, "a\r\nb\n")
+    assert target.read_bytes() == b"a\r\nb\n"
+
+
+def test_atomic_write_non_ascii_utf8_byte_exactness(tmp_path):
+    from uv_stack.fsutil import atomic_write
+
+    content = "# Généré — ünïcode\n"
+    expected_bytes = content.encode("utf-8")
+    target = tmp_path / "unicode.txt"
+    atomic_write(target, content)
+    assert target.read_bytes() == expected_bytes
+    # Verify identical-skip guard preserves mtime for non-ASCII content.
+    old_mtime = target.stat().st_mtime
+    os.utime(target, (old_mtime - 100, old_mtime - 100))
+    stamped = target.stat().st_mtime
+    atomic_write(target, content)
+    assert target.stat().st_mtime == stamped  # skip: UTF-8 match
