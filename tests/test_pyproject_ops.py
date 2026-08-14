@@ -406,3 +406,26 @@ def test_read_tracking_version_2_int_still_raises_newer_schema(tmp_path: Path):
     with pytest.raises(ConfigError) as excinfo:
         read_tracking(pyproject)
     assert "newer uv-stack (schema 2)" in str(excinfo.value)
+
+
+def test_foreign_version_subtable_tolerated_on_read(tmp_path: Path):
+    """[tool.uv-stack.version] subtable (dict with real header) is tolerated on read.
+
+    The 'version' dict value is filtered out before validation (it's a real subtable,
+    not a scalar), so version defaults to 1 from the model. This verifies the fix:
+    version checks now run on the filtered scalar view, not the raw table.
+
+    Note: TOML semantics prevent both a 'version' scalar and a '[tool.uv-stack.version]'
+    subtable from coexisting, so unlike [tool.uv-stack.extra], this specific foreign
+    subtable cannot be preserved on write.
+    """
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        _BASE
+        + "\n[tool.uv-stack]\nstack = []\napplied = []\n"
+        + "\n[tool.uv-stack.version]\ncustom = 42\n"
+    )
+    loaded = read_tracking(pyproject)
+    # 'version' key filtered out (it's a dict with a real subtable header),
+    # so version defaults to 1 from the model.
+    assert loaded is not None and loaded.version == 1 and loaded.stack == []
