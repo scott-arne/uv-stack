@@ -94,12 +94,20 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
             f"[tool.uv-stack] in {pyproject} must be a table.",
             hint="Replace the scalar/array value with a [tool.uv-stack] table.",
         )
-    raw_version = table.get("version")
-    if isinstance(raw_version, int) and raw_version > 1:
-        raise ConfigError(
-            NEWER_SCHEMA_MESSAGE.format(version=raw_version),
-            hint=NEWER_SCHEMA_HINT,
-        )
+    # Strict integer typing for the version field: durable records must reject
+    # malformed tables before pydantic's lax coercion silently accepts them.
+    if "version" in table:
+        raw_version = table["version"]
+        if isinstance(raw_version, bool) or not isinstance(raw_version, int):
+            raise ConfigError(
+                f"Invalid [tool.uv-stack] table in {pyproject}: 'version' must be an integer.",
+                hint="Check the fields against the schema (version, stack, python, applied).",
+            )
+        if raw_version > 1:
+            raise ConfigError(
+                NEWER_SCHEMA_MESSAGE.format(version=raw_version),
+                hint=NEWER_SCHEMA_HINT,
+            )
     subtable_keys = _subtable_keys(text)
     scalars = {}
     for key, value in table.items():

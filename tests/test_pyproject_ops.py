@@ -373,3 +373,36 @@ def test_read_tracking_newer_schema_message_beats_shape_errors(tmp_path: Path):
     with pytest.raises(ConfigError) as excinfo:
         read_tracking(pyproject)
     assert "newer uv-stack (schema 2)" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "version_value",
+    ['"1"', "1.0", "true", '"2"'],
+    ids=["string-1", "float-1.0", "bool-true", "string-2"],
+)
+def test_read_tracking_strict_version_typing(tmp_path: Path, version_value: str):
+    """version field must be a strict integer; lax coercion is rejected."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n'
+        f"[tool.uv-stack]\nversion = {version_value}\n"
+        'stack = ["ds"]\n'
+        'applied = []\n'
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert "'version' must be an integer" in str(excinfo.value)
+
+
+def test_read_tracking_version_2_int_still_raises_newer_schema(tmp_path: Path):
+    """version = 2 (real int) still raises the newer-schema message."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n'
+        "[tool.uv-stack]\nversion = 2\n"
+        'stack = ["ds"]\n'
+        'applied = []\n'
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert "newer uv-stack (schema 2)" in str(excinfo.value)
