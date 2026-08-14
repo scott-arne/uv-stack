@@ -380,4 +380,4 @@ All state lives under one directory, resolved in this order:
   own writes leave every other byte of `pyproject.toml` alone — but refresh
   also runs `uv remove`/`uv add` under the hood, which edit
   `[project.dependencies]` just as they would if you ran them yourself.
-  An interrupted refresh may leave a `pending` key in the table; the next successful `stack refresh` cleans it up.
+  An interrupted refresh or tracked create may leave a `pending` key in the table; the next successful `stack refresh` (or `stack create --force`) cleans it up.
