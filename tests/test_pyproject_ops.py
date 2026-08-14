@@ -329,3 +329,47 @@ def test_validate_tracking_write_rejects_unparseable_result(tmp_path: Path, monk
         validate_tracking_write(pyproject, _tracking())
     assert "would not parse" in str(excinfo.value)
     assert pyproject.read_text() == _BASE  # untouched
+
+
+def test_render_tracking_omits_pending_when_none(tmp_path: Path):
+    tracking = ProjectTracking(stack=["ds"], applied=["numpy"])
+    text = render_tracking(tracking)
+    assert "pending" not in text
+
+
+def test_render_tracking_emits_pending_when_set(tmp_path: Path):
+    tracking = ProjectTracking(stack=["ds"], applied=["numpy"], pending=["numpy", "chemprop"])
+    text = render_tracking(tracking)
+    assert 'pending = [\n    "numpy",\n    "chemprop",\n]' in text
+
+
+def test_tracking_pending_round_trips(tmp_path: Path):
+    pyproject = tmp_path / "pyproject.toml"
+    write_tracking(
+        pyproject,
+        ProjectTracking(stack=["ds"], applied=["numpy"], pending=["chemprop"]),
+    )
+    loaded = read_tracking(pyproject)
+    assert loaded is not None
+    assert loaded.pending == ["chemprop"]
+    write_tracking(pyproject, ProjectTracking(stack=["ds"], applied=["numpy"]))
+    reloaded = read_tracking(pyproject)
+    assert reloaded is not None
+    assert reloaded.pending is None
+    assert "pending" not in pyproject.read_text()
+
+
+def test_read_tracking_newer_schema_message_beats_shape_errors(tmp_path: Path):
+    # A future table with unknown keys must get the actionable newer-schema
+    # error, not the generic invalid-table error from extra="forbid".
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n'
+        "[tool.uv-stack]\nversion = 2\n"
+        'stack = ["ds"]\n'
+        'applied = []\n'
+        'future_key = "whatever"\n'
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert "newer uv-stack (schema 2)" in str(excinfo.value)

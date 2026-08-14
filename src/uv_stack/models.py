@@ -91,6 +91,10 @@ class ProjectTracking(BaseModel):
     :param python: The raw ``--python`` value when one was given; ``None``
         keeps the project portable (machine defaults apply).
     :param applied: The flattened requirements uv-stack last applied.
+    :param pending: Intent record for an in-flight refresh/init: the target
+        applied list, written before uv mutations and cleared by the final
+        ledger write. Present on disk only between a crash and the next
+        successful run.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -99,3 +103,4 @@ class ProjectTracking(BaseModel):
     stack: list[str]
     python: str | None = None
     applied: list[str] = Field(default_factory=list)
+    pending: list[str] | None = Field(default=None)

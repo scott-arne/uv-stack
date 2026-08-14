@@ -22,6 +22,11 @@ from uv_stack.parse import ownership_name
 _HEADER = "[tool.uv-stack]"
 _UV_STACK_PATH = ("tool", "uv-stack")
 
+#: Shared newer-schema refusal text — read_tracking raises it centrally and
+#: the init/refresh guards reuse it (defense in depth).
+NEWER_SCHEMA_MESSAGE = "This project was tracked by a newer uv-stack (schema {version})."
+NEWER_SCHEMA_HINT = "Upgrade uv-stack, or edit [tool.uv-stack] manually."
+
 
 def _read_exact(pyproject: Path) -> str:
     """Read without newline translation so CRLF content outside the owned
@@ -89,6 +94,12 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
             f"[tool.uv-stack] in {pyproject} must be a table.",
             hint="Replace the scalar/array value with a [tool.uv-stack] table.",
         )
+    raw_version = table.get("version")
+    if isinstance(raw_version, int) and raw_version > 1:
+        raise ConfigError(
+            NEWER_SCHEMA_MESSAGE.format(version=raw_version),
+            hint=NEWER_SCHEMA_HINT,
+        )
     subtable_keys = _subtable_keys(text)
     scalars = {}
     for key, value in table.items():
@@ -138,6 +149,8 @@ def render_tracking(tracking: ProjectTracking) -> str:
     if tracking.python is not None:
         lines.append(f"python = {json.dumps(tracking.python)}")
     lines += _string_list_lines("applied", tracking.applied)
+    if tracking.pending is not None:
+        lines += _string_list_lines("pending", tracking.pending)
     return "\n".join(lines) + "\n"
 
 

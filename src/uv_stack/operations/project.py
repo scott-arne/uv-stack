@@ -18,6 +18,8 @@ from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError
 from uv_stack.models import ProjectTracking
 from uv_stack.operations.pyproject import (
+    NEWER_SCHEMA_HINT,
+    NEWER_SCHEMA_MESSAGE,
     read_project_dependency_names,
     read_tracking,
     remove_tracking,
@@ -98,9 +100,8 @@ def init_project(
     if existing_tracking is not None:
         if existing_tracking.version > 1:
             raise ConfigError(
-                f"This project was tracked by a newer uv-stack "
-                f"(schema {existing_tracking.version}).",
-                hint="Upgrade uv-stack, or edit [tool.uv-stack] manually.",
+                NEWER_SCHEMA_MESSAGE.format(version=existing_tracking.version),
+                hint=NEWER_SCHEMA_HINT,
             )
         for entry in existing_tracking.applied:
             owned_name = ownership_name(entry)
@@ -332,8 +333,8 @@ def refresh_project(
         )
     if tracking.version > 1:
         raise ConfigError(
-            f"This project was tracked by a newer uv-stack (schema {tracking.version}).",
-            hint="Upgrade uv-stack, or edit [tool.uv-stack] manually.",
+            NEWER_SCHEMA_MESSAGE.format(version=tracking.version),
+            hint=NEWER_SCHEMA_HINT,
         )
 
     resolver = Resolver(config, strict=options.strict)

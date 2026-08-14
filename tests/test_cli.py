@@ -1666,3 +1666,26 @@ def test_create_profile_tolerates_unreadable_bundles_dir(
     combined = _combined_output(result)
     assert "Wrote" in combined
     assert "Traceback" not in combined
+
+
+def test_newer_schema_with_extra_keys_friendly_via_cli(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = []\n'
+        "\n[tool.uv-stack]\nversion = 2\n"
+        'stack = ["ds"]\n'
+        'applied = []\n'
+        'future_key = "whatever"\n'
+    )
+    monkeypatch.chdir(project_dir)
+    runner = CliRunner()
+    refresh_result = runner.invoke(cli, ["--root", str(root), "refresh"])
+    assert refresh_result.exit_code == 1
+    assert "newer uv-stack (schema 2)" in _combined_output(refresh_result)
+    create_result = runner.invoke(
+        cli, ["--root", str(root), "create", "project", "ds", "--force"]
+    )
+    assert create_result.exit_code == 1
+    assert "newer uv-stack (schema 2)" in _combined_output(create_result)
