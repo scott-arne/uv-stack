@@ -296,12 +296,13 @@ def test_replace_at_eof_preserves_trailing_newline(tmp_path: Path):
     pyproject = tmp_path / "pyproject.toml"
     # create-shaped file: table last, file ends with newline
     pyproject.write_text(_BASE + "\n[tool.uv-stack]\nversion = 1\nstack = []\napplied = []\n")
-    original = pyproject.read_text()
-    assert original.endswith("\n")  # precondition: original has trailing newline
+    original_bytes = pyproject.read_bytes()
+    assert original_bytes.endswith(b"\n")  # precondition: original has trailing newline
     # write_tracking with an identical table should be byte-identical
     write_tracking(pyproject, ProjectTracking(version=1, stack=[], applied=[]))
-    result = pyproject.read_text()
-    assert result.endswith("\n"), "trailing newline lost on identical replace"
+    # Identical table at EOF must round-trip the whole file byte-for-byte,
+    # including the trailing newline.
+    assert pyproject.read_bytes() == original_bytes
     # write_tracking with a changed table should also end with exactly newline
     write_tracking(pyproject, _tracking())
     result = pyproject.read_text()

@@ -230,6 +230,21 @@ def _validate_result(text: str, pyproject: Path) -> None:
         ) from exc
 
 
+def _spliced_result(pyproject: Path, tracking: ProjectTracking) -> str:
+    """Read, render, splice, and validate — the one write composition.
+
+    Shared by :func:`validate_tracking_write` (pre-flight, result discarded)
+    and :func:`write_tracking` (result published) so the two can never
+    drift.
+
+    :raises ConfigError: If the spliced result would not parse.
+    """
+    text = _read_exact(pyproject) if pyproject.is_file() else ""
+    new_text = _splice(text, render_tracking(tracking))
+    _validate_result(new_text, pyproject)
+    return new_text
+
+
 def validate_tracking_write(pyproject: Path, tracking: ProjectTracking) -> None:
     """Pre-flight validation for tracking writes without side effects.
 
@@ -242,9 +257,7 @@ def validate_tracking_write(pyproject: Path, tracking: ProjectTracking) -> None:
     :param tracking: The tracking table to validate.
     :raises ConfigError: If the spliced result would not parse.
     """
-    text = _read_exact(pyproject) if pyproject.is_file() else ""
-    new_text = _splice(text, render_tracking(tracking))
-    _validate_result(new_text, pyproject)
+    _spliced_result(pyproject, tracking)
 
 
 def write_tracking(pyproject: Path, tracking: ProjectTracking) -> None:
@@ -253,10 +266,7 @@ def write_tracking(pyproject: Path, tracking: ProjectTracking) -> None:
     :raises ConfigError: If the spliced result would not parse (nothing is
         written in that case).
     """
-    text = _read_exact(pyproject) if pyproject.is_file() else ""
-    new_text = _splice(text, render_tracking(tracking))
-    _validate_result(new_text, pyproject)
-    atomic_write(pyproject, new_text)
+    atomic_write(pyproject, _spliced_result(pyproject, tracking))
 
 
 def remove_tracking(pyproject: Path) -> bool:
