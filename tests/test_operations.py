@@ -1570,3 +1570,34 @@ def test_refresh_crash_mid_adoption_resumes_without_duplicate_warning(
     assert any(
         c.args[:2] == ["uv", "remove"] and "chemprop" in c.args for c in rec2.commands
     )
+
+
+def test_refresh_direct_ref_update_orphan_surfaces_via_skipped_removals(
+    config_tree: ConfigRoot, tmp_path
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    # Interrupted direct-ref UPDATE: pending holds the new ref, applied the
+    # old one, deps the new one; the stack no longer provides pkg. Adoption
+    # skips (name already ledger-owned) — visibility comes from the loud
+    # skipped-removals report on this same run.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pkg @ https://h/new.whl"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["numpy"]\n'
+        'applied = ["numpy", "pkg @ https://h/old.whl"]\n'
+        'pending = ["numpy", "pkg @ https://h/new.whl"]\n'
+    )
+    rec = RecordingRunner()
+    result = refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert "pkg @ https://h/old.whl" in result.skipped_removals
+    assert not any(
+        "pkg" in c.args for c in rec.commands if c.args[:2] == ["uv", "remove"]
+    )
+    after = read_tracking(project_dir / "pyproject.toml")
+    assert after is not None and after.pending is None
+    assert not any("pkg" in e for e in after.applied)
