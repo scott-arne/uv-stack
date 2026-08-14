@@ -309,7 +309,7 @@ ones uv-stack itself added. Dependencies whose names uv-stack never applied
 are never touched. One caveat: ownership is by package name, so if you
 re-pin a stack-applied package yourself (say `uv add 'numpy<2'` after a
 profile applied `numpy`), uv-stack still owns that name and a later refresh
-may rewrite or remove it. Day to day, the project is still a normal `uv`
+may rewrite or remove it. After an interrupted run, recovery adopts leftover `pending` names that are still installed but no longer in the stack — it warns first and the next refresh removes them (the warning tells you how to keep one). Day to day, the project is still a normal `uv`
 project — `uv add`, `uv sync`, and `uv run` all work as usual.
 
 ## Configuration reference
@@ -380,4 +380,4 @@ All state lives under one directory, resolved in this order:
   own writes leave every other byte of `pyproject.toml` alone — but refresh
   also runs `uv remove`/`uv add` under the hood, which edit
   `[project.dependencies]` just as they would if you ran them yourself.
-  An interrupted refresh or tracked create may leave a `pending` key in the table; the next successful `stack refresh` (or `stack create --force`) cleans it up.
+  An interrupted refresh or tracked create may leave a `pending` key in the table; the next successful `stack refresh` (or re-running the tracked create with `--force`) cleans it up.
