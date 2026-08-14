@@ -1380,11 +1380,9 @@ def test_refresh_final_write_failure_retry_converges(
     import uv_stack.operations.project as project_mod
 
     real_write = project_mod.write_tracking
-    calls = {"n": 0}
 
     def flaky_write(path, tracking):
-        calls["n"] += 1
-        if calls["n"] == 2:  # 1st = pending write; 2nd = clearing write
+        if tracking.pending is None:  # the clearing write, post-add
             raise OSError("disk full")
         real_write(path, tracking)
 
@@ -1392,6 +1390,7 @@ def test_refresh_final_write_failure_retry_converges(
     rec = RecordingRunner(responder=_mutating_responder(project_dir))
     with pytest.raises(OSError):
         refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert any(c.args[:2] == ["uv", "add"] for c in rec.commands)
     crashed = read_tracking(pyproject)
     assert crashed is not None and crashed.pending is not None
     assert "rdkit" in crashed.applied  # old ledger still on disk
@@ -1549,11 +1548,9 @@ def test_refresh_crash_mid_adoption_resumes_without_duplicate_warning(
     import uv_stack.operations.project as project_mod
 
     real_write = project_mod.write_tracking
-    calls = {"n": 0}
 
     def flaky_write(path, tracking):
-        calls["n"] += 1
-        if calls["n"] == 2:
+        if tracking.pending is None:  # the clearing write, post-add
             raise OSError("disk full")
         real_write(path, tracking)
 
@@ -1561,6 +1558,7 @@ def test_refresh_crash_mid_adoption_resumes_without_duplicate_warning(
     rec = RecordingRunner()
     with pytest.raises(OSError):
         refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert any(c.args[:2] == ["uv", "add"] for c in rec.commands)
     crashed = read_tracking(pyproject)
     assert crashed is not None and "chemprop" in crashed.applied  # durable adoption
 
