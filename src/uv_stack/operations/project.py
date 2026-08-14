@@ -41,6 +41,67 @@ _VERSION_RE = re.compile(r"^\d+(\.\d+)*$")
 _IMPLEMENTATION_RE = re.compile(r"^(cpython|pypy|graalpy)[-@]")
 
 
+def _adopt_orphans(
+    pending: list[str],
+    applied: list[str],
+    stack_adds: list[str],
+    dep_names: set[str],
+    warnings: list[str],
+) -> list[str]:
+    """Adopt crashed-run orphans from an old ``pending`` record.
+
+    An orphan is a pending entry whose name is present in the project's
+    dependencies but absent from both the old ledger and the fresh stack:
+    the interrupted run applied it and the stack no longer provides it.
+    Adoption puts it into ``applied`` (durably, from the resuming run's
+    FIRST write) so ownership is never lost silently; the warning tells the
+    user what happens next. Names never applied (absent from dependencies)
+    are dropped without action.
+
+    :param pending: The crashed run's pending entries, verbatim.
+    :param applied: The old ledger entries.
+    :param stack_adds: The fresh ownership-filtered target list.
+    :param dep_names: Canonical names currently in [project.dependencies].
+    :param warnings: Warning list to append one message per orphan.
+    :returns: The adopted entries, verbatim, in pending order.
+    """
+    applied_names = {
+        canonical_name(n) for n in (ownership_name(e) for e in applied) if n
+    }
+    stack_names = {
+        canonical_name(n) for n in (ownership_name(e) for e in stack_adds) if n
+    }
+    adopted: list[str] = []
+    for entry in pending:
+        name = ownership_name(entry)
+        if name is None:
+            # Name-less entries (editables, bare paths) bypass name-based
+            # ownership entirely — nothing to adopt, but never be silent.
+            warnings.append(
+                f"'{entry}' from an interrupted run cannot be verified by "
+                "name; check [project.dependencies] manually if it should "
+                "not remain."
+            )
+            continue
+        canon = canonical_name(name)
+        if canon in applied_names or canon in stack_names or canon not in dep_names:
+            continue
+        adopted.append(entry)
+        if "@" in entry or requirement_name(entry) is None:
+            warnings.append(
+                f"'{entry}' was applied by an interrupted run and is no longer "
+                "in the stack; it will not be auto-removed — the next refresh "
+                "will report it under 'Not auto-removed' for manual cleanup."
+            )
+        else:
+            warnings.append(
+                f"'{name}' was applied by an interrupted run and is no longer "
+                "in the stack; the next refresh will remove it (delete it from "
+                "[tool.uv-stack].applied to keep it)."
+            )
+    return adopted
+
+
 @dataclass
 class ProjectOptions:
     """Options for ``project init``.
@@ -305,13 +366,19 @@ def refresh_project(
 ) -> RefreshResult:
     """Re-resolve a tracked project against the current profiles/bundles.
 
-    Failure semantics: ``uv remove`` or ``uv add`` failure leaves the old
-    ledger in place (retry converges via presence-filtered removal +
-    idempotent re-add); after a successful add the new ledger is written
-    before sync, so a sync failure leaves deps and ledger consistent. A
-    write_tracking filesystem failure after add is the residual window
-    (pre-flight validation minimizes it); manually editing
-    [tool.uv-stack].applied recovers ownership.
+    Failure semantics: an intent record (``pending``) is written atomically
+    before any uv mutation, so every crash cut-point converges on retry.
+    ``uv remove``/``uv add`` failure leaves the old ``applied`` plus
+    ``pending``; the retry's ownership union shields the intent and
+    converges via presence-filtered removal + idempotent re-add. After a
+    successful add the cleared ledger is written before sync, so a sync
+    failure leaves deps and ledger consistent. Pending entries the stack no
+    longer provides are adopted into ``applied`` with a warning and removed
+    by the following refresh (direct references follow the loud
+    skipped-removals path instead). If a run crashed before its add took
+    effect and the same name was added manually before the retry, adoption
+    cannot distinguish provenance (spec §2.3 accepted corner) — the warning
+    names the escape hatch a full refresh before any removal.
 
     :param config: Configuration root.
     :param runner: Command runner.
@@ -341,31 +408,39 @@ def refresh_project(
     stack = resolver.resolve(tracking.stack)
     new_flat = resolver.flatten(stack)
 
-    # Ownership: names currently owned by uv-stack (from the old ledger).
+    # Ownership: names owned by uv-stack — the old ledger PLUS any pending
+    # intent record from an interrupted run, so a crash between uv add and
+    # the clearing write can never surrender ownership to the user bucket.
+    ledger_entries = [*tracking.applied, *(tracking.pending or [])]
     owned = {
         canonical_name(n)
-        for n in (ownership_name(e) for e in tracking.applied)
+        for n in (ownership_name(e) for e in ledger_entries)
         if n
     }
     # Names in [project.dependencies] NOT in the old ledger are user-owned.
-    user_owned = (
-        {canonical_name(n) for n in read_project_dependency_names(pyproject)} - owned
-    )
+    dep_names = {canonical_name(n) for n in read_project_dependency_names(pyproject)}
+    user_owned = dep_names - owned
 
     # Filter out user-owned dependencies from stack adds BEFORE rendering or writing.
     stack_adds = [
         p
         for p in new_flat
-        if canonical_name(requirement_name(p) or "") not in user_owned
+        if canonical_name(ownership_name(p) or "") not in user_owned
     ]
     # Build warnings for ownership-filtered entries.
     warnings = list(stack.warnings)
     for entry in new_flat:
-        name = requirement_name(entry)
+        name = ownership_name(entry)
         if name and canonical_name(name) in user_owned:
             warnings.append(
                 f"Skipping stack requirement '{entry}': '{name}' is user-owned in this project."
             )
+
+    adopted = (
+        _adopt_orphans(tracking.pending, tracking.applied, stack_adds, dep_names, warnings)
+        if tracking.pending
+        else []
+    )
 
     dropped = [entry for entry in tracking.applied if entry not in stack_adds]
     removable_names: list[str] = []
@@ -388,17 +463,24 @@ def refresh_project(
 
     spec_flag = options.python if options.python is not None else tracking.python
 
-    # Pre-flight: validate the tracking write BEFORE any uv mutations, so a
-    # deterministic TOML validation failure doesn't leave dependencies mutated
-    # with the old ledger intact.
-    new_tracking = ProjectTracking(
+    # Build both tables once, pre-flight the PENDING one (it is the first write
+    # attempted), and keep the dry-run path write-free.
+    pending_tracking = ProjectTracking(
         version=1,
         stack=tracking.stack,
         python=options.python if options.python is not None else tracking.python,
-        applied=stack_adds,
+        applied=[*tracking.applied, *adopted],
+        pending=stack_adds,
+    )
+    final_tracking = ProjectTracking(
+        version=1,
+        stack=tracking.stack,
+        python=options.python if options.python is not None else tracking.python,
+        applied=[*stack_adds, *adopted],
+        pending=None,
     )
     if not options.dry_run:
-        validate_tracking_write(pyproject, new_tracking)
+        validate_tracking_write(pyproject, pending_tracking)
 
     if options.dry_run:
         selected = select_project_python(config, spec_flag)
@@ -418,6 +500,7 @@ def refresh_project(
         )
 
     python = resolve_project_python(config, runner, spec_flag)
+    write_tracking(pyproject, pending_tracking)
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-refresh.", suffix=".txt")
     tmp_req = Path(tmp_name)
     try:
@@ -429,7 +512,7 @@ def refresh_project(
         if names:
             runner.run(_with_cwd(uv_remove(names), cwd))
         runner.run(_with_cwd(uv_add(tmp_req), cwd))
-        write_tracking(pyproject, new_tracking)
+        write_tracking(pyproject, final_tracking)
         if not options.no_sync:
             runner.run(_with_cwd(uv_sync(python), cwd))
     finally:

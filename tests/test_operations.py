@@ -7,6 +7,7 @@ import pytest
 from uv_stack.commands import micromamba_create, micromamba_remove
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError
+from uv_stack.models import ProjectTracking
 from uv_stack.operations.create import ensure_env, env_micromamba_exists
 from uv_stack.operations.project import (
     PROJECT_PYTHON_ENV,
@@ -830,6 +831,9 @@ def test_refresh_retry_after_partial_failure_is_idempotent(
             cwd=project_dir,
         )
     # Ledger unchanged after the failure.
+    pyproject = project_dir / "pyproject.toml"
+    stale = read_tracking(pyproject)
+    assert stale is not None and stale.pending is not None  # intent record present
     tracking = read_tracking(project_dir / "pyproject.toml")
     assert tracking is not None and "rdkit" in tracking.applied
     # Simulate uv having removed rdkit from [project.dependencies] before the
@@ -902,23 +906,14 @@ def test_refresh_python_flag_overrides_and_records(
     assert tracking is not None and tracking.python == "3.13"
 
 
-def test_refresh_convergence_simulates_dependency_file_mutation(
-    config_tree: ConfigRoot, tmp_path, monkeypatch
-):
+def _mutating_responder(project_dir: Path):
+    """Create a responder that simulates uv add/remove mutating [project.dependencies]."""
     import json
     import re
 
-    from uv_stack.operations.project import RefreshOptions, refresh_project
-    from uv_stack.operations.pyproject import read_tracking
-
-    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
-    # Drop rdkit from the chem profile: refresh should remove it and add chemprop.
-    config_tree.profile_path("chem").write_text("includes:\n  - chemprop\n")
-    project_dir = _tracked_project(tmp_path, _TRACKING)
     pyproject = project_dir / "pyproject.toml"
 
-    def mutating_responder(cmd: Command) -> CommandResult:
-        """Simulate uv add/remove mutating [project.dependencies]."""
+    def responder(cmd: Command) -> CommandResult:
         if "remove" in cmd.args and "--no-sync" in cmd.args:
             # Extract names after --no-sync.
             idx = cmd.args.index("--no-sync")
@@ -963,7 +958,25 @@ def test_refresh_convergence_simulates_dependency_file_mutation(
             return CommandResult(returncode=0, stdout="")
         return CommandResult(returncode=0, stdout="")
 
-    rec = RecordingRunner(responder=mutating_responder)
+    return responder
+
+
+def test_refresh_convergence_simulates_dependency_file_mutation(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    import json
+    import re
+
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # Drop rdkit from the chem profile: refresh should remove it and add chemprop.
+    config_tree.profile_path("chem").write_text("includes:\n  - chemprop\n")
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+
+    rec = RecordingRunner(responder=_mutating_responder(project_dir))
     refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
     # After refresh: [project.dependencies] should contain chemprop and not rdkit.
     text = pyproject.read_text()
@@ -1266,9 +1279,11 @@ def test_refresh_sync_failure_after_add_ledger_written(
     project_dir = _tracked_project(tmp_path, _TRACKING)
 
     def _fail_sync(cmd: Command) -> CommandResult:
+        responder = _mutating_responder(project_dir)
+        result = responder(cmd)
         if cmd.args[0] == "uv" and cmd.args[1] == "sync":
             raise ToolError("sync failed", command=cmd.args, returncode=1)
-        return CommandResult(returncode=0, stdout="")
+        return result
 
     rec = RecordingRunner(responder=_fail_sync)
     with pytest.raises(ToolError):
@@ -1280,7 +1295,7 @@ def test_refresh_sync_failure_after_add_ledger_written(
     assert tracking is not None
     assert "chemprop" in tracking.applied
     # Second refresh converges: chemprop is NOT classified user-owned.
-    rec2 = RecordingRunner()
+    rec2 = RecordingRunner(responder=_mutating_responder(project_dir))
     result = refresh_project(
         config_tree, rec2, RefreshOptions(python="3.12"), cwd=project_dir
     )
@@ -1312,3 +1327,244 @@ def test_refresh_preflight_validation_blocks_mutation(
     assert "would not parse" in str(excinfo.value)
     # Zero uv commands should have been recorded (pre-flight blocks mutation).
     assert len(rec.commands) == 0
+
+
+def test_refresh_writes_pending_before_first_uv_command(config_tree: ConfigRoot, tmp_path):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+    snapshots: list[ProjectTracking | None] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        snapshots.append(read_tracking(pyproject))
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=responder)
+    refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    first = snapshots[0]
+    assert first is not None
+    # The table seen by the FIRST uv command already carries pending with the
+    # OLD applied ledger intact.
+    assert first.pending is not None
+    assert "rdkit" in first.applied  # old ledger unchanged at pending time
+
+
+def test_refresh_pending_cleared_on_success(config_tree: ConfigRoot, tmp_path):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    rec = RecordingRunner()
+    refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.pending is None
+    assert "pending" not in (project_dir / "pyproject.toml").read_text()
+
+
+def test_refresh_final_write_failure_retry_converges(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # Drop rdkit from the chem profile: refresh should remove it and add chemprop.
+    config_tree.profile_path("chem").write_text("includes:\n  - chemprop\n")
+    # The motivating window: add succeeds, the CLEARING write fails once.
+    # The pending record written before mutations must shield the retry.
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+    import uv_stack.operations.project as project_mod
+
+    real_write = project_mod.write_tracking
+    calls = {"n": 0}
+
+    def flaky_write(path, tracking):
+        calls["n"] += 1
+        if calls["n"] == 2:  # 1st = pending write; 2nd = clearing write
+            raise OSError("disk full")
+        real_write(path, tracking)
+
+    monkeypatch.setattr(project_mod, "write_tracking", flaky_write)
+    rec = RecordingRunner(responder=_mutating_responder(project_dir))
+    with pytest.raises(OSError):
+        refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    crashed = read_tracking(pyproject)
+    assert crashed is not None and crashed.pending is not None
+    assert "rdkit" in crashed.applied  # old ledger still on disk
+
+    monkeypatch.setattr(project_mod, "write_tracking", real_write)
+    rec2 = RecordingRunner(responder=_mutating_responder(project_dir))
+    result = refresh_project(config_tree, rec2, RefreshOptions(python="3.12"), cwd=project_dir)
+    final = read_tracking(pyproject)
+    assert final is not None and final.pending is None
+    assert "chemprop" in final.applied  # ownership retained across the crash
+    assert not any("user-owned" in w for w in result.warnings)
+
+
+def test_refresh_orphan_adoption_three_run_convergence(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    # Crashed state: chemprop applied to deps + pending, then the profile
+    # drops chemprop before the retry.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "chemprop"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["numpy"]\n'
+        'applied = ["numpy"]\n'
+        'pending = ["numpy", "chemprop"]\n'
+    )
+    pyproject = project_dir / "pyproject.toml"
+    snapshots: list[ProjectTracking | None] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        snapshots.append(read_tracking(pyproject))
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=responder)
+    result = refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    # Adoption is durable from the FIRST write.
+    first = snapshots[0]
+    assert first is not None and "chemprop" in first.applied
+    assert any("interrupted run" in w and "chemprop" in w for w in result.warnings)
+    after = read_tracking(pyproject)
+    assert after is not None
+    assert "chemprop" in after.applied and after.pending is None
+    # Third refresh removes the orphan through the normal dropped-diff.
+    rec2 = RecordingRunner()
+    result2 = refresh_project(config_tree, rec2, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert "chemprop" in result2.removed
+    remove_cmds = [c for c in rec2.commands if c.args[:2] == ["uv", "remove"]]
+    assert remove_cmds and "chemprop" in remove_cmds[0].args
+
+
+def test_refresh_never_applied_pending_cleared_without_adoption(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    # Pending name absent from dependencies: crash happened before its add
+    # took effect — cleared silently, no adoption, no warning.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["numpy"]\n'
+        'applied = ["numpy"]\n'
+        'pending = ["numpy", "ghost-package"]\n'
+    )
+    rec = RecordingRunner()
+    result = refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    after = read_tracking(project_dir / "pyproject.toml")
+    assert after is not None and after.pending is None
+    assert not any("ghost-package" in e for e in after.applied)
+    assert not any("interrupted run" in w for w in result.warnings)
+
+
+def test_refresh_direct_reference_orphan_gets_manual_warning(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pkg @ https://h/x.whl"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["numpy"]\n'
+        'applied = ["numpy"]\n'
+        'pending = ["numpy", "pkg @ https://h/x.whl"]\n'
+    )
+    rec = RecordingRunner()
+    result = refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert any("will not be auto-removed" in w for w in result.warnings)
+    after = read_tracking(project_dir / "pyproject.toml")
+    assert after is not None and "pkg @ https://h/x.whl" in after.applied
+    # The following refresh reports it as skipped, never uv-removed.
+    rec2 = RecordingRunner()
+    result2 = refresh_project(config_tree, rec2, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert "pkg @ https://h/x.whl" in result2.skipped_removals
+    assert not any("pkg" in c.args for c in rec2.commands if c.args[:2] == ["uv", "remove"])
+
+
+def test_refresh_nameless_pending_entry_warns_without_adoption(
+    config_tree: ConfigRoot, tmp_path
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    # Editables/paths have no ownership name — nothing to adopt, but the
+    # stale pending entry must be surfaced, not silently dropped.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["numpy"]\n'
+        'applied = ["numpy"]\n'
+        'pending = ["numpy", "-e ./local-pkg"]\n'
+    )
+    rec = RecordingRunner()
+    result = refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert any("cannot be verified by name" in w for w in result.warnings)
+    after = read_tracking(project_dir / "pyproject.toml")
+    assert after is not None and after.pending is None
+    assert "-e ./local-pkg" not in after.applied
+
+
+def test_refresh_crash_mid_adoption_resumes_without_duplicate_warning(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    # Adopting retry's FINAL write fails once; orphan already in applied,
+    # so the next run treats it as ordinary ledger content.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "chemprop"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["numpy"]\n'
+        'applied = ["numpy"]\n'
+        'pending = ["numpy", "chemprop"]\n'
+    )
+    pyproject = project_dir / "pyproject.toml"
+    import uv_stack.operations.project as project_mod
+
+    real_write = project_mod.write_tracking
+    calls = {"n": 0}
+
+    def flaky_write(path, tracking):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("disk full")
+        real_write(path, tracking)
+
+    monkeypatch.setattr(project_mod, "write_tracking", flaky_write)
+    rec = RecordingRunner()
+    with pytest.raises(OSError):
+        refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    crashed = read_tracking(pyproject)
+    assert crashed is not None and "chemprop" in crashed.applied  # durable adoption
+
+    monkeypatch.setattr(project_mod, "write_tracking", real_write)
+    rec2 = RecordingRunner()
+    result = refresh_project(config_tree, rec2, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert not any("interrupted run" in w for w in result.warnings)
