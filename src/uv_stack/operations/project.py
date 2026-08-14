@@ -153,7 +153,12 @@ def init_project(
     if pyproject.is_file() and not options.force:
         try:
             interrupted = read_tracking(pyproject)
-        except ConfigError:
+        except ConfigError as exc:
+            # Tolerate corrupt/absent tracking here (the guard only decides
+            # which hint to show) — but never mask the newer-schema
+            # compatibility error.
+            if str(exc).startswith(NEWER_SCHEMA_MESSAGE.split("{", 1)[0]):
+                raise
             interrupted = None
         if interrupted is not None and interrupted.pending is not None:
             raise ConfigError(

@@ -361,6 +361,39 @@ def test_init_project_existing_untracked_original_hint(
     assert "Use --force to add to the existing project." in str(excinfo.value.hint)
 
 
+def test_init_project_v2_tracked_without_force_raises_newer_schema(
+    config_tree: ConfigRoot, tmp_path
+):
+    """Test that init WITHOUT force over a v2 project raises the newer-schema error."""
+    project_dir = tmp_path / "proj_v2"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = []\n'
+        "\n[tool.uv-stack]\nversion = 2\nstack = [\"ds\"]\napplied = []\n"
+    )
+    rec = RecordingRunner()
+    with pytest.raises(ConfigError) as excinfo:
+        init_project(config_tree, rec, ["ds"], ProjectOptions(), cwd=project_dir)
+    assert "newer uv-stack (schema 2)" in str(excinfo.value)
+
+
+def test_init_project_corrupt_tracking_without_force_shows_original_hint(
+    config_tree: ConfigRoot, tmp_path
+):
+    """Test that corrupt tracking (non-newer-schema) WITHOUT force shows generic hint."""
+    project_dir = tmp_path / "proj_corrupt"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = []\n'
+        '\n[tool.uv-stack]\nversion = "x"\nstack = []\napplied = []\n'
+    )
+    rec = RecordingRunner()
+    with pytest.raises(ConfigError) as excinfo:
+        init_project(config_tree, rec, ["ds"], ProjectOptions(), cwd=project_dir)
+    assert "pyproject.toml already exists." in str(excinfo.value)
+    assert "Use --force to add to the existing project." in str(excinfo.value.hint)
+
+
 def test_upgrade_result_carries_warnings(config_tree: ConfigRoot):
     config_tree.env_stack_path("main").write_text("standrd\n")
     rec = RecordingRunner(responder=_existing_env_responder)
