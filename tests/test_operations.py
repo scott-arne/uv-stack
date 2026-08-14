@@ -1897,3 +1897,114 @@ def test_init_preflight_blocks_before_any_command(
     with pytest.raises(ConfigError):
         init_project(config_tree, rec, ["numpy"], ProjectOptions(python="main"), cwd=project_dir)
     assert len(rec.commands) == 0
+
+
+def test_refresh_profile_direct_reference_respects_user_ownership(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """Profile containing 'pkg @ https://h/x.whl' respects user ownership filter."""
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # Create profile with a direct reference and another package.
+    config_tree.profile_path("directref").write_text(
+        "includes:\n  - pkg @ https://h/x.whl\n  - numpy\n"
+    )
+    # User owns pkg (in deps, absent from applied).
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["directref"]\n'
+        'applied = []\n'
+    )
+    project_dir = tmp_path / "proj_directref_user"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["pkg==1.0"]\n' + tracking_text
+    )
+
+    captured_file_content = None
+
+    def capture_responder(cmd: Command) -> CommandResult:
+        nonlocal captured_file_content
+        if "add" in cmd.args and "--no-sync" in cmd.args:
+            for arg in cmd.args:
+                if arg.startswith("/") and arg.endswith(".txt"):
+                    req_file = Path(arg)
+                    if req_file.exists():
+                        captured_file_content = req_file.read_text()
+                    break
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=capture_responder)
+    result = refresh_project(
+        config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir
+    )
+    # Temp file must contain numpy, not pkg.
+    assert captured_file_content is not None
+    lines = [ln.strip() for ln in captured_file_content.splitlines() if ln.strip()]
+    assert "numpy" in lines
+    assert not any("pkg" in ln for ln in lines)
+    # Warning emitted for the excluded entry.
+    assert any("pkg" in w and "user-owned" in w for w in result.warnings)
+    # Final tracking.applied excludes pkg.
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "numpy" in tracking.applied
+    assert "pkg" not in [e for e in tracking.applied if "pkg" in e]
+
+
+def test_init_force_profile_direct_reference_respects_user_ownership(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """init --force with profile containing 'pkg @ url' respects user ownership."""
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # Create profile with a direct reference.
+    config_tree.profile_path("directref").write_text(
+        "includes:\n  - pkg @ https://h/x.whl\n"
+    )
+    project_dir = tmp_path / "proj_init_directref"
+    project_dir.mkdir()
+    pyproject = project_dir / "pyproject.toml"
+    # Existing project with user-owned pkg==1.0.
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["pkg==1.0"]\n'
+    )
+
+    captured_file_content = None
+
+    def capture_responder(cmd: Command) -> CommandResult:
+        nonlocal captured_file_content
+        if "add" in cmd.args and "--no-sync" in cmd.args:
+            for arg in cmd.args:
+                if arg.startswith("/") and arg.endswith(".txt"):
+                    req_file = Path(arg)
+                    if req_file.exists():
+                        captured_file_content = req_file.read_text()
+                    break
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=capture_responder)
+    warnings = init_project(
+        config_tree,
+        rec,
+        ["directref"],
+        ProjectOptions(python="3.12", force=True),
+        cwd=project_dir,
+    )
+    # Temp file must not contain pkg.
+    assert captured_file_content is not None
+    lines = [ln.strip() for ln in captured_file_content.splitlines() if ln.strip()]
+    assert not any("pkg" in ln for ln in lines)
+    # Warning emitted for the excluded entry.
+    assert any("pkg" in w and "user-owned" in w for w in warnings)
+    # Final tracking.applied excludes pkg.
+    tracking = read_tracking(pyproject)
+    assert tracking is not None
+    assert "pkg" not in [e for e in tracking.applied if "pkg" in e]
+    # User's pkg==1.0 survives verbatim.
+    assert '"pkg==1.0"' in pyproject.read_text()
