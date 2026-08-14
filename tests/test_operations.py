@@ -548,6 +548,35 @@ def test_init_project_no_track_removes_table_even_when_add_fails(
     assert read_tracking(project_dir / "pyproject.toml") is None
 
 
+def test_init_project_no_track_probe_failure_preserves_ledger(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_notrack_probe_fail"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\ndependencies = []\n'
+        "\n[tool.uv-stack]\nversion = 1\nstack = [\"ds\"]\napplied = []\n"
+    )
+
+    rec = RecordingRunner(responder=_missing_env_responder)
+    with pytest.raises(EnvError):
+        init_project(
+            config_tree,
+            rec,
+            ["ds"],
+            ProjectOptions(python="nope", force=True, track=False),
+            cwd=project_dir,
+        )
+    # The probe failed, so the ledger must still be present.
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["ds"]
+    assert tracking.applied == []
+
+
 def test_init_project_force_does_not_adopt_user_dependencies(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):

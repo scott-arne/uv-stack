@@ -225,9 +225,6 @@ def init_project(
             and canonical_name(n) not in stack_names
         ]
 
-    if not options.track:
-        remove_tracking(pyproject)
-
     # One target, two table shapes derived from it (spec §2.2).
     pending_tracking = ProjectTracking(
         stack=list(tokens),
@@ -248,6 +245,12 @@ def init_project(
     # Resolve the interpreter so a bad env name fails before any scaffolding
     # runs, and so both uv init and uv sync receive the same value.
     python = resolve_project_python(config, runner, options.python)
+
+    # Remove tracking AFTER the interpreter probe (when --no-track), so a bad
+    # env spec cannot destroy the ledger before any fallible uv step (after
+    # the probe, so a bad env spec cannot destroy the ledger).
+    if not options.track:
+        remove_tracking(pyproject)
 
     # write_tracking on a missing pyproject would CREATE it and suppress
     # uv init, so fresh projects must initialize first (spec §2.2).
