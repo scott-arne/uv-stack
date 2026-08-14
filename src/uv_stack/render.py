@@ -49,32 +49,6 @@ def render_requirements_in(stack: ResolvedStack, config: ConfigRoot, env_name: s
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def render_requirements_flat(stack: ResolvedStack, config: ConfigRoot) -> str:
-    """Render a flattened requirements list for ``project init``.
-
-    Each profile's lines are expanded inline so the result is self-contained and
-    does not reference files under the config root.
-
-    :param stack: The resolved stack.
-    :param config: The configuration root (for loading profile contents).
-    :returns: File text ending with a trailing newline.
-    """
-    lines: list[str] = [_HEADER, ""]
-
-    for name in stack.profiles:
-        profile = config.load_profile(name)
-        lines.append(f"# Profile: {name}")
-        lines += list(profile.includes)
-        lines.append("")
-
-    if stack.inline:
-        lines.append("# Inline requirements from bundles/stack")
-        lines += list(stack.inline)
-        lines.append("")
-
-    return "\n".join(lines).rstrip("\n") + "\n"
-
-
 def render_environment_yml(env: EnvConfig) -> str:
     """Render a micromamba ``environment.yml`` for a named environment.
 

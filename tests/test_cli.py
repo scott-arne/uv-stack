@@ -1668,6 +1668,22 @@ def test_create_profile_tolerates_unreadable_bundles_dir(
     assert "Traceback" not in combined
 
 
+def test_create_profile_tolerates_unreadable_envs_dir(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    def exploding_list_envs(self):
+        raise PermissionError("envs dir unreadable")
+
+    monkeypatch.setattr(ConfigRoot, "list_envs", exploding_list_envs)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "profile", "newprof", "pkg:something"]
+    )
+    assert result.exit_code == 0
+    assert "Wrote" in _combined_output(result)
+
+
 def test_newer_schema_with_extra_keys_friendly_via_cli(tmp_path: Path, monkeypatch):
     root = _seeded_root(tmp_path)
     project_dir = tmp_path / "proj"

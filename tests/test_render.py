@@ -4,7 +4,6 @@ from uv_stack.config import ConfigRoot
 from uv_stack.models import EnvConfig, ResolvedStack
 from uv_stack.render import (
     render_environment_yml,
-    render_requirements_flat,
     render_requirements_in,
 )
 
@@ -31,18 +30,6 @@ def test_render_requirements_in_omits_missing_local(config_tree: ConfigRoot):
     # absent there must be no -r reference to it and no local-additions section.
     assert "# Environment-local additions" not in text
     assert f"-r {config_tree.env_local_path('main')}" not in text
-
-
-def test_render_requirements_flat_expands_profiles(config_tree: ConfigRoot):
-    stack = ResolvedStack(profiles=["ds", "chem"], inline=["umap-learn"])
-    text = render_requirements_flat(stack, config_tree)
-    # ds expands to numpy, pandas; chem to rdkit; plus inline umap-learn
-    assert "numpy" in text
-    assert "pandas" in text
-    assert "rdkit" in text
-    assert "umap-learn" in text
-    # flat form must NOT contain -r references to the config root
-    assert "-r " not in text
 
 
 def test_render_environment_yml():
