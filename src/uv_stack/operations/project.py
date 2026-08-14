@@ -246,9 +246,9 @@ def init_project(
     # runs, and so both uv init and uv sync receive the same value.
     python = resolve_project_python(config, runner, options.python)
 
-    # Remove tracking AFTER the interpreter probe (when --no-track), so a bad
-    # env spec cannot destroy the ledger before any fallible uv step (after
-    # the probe, so a bad env spec cannot destroy the ledger).
+    # Opting out is authoritative: clear stale metadata BEFORE any fallible
+    # uv step — but AFTER the interpreter probe, so a bad env spec cannot
+    # destroy the ledger.
     if not options.track:
         remove_tracking(pyproject)
 
