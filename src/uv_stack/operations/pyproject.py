@@ -94,6 +94,18 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
             f"[tool.uv-stack] in {pyproject} must be a table.",
             hint="Replace the scalar/array value with a [tool.uv-stack] table.",
         )
+    # PRE-loop: raise the newer-schema error immediately when 'version' is a
+    # genuine scalar int > 1, preempting any shape errors the loop would hit
+    # on future fields (inline tables, etc.). Acting only on strict scalar ints
+    # preserves foreign [tool.uv-stack.version] subtable tolerance (dict values
+    # fall through to the loop).
+    raw_version = table.get("version")
+    if isinstance(raw_version, int) and not isinstance(raw_version, bool):
+        if raw_version > 1:
+            raise ConfigError(
+                NEWER_SCHEMA_MESSAGE.format(version=raw_version),
+                hint=NEWER_SCHEMA_HINT,
+            )
     subtable_keys = _subtable_keys(text)
     scalars = {}
     for key, value in table.items():
@@ -114,19 +126,15 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
         # subtables (e.g. after remove_tracking left [tool.uv-stack.extra]
         # behind): no tracking data means no tracked project.
         return None
-    # Strict integer typing for the version field: durable records must reject
-    # malformed tables before pydantic's lax coercion silently accepts them.
+    # POST-loop: strict typing on the filtered scalar view. Reject bool or
+    # non-int version values (pydantic would lax-coerce them). The > 1 guard
+    # already ran pre-loop for genuine scalar ints, so this only validates type.
     if "version" in scalars:
         raw_version = scalars["version"]
         if isinstance(raw_version, bool) or not isinstance(raw_version, int):
             raise ConfigError(
                 f"Invalid [tool.uv-stack] table in {pyproject}: 'version' must be an integer.",
                 hint="Check the fields against the schema (version, stack, python, applied).",
-            )
-        if raw_version > 1:
-            raise ConfigError(
-                NEWER_SCHEMA_MESSAGE.format(version=raw_version),
-                hint=NEWER_SCHEMA_HINT,
             )
     try:
         return ProjectTracking.model_validate(scalars)

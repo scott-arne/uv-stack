@@ -429,3 +429,25 @@ def test_foreign_version_subtable_tolerated_on_read(tmp_path: Path):
     # 'version' key filtered out (it's a dict with a real subtable header),
     # so version defaults to 1 from the model.
     assert loaded is not None and loaded.version == 1 and loaded.stack == []
+
+
+def test_version_2_with_inline_table_gives_newer_schema_error(tmp_path: Path):
+    """version = 2 plus an inline table field raises newer-schema, not inline-table error.
+
+    The pre-loop newer-schema guard (acting on scalar int version > 1) must fire before
+    the filtering loop reaches the inline-table rejection, ensuring the friendly message
+    preempts shape errors for genuinely newer records.
+    """
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n'
+        "[tool.uv-stack]\nversion = 2\n"
+        'stack = ["ds"]\n'
+        'applied = []\n'
+        'future = { x = 1 }\n'
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert "newer uv-stack (schema 2)" in str(excinfo.value)
+    # Ensure we got the newer-schema error, not the inline-table error
+    assert "inline table" not in str(excinfo.value)
