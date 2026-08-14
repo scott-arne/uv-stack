@@ -1566,3 +1566,7 @@ def test_refresh_crash_mid_adoption_resumes_without_duplicate_warning(
     rec2 = RecordingRunner()
     result = refresh_project(config_tree, rec2, RefreshOptions(python="3.12"), cwd=project_dir)
     assert not any("interrupted run" in w for w in result.warnings)
+    assert any("chemprop" in entry for entry in result.removed)
+    assert any(
+        c.args[:2] == ["uv", "remove"] and "chemprop" in c.args for c in rec2.commands
+    )
