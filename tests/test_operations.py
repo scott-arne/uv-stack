@@ -1696,6 +1696,35 @@ def test_refresh_direct_ref_update_orphan_surfaces_via_skipped_removals(
     assert not any("pkg" in e for e in after.applied)
 
 
+def test_refresh_plain_to_direct_interrupted_update_converges_by_removal(
+    config_tree: ConfigRoot, tmp_path
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    # The pending record proves OUR crashed run applied the direct ref, so
+    # name-based removal of the stack-dropped name is safe and convergent —
+    # and loud (reported in removed). Skipping would silently orphan pkg.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pkg @ https://h/new.whl"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["numpy"]\n'
+        'applied = ["numpy", "pkg==1.0"]\n'
+        'pending = ["numpy", "pkg @ https://h/new.whl"]\n'
+    )
+    rec = RecordingRunner()
+    result = refresh_project(config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert "pkg==1.0" in result.removed
+    remove_cmds = [c for c in rec.commands if c.args[:2] == ["uv", "remove"]]
+    assert remove_cmds and "pkg" in remove_cmds[0].args
+    after = read_tracking(project_dir / "pyproject.toml")
+    assert after is not None and after.pending is None
+    assert not any("pkg" in e for e in after.applied)
+
+
 def test_init_fresh_runs_uv_init_before_any_table(config_tree: ConfigRoot, tmp_path):
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
