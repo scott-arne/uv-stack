@@ -331,6 +331,36 @@ def test_init_project_existing_pyproject_with_force_skips_init(
     assert any("uv add --no-sync" in a for a in argv)
 
 
+def test_init_project_interrupted_pending_hint(config_tree: ConfigRoot, tmp_path):
+    """Test that a pyproject with pending state shows a resume hint."""
+    project_dir = tmp_path / "proj_interrupted"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = []\n'
+        "\n[tool.uv-stack]\nversion = 1\nstack = [\"ds\"]\napplied = []\n"
+        'pending = ["numpy"]\n'
+    )
+    rec = RecordingRunner()
+    with pytest.raises(ConfigError) as excinfo:
+        init_project(config_tree, rec, ["ds"], ProjectOptions(), cwd=project_dir)
+    assert "pyproject.toml already exists." in str(excinfo.value)
+    assert "--force to resume" in str(excinfo.value.hint)
+
+
+def test_init_project_existing_untracked_original_hint(
+    config_tree: ConfigRoot, tmp_path
+):
+    """Test that an untracked pyproject shows the original hint."""
+    project_dir = tmp_path / "proj_untracked"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text("[project]\nname='x'\n")
+    rec = RecordingRunner()
+    with pytest.raises(ConfigError) as excinfo:
+        init_project(config_tree, rec, ["ds"], ProjectOptions(), cwd=project_dir)
+    assert "pyproject.toml already exists." in str(excinfo.value)
+    assert "Use --force to add to the existing project." in str(excinfo.value.hint)
+
+
 def test_upgrade_result_carries_warnings(config_tree: ConfigRoot):
     config_tree.env_stack_path("main").write_text("standrd\n")
     rec = RecordingRunner(responder=_existing_env_responder)

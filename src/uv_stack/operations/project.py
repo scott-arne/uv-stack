@@ -151,6 +151,18 @@ def init_project(
     """
     pyproject = cwd / "pyproject.toml"
     if pyproject.is_file() and not options.force:
+        try:
+            interrupted = read_tracking(pyproject)
+        except ConfigError:
+            interrupted = None
+        if interrupted is not None and interrupted.pending is not None:
+            raise ConfigError(
+                "pyproject.toml already exists.",
+                hint=(
+                    "An interrupted create left pending state; re-run with "
+                    "--force to resume it."
+                ),
+            )
         raise ConfigError(
             "pyproject.toml already exists.",
             hint="Use --force to add to the existing project.",
