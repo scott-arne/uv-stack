@@ -27,6 +27,8 @@ def atomic_write(path: Path, text: str) -> None:
     Identical content is not rewritten (the mtime is preserved) when the target is
     a regular, un-hardlinked file and the exact bytes match.
 
+    Writes are byte-exact: no newline translation is applied.
+
     :param path: Destination file.
     :param text: Content to write.
     """
@@ -62,7 +64,7 @@ def atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as handle:
+        with os.fdopen(fd, "w", newline="") as handle:
             handle.write(text)
         # mkstemp creates the file 0600; relax it to the conventional file mode
         # (honoring the process umask) so generated config files are readable
@@ -86,6 +88,8 @@ def atomic_write_new(path: Path, text: str) -> os.stat_result:
     Falls back to an exclusive O_CREAT|O_EXCL create on filesystems without
     hard links; FileExistsError semantics are identical on both paths.
 
+    Writes are byte-exact: no newline translation is applied.
+
     :param path: Destination file (must not exist).
     :param text: Content to write.
     :returns: The stat of the published inode, captured race-free from the temporary file.
@@ -94,7 +98,7 @@ def atomic_write_new(path: Path, text: str) -> os.stat_result:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as handle:
+        with os.fdopen(fd, "w", newline="") as handle:
             handle.write(text)
         umask = os.umask(0)
         os.umask(umask)
@@ -115,7 +119,7 @@ def atomic_write_new(path: Path, text: str) -> os.stat_result:
             fallback_fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
             created = os.fstat(fallback_fd)
             try:
-                with os.fdopen(fallback_fd, "w") as handle:
+                with os.fdopen(fallback_fd, "w", newline="") as handle:
                     handle.write(text)
                     handle.flush()
                     # Return post-write stat: same inode as 'created', but with

@@ -264,3 +264,14 @@ def test_atomic_write_new_fallback_cleans_partial_on_failure(tmp_path, monkeypat
     with pytest.raises(OSError):
         atomic_write_new(target, "content\n")
     assert not target.exists()  # partial target withdrawn
+
+
+def test_atomic_write_publishes_exact_bytes_for_crlf_text(tmp_path):
+    from uv_stack.fsutil import atomic_write, atomic_write_new
+
+    target = tmp_path / "crlf.txt"
+    atomic_write(target, "a\r\nb\n")
+    assert target.read_bytes() == b"a\r\nb\n"
+    target2 = tmp_path / "crlf_new.txt"
+    atomic_write_new(target2, "a\r\nb\n")
+    assert target2.read_bytes() == b"a\r\nb\n"
