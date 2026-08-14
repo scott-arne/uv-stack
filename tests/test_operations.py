@@ -492,7 +492,7 @@ def test_init_project_force_no_track_removes_stale_table(
     assert read_tracking(project_dir / "pyproject.toml") is None
 
 
-def test_init_project_tracking_not_written_when_add_fails(
+def test_init_add_failure_leaves_pending_intent(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):
     from uv_stack.errors import ToolError
@@ -512,7 +512,10 @@ def test_init_project_tracking_not_written_when_add_fails(
         init_project(
             config_tree, rec, ["ds"], ProjectOptions(python="3.12"), cwd=project_dir
         )
-    assert read_tracking(project_dir / "pyproject.toml") is None
+    stale = read_tracking(project_dir / "pyproject.toml")
+    assert stale is not None
+    assert stale.applied == []          # final ledger never written
+    assert stale.pending is not None    # intent record present for the retry
 
 
 def test_init_project_no_track_removes_table_even_when_add_fails(
@@ -1601,3 +1604,163 @@ def test_refresh_direct_ref_update_orphan_surfaces_via_skipped_removals(
     after = read_tracking(project_dir / "pyproject.toml")
     assert after is not None and after.pending is None
     assert not any("pkg" in e for e in after.applied)
+
+
+def test_init_fresh_runs_uv_init_before_any_table(config_tree: ConfigRoot, tmp_path):
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    pyproject = project_dir / "pyproject.toml"
+    states: list[tuple[list[str], bool]] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        states.append((list(cmd.args), pyproject.is_file()))
+        if cmd.args[:2] == ["uv", "init"]:
+            pyproject.write_text('[project]\nname = "x"\nversion = "0.1.0"\ndependencies = []\n')
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=responder)
+    init_project(config_tree, rec, ["numpy"], ProjectOptions(python="3.12"), cwd=project_dir)
+    init_calls = [s for s in states if s[0][:2] == ["uv", "init"]]
+    add_calls = [s for s in states if s[0][:2] == ["uv", "add"]]
+    assert init_calls and init_calls[0][1] is False  # no pyproject before uv init
+    assert add_calls  # the pending-at-add assertion lives in the next test
+
+
+def test_init_pending_between_init_and_add(config_tree: ConfigRoot, tmp_path: Path):
+    from uv_stack.operations.pyproject import read_tracking
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    pyproject = project_dir / "pyproject.toml"
+    pending_at_add: list[ProjectTracking | None] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        if cmd.args[:2] == ["uv", "init"]:
+            pyproject.write_text('[project]\nname = "x"\nversion = "0.1.0"\ndependencies = []\n')
+        if cmd.args[:2] == ["uv", "add"]:
+            pending_at_add.append(read_tracking(pyproject))
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=responder)
+    init_project(config_tree, rec, ["numpy"], ProjectOptions(python="3.12"), cwd=project_dir)
+    assert pending_at_add and pending_at_add[0] is not None
+    assert pending_at_add[0].applied == []
+    assert pending_at_add[0].pending is not None
+    final = read_tracking(pyproject)
+    assert final is not None and final.pending is None
+
+
+def test_init_force_orphan_adoption(config_tree: ConfigRoot, tmp_path: Path):
+    from uv_stack.operations.pyproject import read_tracking
+
+    # Crashed tracked init left applied=[] + pending=["chemprop"]; a --force
+    # retry whose stack no longer includes chemprop adopts it at the FIRST
+    # write.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    pyproject = project_dir / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["chemprop"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["chemprop"]\n'
+        'applied = []\n'
+        'pending = ["chemprop"]\n'
+    )
+    snapshots: list[ProjectTracking | None] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        snapshots.append(read_tracking(pyproject))
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=responder)
+    warnings = init_project(
+        config_tree,
+        rec,
+        ["numpy"],
+        ProjectOptions(python="3.12", force=True),
+        cwd=project_dir,
+    )
+    first = snapshots[0]
+    assert first is not None and "chemprop" in first.applied  # durable from first write
+    assert any("interrupted run" in w and "chemprop" in w for w in warnings)
+    final = read_tracking(pyproject)
+    assert final is not None
+    assert "chemprop" in final.applied and final.pending is None
+
+
+def test_init_force_user_pin_survives(config_tree: ConfigRoot, tmp_path: Path):
+    # Sharpen the existing ownership test: the user's pin text survives
+    # verbatim in [project.dependencies] (write_tracking never touches it).
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    pyproject = project_dir / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy<2"]\n'
+    )
+    rec = RecordingRunner()
+    init_project(
+        config_tree,
+        rec,
+        ["numpy", "pandas"],
+        ProjectOptions(python="3.12", force=True),
+        cwd=project_dir,
+    )
+    assert '"numpy<2"' in pyproject.read_text()
+
+
+def test_init_force_same_stack_retry_keeps_pending_package_owned(
+    config_tree: ConfigRoot, tmp_path
+):
+    from uv_stack.operations.pyproject import read_tracking
+    from uv_stack.parse import ownership_name
+
+    # Crashed init, stack UNCHANGED: the pending package must ride the
+    # ownership union into stack_adds — not be misclassified user-owned and
+    # falsely adopted as an orphan.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    pyproject = project_dir / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["numpy"]\n'
+        'applied = []\n'
+        'pending = ["numpy"]\n'
+    )
+    rec = RecordingRunner()
+    warnings = init_project(
+        config_tree,
+        rec,
+        ["numpy"],
+        ProjectOptions(python="3.12", force=True),
+        cwd=project_dir,
+    )
+    assert not any("user-owned" in w for w in warnings)
+    assert not any("interrupted run" in w for w in warnings)
+    final = read_tracking(pyproject)
+    assert final is not None and final.pending is None
+    assert any(ownership_name(e) == "numpy" for e in final.applied)
+
+
+def test_init_preflight_blocks_before_any_command(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    from uv_stack.errors import ConfigError
+
+    # Closes the recorded gap: init's tracked-path pre-flight fires before
+    # uv init/uv add, exactly like refresh's.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    import uv_stack.operations.project as project_mod
+
+    def exploding_validate(path, tracking):
+        raise ConfigError("pre-flight rejected")
+
+    monkeypatch.setattr(project_mod, "validate_tracking_write", exploding_validate)
+    rec = RecordingRunner()
+    with pytest.raises(ConfigError):
+        init_project(config_tree, rec, ["numpy"], ProjectOptions(python="3.12"), cwd=project_dir)
+    assert len(rec.commands) == 0

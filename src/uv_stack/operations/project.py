@@ -134,8 +134,12 @@ def init_project(
 ) -> list[str]:
     """Initialize a uv project in ``cwd`` from resolved stack ``tokens``.
 
-    Tracking metadata is recorded after ``uv add`` succeeds unless ``track`` is
-    false, in which case any existing table is removed.
+    Tracking is two-phase: a ``pending`` intent record is written before
+    ``uv add`` (after ``uv init`` on fresh projects, which must create
+    ``pyproject.toml`` first) and the final ledger clears it after the add
+    succeeds, so a crash at any point converges on retry (see
+    :func:`refresh_project` for the failure regimes). With ``track`` false,
+    any existing table is removed instead.
 
     :param config: Configuration root.
     :param runner: Command runner.
@@ -156,7 +160,6 @@ def init_project(
     # PREVIOUS uv-stack create owned stay ours (force over a tracked
     # project); anything else pre-existing is user-owned and must never
     # enter the removal ledger.
-    previously_owned: set[str] = set()
     existing_tracking = read_tracking(pyproject) if pyproject.is_file() else None
     if existing_tracking is not None:
         if existing_tracking.version > 1:
@@ -164,14 +167,15 @@ def init_project(
                 NEWER_SCHEMA_MESSAGE.format(version=existing_tracking.version),
                 hint=NEWER_SCHEMA_HINT,
             )
-        for entry in existing_tracking.applied:
-            owned_name = ownership_name(entry)
-            if owned_name:
-                previously_owned.add(canonical_name(owned_name))
-    user_owned = (
-        {canonical_name(n) for n in read_project_dependency_names(pyproject)}
-        - previously_owned
-    )
+    previous_applied = list(existing_tracking.applied) if existing_tracking else []
+    previous_pending = list(existing_tracking.pending or []) if existing_tracking else []
+    previously_owned: set[str] = set()
+    for entry in [*previous_applied, *previous_pending]:
+        owned_name = ownership_name(entry)
+        if owned_name:
+            previously_owned.add(canonical_name(owned_name))
+    dep_names = {canonical_name(n) for n in read_project_dependency_names(pyproject)}
+    user_owned = dep_names - previously_owned
 
     # Resolve the stack first so --strict token errors are not preceded by
     # external command execution or an unrelated EnvError.
@@ -183,40 +187,52 @@ def init_project(
     stack_adds = [
         p
         for p in packages
-        if canonical_name(requirement_name(p) or "") not in user_owned
+        if canonical_name(ownership_name(p) or "") not in user_owned
     ]
     # Build warnings for ownership-filtered entries.
     warnings = list(stack.warnings)
     for entry in packages:
-        name = requirement_name(entry)
+        name = ownership_name(entry)
         if name and canonical_name(name) in user_owned:
             warnings.append(
                 f"Skipping stack requirement '{entry}': '{name}' is user-owned in this project."
             )
+
+    # Adopt orphans left by a crashed tracked init/refresh (spec §2.3):
+    # durable from the FIRST write below.
+    adopted = (
+        _adopt_orphans(previous_pending, previous_applied, stack_adds, dep_names, warnings)
+        if previous_pending
+        else []
+    )
 
     # Resolve the interpreter so a bad env name fails before any scaffolding
     # runs, and so both uv init and uv sync receive the same value.
     python = resolve_project_python(config, runner, options.python)
 
     if not options.track:
-        # Opting out is authoritative: clear stale metadata from a previous
-        # tracked create BEFORE any fallible uv step, so a failed add can
-        # never leave an old ledger behind.
         remove_tracking(pyproject)
 
-    # Pre-flight: validate the tracking write BEFORE any uv mutations, so a
-    # deterministic TOML validation failure doesn't leave dependencies mutated
-    # with the old ledger intact.
+    # One target, two table shapes derived from it (spec §2.2).
+    pending_tracking = ProjectTracking(
+        stack=list(tokens),
+        python=options.python,
+        applied=[*previous_applied, *adopted],
+        pending=stack_adds,
+    )
+    final_tracking = ProjectTracking(
+        stack=list(tokens),
+        python=options.python,
+        applied=[*stack_adds, *adopted],
+        pending=None,
+    )
     if options.track:
-        validate_tracking_write(
-            pyproject,
-            ProjectTracking(
-                stack=list(tokens),
-                python=options.python,
-                applied=stack_adds,
-            ),
-        )
+        # Pre-flight the FIRST write this run will attempt.
+        validate_tracking_write(pyproject, pending_tracking)
 
+    # write_tracking on a missing pyproject would CREATE it and suppress
+    # uv init, so fresh projects must initialize first (spec §2.2).
+    fresh = not pyproject.is_file()
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-stack.", suffix=".txt")
     tmp_req = Path(tmp_name)
     try:
@@ -225,18 +241,13 @@ def init_project(
                 handle.write(entry)
                 handle.write("\n")
 
-        if not pyproject.is_file():
+        if fresh:
             runner.run(_with_cwd(uv_init(python, options.name), cwd))
+        if options.track:
+            write_tracking(pyproject, pending_tracking)
         runner.run(_with_cwd(uv_add(tmp_req), cwd))
         if options.track:
-            write_tracking(
-                pyproject,
-                ProjectTracking(
-                    stack=list(tokens),
-                    python=options.python,
-                    applied=stack_adds,
-                ),
-            )
+            write_tracking(pyproject, final_tracking)
         if not options.no_sync:
             runner.run(_with_cwd(uv_sync(python), cwd))
     finally:
