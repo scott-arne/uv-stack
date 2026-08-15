@@ -1500,25 +1500,26 @@ def test_refresh_flags_pass_through_to_refresh_project(tmp_path: Path, monkeypat
     assert opts2.dry_run is True
 
 
-def test_refresh_in_help_panels():
-    """Refresh command must appear in the Environments panel.
+def test_command_panels_separate_create_env_and_project_work():
+    """Top-level help must not file project work under Environments.
 
-    Asserts structurally against COMMAND_GROUPS so the test fails if refresh is
-    registered but placed in a different panel.
+    Asserts structurally against COMMAND_GROUPS: 'refresh' only ever operates
+    on projects and gets its own panel; 'create' is cross-cutting (it makes
+    environments, projects, profiles, and bundles) and gets its own panel;
+    'upgrade' is the only genuinely environment-only command.
     """
-    # Structural assertion: the Environments group must contain exactly the
-    # three listed commands in order.
     command_groups = rich_click.rich_click.COMMAND_GROUPS.get("stack", [])
-    env_group = next((g for g in command_groups if g["name"] == "Environments"), None)
-    assert env_group is not None, "Environments panel not found in COMMAND_GROUPS"
-    assert env_group["commands"] == ["upgrade", "create", "refresh"], (
-        f"Expected ['upgrade', 'create', 'refresh'], got {env_group['commands']}"
-    )
+    panels = {group["name"]: group["commands"] for group in command_groups}
+    assert panels.get("Create") == ["create"], panels
+    assert panels.get("Environments") == ["upgrade"], panels
+    assert panels.get("Projects") == ["refresh"], panels
 
-    # Lightweight smoke assertion: help renders correctly and refresh appears.
+    # Smoke assertion: help renders and the Projects panel is visible, so
+    # "project" appears as a heading on the top-level help screen.
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"], prog_name="stack")
     assert result.exit_code == 0
+    assert "Projects" in result.output
     assert "refresh" in result.output
 
 

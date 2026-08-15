@@ -38,7 +38,9 @@ def refresh(
     no_sync: bool,
     dry_run: bool,
 ) -> None:
-    """Re-resolve a tracked project against the current profiles and bundles."""
+    """Re-resolve the tracked project in the current directory against current
+    profiles and bundles.
+    """
     options = RefreshOptions(python=python, strict=strict, no_sync=no_sync, dry_run=dry_run)
     result = refresh_project(config, SubprocessRunner(), options, cwd=Path.cwd())
     render_warnings(result.warnings)

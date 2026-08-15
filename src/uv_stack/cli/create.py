@@ -1,4 +1,4 @@
-"""``stack create``: create a new environment or project."""
+"""``stack create``: create an environment, project, profile, or bundle."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def _bare_usage_warnings(
 
 @click.group("create")
 def create() -> None:
-    """Create a new environment or project."""
+    """Create an environment, project, profile, or bundle."""
 
 
 @create.command("env")
@@ -174,7 +174,7 @@ def create_project(
     no_track: bool,
     strict: bool,
 ) -> None:
-    """Create a uv project from the resolved stack TOKENS."""
+    """Create a uv project in the current directory from the resolved stack TOKENS."""
     options = ProjectOptions(
         python=python,
         name=name,

@@ -136,7 +136,7 @@ def upgrade(
     upgrade_packages: tuple[str, ...],
     strict: bool,
 ) -> None:
-    """Render, compile, sync, and check one or more existing environments.
+    """Render, compile, sync, and check one or more existing shared environments.
 
     Pass NAMES to upgrade specific environments, or '--all' to upgrade every
     discovered environment. With neither, all environments are upgraded as well
