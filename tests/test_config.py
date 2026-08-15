@@ -9,21 +9,61 @@ from uv_stack.errors import ConfigError
 
 
 def test_discover_precedence_explicit_over_env(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("UV_STACK_ROOT", raising=False)
     monkeypatch.setenv("UV_ENV_ROOT", str(tmp_path / "from-env"))
     cfg = ConfigRoot.discover(root=tmp_path / "explicit")
     assert cfg.root == (tmp_path / "explicit")
 
 
+def test_discover_explicit_root_wins_over_both_env_vars(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("UV_STACK_ROOT", str(tmp_path / "stack-root"))
+    monkeypatch.setenv("UV_ENV_ROOT", str(tmp_path / "env-root"))
+    cfg = ConfigRoot.discover(root=tmp_path / "explicit")
+    assert cfg.root == (tmp_path / "explicit")
+
+
 def test_discover_uses_env_when_no_explicit(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("UV_STACK_ROOT", raising=False)
     monkeypatch.setenv("UV_ENV_ROOT", str(tmp_path / "from-env"))
     cfg = ConfigRoot.discover()
     assert cfg.root == (tmp_path / "from-env")
 
 
 def test_discover_default(monkeypatch):
+    monkeypatch.delenv("UV_STACK_ROOT", raising=False)
     monkeypatch.delenv("UV_ENV_ROOT", raising=False)
     cfg = ConfigRoot.discover()
     assert cfg.root == (Path.home() / ".config" / "python-envs")
+
+
+def test_discover_prefers_uv_stack_root(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("UV_ENV_ROOT", raising=False)
+    monkeypatch.setenv("UV_STACK_ROOT", str(tmp_path / "stack-root"))
+    cfg = ConfigRoot.discover()
+    assert cfg.root == (tmp_path / "stack-root")
+
+
+def test_discover_uv_stack_root_wins_over_legacy(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("UV_STACK_ROOT", str(tmp_path / "stack-root"))
+    monkeypatch.setenv("UV_ENV_ROOT", str(tmp_path / "legacy-root"))
+    cfg = ConfigRoot.discover()
+    assert cfg.root == (tmp_path / "stack-root")
+
+
+def test_discover_falls_back_to_legacy_uv_env_root(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("UV_STACK_ROOT", raising=False)
+    monkeypatch.setenv("UV_ENV_ROOT", str(tmp_path / "legacy-root"))
+    cfg = ConfigRoot.discover()
+    assert cfg.root == (tmp_path / "legacy-root")
+
+
+def test_discover_empty_uv_stack_root_falls_through_to_legacy(monkeypatch, tmp_path: Path):
+    """An empty UV_STACK_ROOT is treated as unset, matching the existing
+    ``if env:`` guard's handling of an empty UV_ENV_ROOT."""
+    monkeypatch.setenv("UV_STACK_ROOT", "")
+    monkeypatch.setenv("UV_ENV_ROOT", str(tmp_path / "legacy-root"))
+    cfg = ConfigRoot.discover()
+    assert cfg.root == (tmp_path / "legacy-root")
 
 
 def test_path_helpers(config_tree: ConfigRoot):

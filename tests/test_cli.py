@@ -101,7 +101,7 @@ def _two_failing_envs_root(tmp_path: Path) -> Path:
 def test_version():
     result = CliRunner().invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "stack, version 0.3.1" in result.output
+    assert "stack, version 0.4.0" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1500,25 +1500,26 @@ def test_refresh_flags_pass_through_to_refresh_project(tmp_path: Path, monkeypat
     assert opts2.dry_run is True
 
 
-def test_refresh_in_help_panels():
-    """Refresh command must appear in the Environments panel.
+def test_command_panels_separate_create_env_and_project_work():
+    """Top-level help must not file project work under Environments.
 
-    Asserts structurally against COMMAND_GROUPS so the test fails if refresh is
-    registered but placed in a different panel.
+    Asserts structurally against COMMAND_GROUPS: 'refresh' only ever operates
+    on projects and gets its own panel; 'create' is cross-cutting (it makes
+    environments, projects, profiles, and bundles) and gets its own panel;
+    'upgrade' is the only genuinely environment-only command.
     """
-    # Structural assertion: the Environments group must contain exactly the
-    # three listed commands in order.
     command_groups = rich_click.rich_click.COMMAND_GROUPS.get("stack", [])
-    env_group = next((g for g in command_groups if g["name"] == "Environments"), None)
-    assert env_group is not None, "Environments panel not found in COMMAND_GROUPS"
-    assert env_group["commands"] == ["upgrade", "create", "refresh"], (
-        f"Expected ['upgrade', 'create', 'refresh'], got {env_group['commands']}"
-    )
+    panels = {group["name"]: group["commands"] for group in command_groups}
+    assert panels.get("Create") == ["create"], panels
+    assert panels.get("Environments") == ["upgrade"], panels
+    assert panels.get("Projects") == ["refresh"], panels
 
-    # Lightweight smoke assertion: help renders correctly and refresh appears.
+    # Smoke assertion: help renders and the Projects panel is visible, so
+    # "project" appears as a heading on the top-level help screen.
     runner = CliRunner()
     result = runner.invoke(cli, ["--help"], prog_name="stack")
     assert result.exit_code == 0
+    assert "Projects" in result.output
     assert "refresh" in result.output
 
 
@@ -1705,3 +1706,195 @@ def test_newer_schema_with_extra_keys_friendly_via_cli(tmp_path: Path, monkeypat
     )
     assert create_result.exit_code == 1
     assert "newer uv-stack (schema 2)" in _combined_output(create_result)
+
+
+# ---------------------------------------------------------------------------
+# show project
+# ---------------------------------------------------------------------------
+
+
+def _project_with_tracking(tmp_path: Path, table: str, *, name: str = "showproj") -> Path:
+    """A project directory whose pyproject.toml carries the given tracking table."""
+    project_dir = tmp_path / name
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n' + table
+    )
+    return project_dir
+
+
+def test_show_project_prints_path_stack_and_applied(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\n"
+        'stack = ["@standard", "pkg:httpx"]\n'
+        'python = "3.12"\n'
+        'applied = ["httpx", "numpy", "pandas"]\n',
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 0
+    assert f"Project: {project_dir}" in result.output
+    assert "Python: 3.12" in result.output
+    assert "Stack:" in result.output
+    assert "  @standard" in result.output
+    assert "  pkg:httpx" in result.output
+    assert "Applied packages:" in result.output
+    assert "  httpx" in result.output
+    assert "  pandas" in result.output
+
+
+def test_show_project_python_not_recorded(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\nstack = [\"ds\"]\napplied = []\n",
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 0
+    assert "Python: (not recorded)" in result.output
+    # Empty lists still print their headings, matching 'show env'.
+    assert "Applied packages:" in result.output
+
+
+def test_show_project_prints_pending_when_present(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["numpy"]\n'
+        'pending = ["scipy"]\n',
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 0
+    expected_pending = (
+        "Pending (interrupted run — the next successful 'stack refresh' clears it):"
+    )
+    assert expected_pending in result.output
+    assert "  scipy" in result.output
+
+
+def test_show_project_omits_pending_when_absent(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\nstack = [\"ds\"]\napplied = [\"numpy\"]\n",
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 0
+    assert "Pending" not in result.output
+
+
+def test_show_project_outside_project_fails_with_hint(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    # The error panel is rendered by rich, which wraps to the console width.
+    # Pin the width so the absolute path cannot be folded across lines.
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert f"No tracked project in {empty}." in output
+    assert "stack create project" in output
+
+
+def test_show_project_rejects_a_name(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\nstack = [\"ds\"]\napplied = []\n",
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project", "myproj"])
+    assert result.exit_code == 2
+    assert "takes no NAME" in _combined_output(result)
+
+
+def test_show_project_json_shape(tmp_path: Path, monkeypatch):
+    import json
+
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\n"
+        'stack = ["@standard"]\n'
+        'applied = ["httpx"]\n',
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    # 'pending' is always present so consumers never branch on key existence.
+    assert payload == {
+        "path": str(project_dir),
+        "version": 1,
+        "stack": ["@standard"],
+        "python": None,
+        "applied": ["httpx"],
+        "pending": None,
+    }
+
+
+@pytest.mark.parametrize("broken", ["missing", "malformed"])
+def test_show_project_never_resolves_tokens(tmp_path: Path, monkeypatch, broken: str):
+    """'show project' is a pure read of the tracking table.
+
+    It must still succeed when the recorded stack references a profile that
+    does not exist or one whose YAML is malformed — the case where a user most
+    needs to inspect the project. 'show env' resolves tokens, so this pins the
+    guarantee against a future refactor that shares code between the two.
+    """
+    import json
+
+    from uv_stack.config import ConfigRoot
+
+    root = _seeded_root(tmp_path)
+    if broken == "missing":
+        # The 'profile:' prefix is load-bearing. A bare unknown token is a
+        # valid literal package to the resolver (resolver.py:204-206), so
+        # 'ghost' alone would resolve cleanly and the case would pass even
+        # against an implementation that wrongly resolves. 'profile:ghost'
+        # forces explicit=True, which raises ResolutionError.
+        token = "profile:ghost"  # no profiles/ghost.yaml in the seeded root
+    else:
+        token = "ds"
+        ConfigRoot(root).profile_path("ds").write_text("includes: [unterminated\n")
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\n"
+        f'stack = ["{token}"]\n'
+        'applied = ["numpy"]\n',
+    )
+    monkeypatch.chdir(project_dir)
+    runner = CliRunner()
+
+    plain = runner.invoke(cli, ["--root", str(root), "show", "project"])
+    assert plain.exit_code == 0, _combined_output(plain)
+    assert f"  {token}" in plain.output
+
+    as_json = runner.invoke(cli, ["--root", str(root), "show", "project", "--json"])
+    assert as_json.exit_code == 0, _combined_output(as_json)
+    assert json.loads(as_json.output)["stack"] == [token]
+
+
+def test_enumerated_kind_help_qualifies_shared_environment():
+    """'environment' must be qualified wherever 'project' shares the sentence.
+
+    Adjudicated during the 0.4.0 terminology work: the vocabulary rule governs
+    these enumerations, so a bare 'environment' beside 'project' is a defect.
+    Asserted against the module docstrings and the command's help attribute
+    rather than rendered output, which rich wraps at the console width.
+    """
+    from uv_stack.cli import create as create_mod
+    from uv_stack.cli import show as show_mod
+
+    assert "shared environment" in (create_mod.__doc__ or "")
+    assert "shared environment" in (show_mod.__doc__ or "")
+    assert "shared environment" in (cli.commands["create"].help or "")

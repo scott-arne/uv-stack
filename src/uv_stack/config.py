@@ -38,12 +38,16 @@ class ConfigRoot:
     def discover(cls, root: str | Path | None = None) -> ConfigRoot:
         """Resolve the config root using flag, then env var, then default.
 
+        ``UV_STACK_ROOT`` is the preferred variable name; ``UV_ENV_ROOT`` is
+        the historical spelling and is still honored when ``UV_STACK_ROOT`` is
+        unset or empty.
+
         :param root: Explicit root from ``--root`` (highest precedence).
         :returns: A configured :class:`ConfigRoot`.
         """
         if root is not None:
             return cls(root)
-        env = os.environ.get("UV_ENV_ROOT")
+        env = os.environ.get("UV_STACK_ROOT") or os.environ.get("UV_ENV_ROOT")
         if env:
             return cls(env)
         return cls(DEFAULT_ROOT)

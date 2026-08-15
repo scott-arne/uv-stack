@@ -18,7 +18,7 @@ from uv_stack.runner import SubprocessRunner
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.pass_obj
 def status(config: ConfigRoot, names: tuple[str, ...], as_json: bool) -> None:
-    """Show each environment's build state (drift, lock, existence)."""
+    """Show each shared environment's build state (drift, lock, existence)."""
     statuses = compute_status(config, SubprocessRunner(), list(names) or None)
     if as_json:
         payload = [

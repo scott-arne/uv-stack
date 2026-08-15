@@ -54,7 +54,12 @@ click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.COMMAND_GROUPS = {
     "stack": [
-        {"name": "Environments", "commands": ["upgrade", "create", "refresh"]},
+        # 'create' is cross-cutting — it makes environments, projects,
+        # profiles, and bundles — so it gets its own panel rather than being
+        # filed under a destination it only partly serves.
+        {"name": "Create", "commands": ["create"]},
+        {"name": "Environments", "commands": ["upgrade"]},
+        {"name": "Projects", "commands": ["refresh"]},
         {"name": "Inspection", "commands": ["list", "show", "resolve", "status"]},
         {"name": "Maintenance", "commands": ["init", "doctor", "config", "completion"]},
     ]
@@ -78,11 +83,14 @@ class UvStackGroup(click.RichGroup):
     "--root",
     "root",
     default=None,
-    help="Config root. Defaults to $UV_ENV_ROOT or ~/.config/python-envs.",
+    help=(
+        "Config root. Defaults to $UV_STACK_ROOT (or legacy $UV_ENV_ROOT) or "
+        "~/.config/python-envs."
+    ),
 )
 @click.pass_context
 def cli(ctx: click.Context, root: str | None) -> None:
-    """stack — formalized uv + micromamba environment management."""
+    """stack — reusable package sets for shared environments and uv projects."""
     ctx.obj = ConfigRoot.discover(root)
 
 
