@@ -394,7 +394,7 @@ All state lives under one directory, resolved in this order:
 | Variable | Purpose |
 | --- | --- |
 | `UV_STACK_ROOT` | Config root (overridden by `--root`) |
-| `UV_ENV_ROOT` | The historical spelling of `UV_STACK_ROOT`; used only when `UV_STACK_ROOT` is unset |
+| `UV_ENV_ROOT` | The historical spelling of `UV_STACK_ROOT`; used only when `UV_STACK_ROOT` is unset or empty |
 | `UV_STACK_PROJECT_PYTHON` | Default interpreter spec for `stack create project` |
 | `MAMBA_EXE` | Path to the micromamba binary; set by `micromamba shell init` and preferred over `PATH` lookup |
 
