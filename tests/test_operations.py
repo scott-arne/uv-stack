@@ -717,6 +717,9 @@ def test_init_project_force_does_not_adopt_user_dependencies(
     assert tracking is not None
     assert "pandas" in tracking.applied  # ds brings numpy+pandas
     assert "numpy" not in tracking.applied  # user-owned, never adopted
+    # Declining to adopt must not mean removing: the user's own declaration
+    # stays in [project].dependencies.
+    assert '"numpy"' in (project_dir / "pyproject.toml").read_text()
 
 
 def test_init_project_force_keeps_previously_owned_packages(
@@ -2039,7 +2042,9 @@ def test_refresh_profile_direct_reference_respects_user_ownership(
     tracking = read_tracking(project_dir / "pyproject.toml")
     assert tracking is not None
     assert "numpy" in tracking.applied
-    assert "pkg" not in [e for e in tracking.applied if "pkg" in e]
+    # Not `"pkg" not in [...]`: that only rules out the bare token, while the
+    # entry actually at risk is the full 'pkg @ https://h/x.whl' direct reference.
+    assert not any("pkg" in e for e in tracking.applied)
 
 
 def test_init_force_profile_direct_reference_respects_user_ownership(
@@ -2092,6 +2097,73 @@ def test_init_force_profile_direct_reference_respects_user_ownership(
     # Final tracking.applied excludes pkg.
     tracking = read_tracking(pyproject)
     assert tracking is not None
-    assert "pkg" not in [e for e in tracking.applied if "pkg" in e]
+    assert not any("pkg" in e for e in tracking.applied)
     # User's pkg==1.0 survives verbatim.
     assert '"pkg==1.0"' in pyproject.read_text()
+
+
+def test_refresh_nameless_entries_survive_ownership_filter(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """Editables, VCS URLs, and paths carry no distribution name, so they always pass.
+
+    ``ownership_name`` returns None for these, and the filter compares
+    ``canonical_name(name or "")`` — an empty string no dependency can
+    produce. Tightening the filter to require a name would silently drop
+    every editable from the stack, so pin that they reach both the temp
+    requirements file and the ledger while a genuinely user-owned neighbour
+    is still excluded.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    config_tree.profile_path("nameless").write_text(
+        "includes:\n"
+        "  - -e ./libs/foo\n"
+        "  - git+https://h/y.git\n"
+        "  - numpy\n"
+        "  - pkg\n"
+    )
+    project_dir = tmp_path / "proj_nameless"
+    project_dir.mkdir()
+    pyproject = project_dir / "pyproject.toml"
+    # User owns pkg (in deps, absent from applied); everything else is ours.
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["pkg==1.0"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["nameless"]\n'
+        "applied = []\n"
+    )
+
+    captured_file_content = None
+
+    def capture_responder(cmd: Command) -> CommandResult:
+        nonlocal captured_file_content
+        if "add" in cmd.args and "--no-sync" in cmd.args:
+            for arg in cmd.args:
+                if arg.startswith("/") and arg.endswith(".txt"):
+                    req_file = Path(arg)
+                    if req_file.exists():
+                        captured_file_content = req_file.read_text()
+                    break
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=capture_responder)
+    result = refresh_project(
+        config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir
+    )
+    assert captured_file_content is not None
+    lines = [ln.strip() for ln in captured_file_content.splitlines() if ln.strip()]
+    assert "-e ./libs/foo" in lines
+    assert "git+https://h/y.git" in lines
+    assert "numpy" in lines
+    assert "pkg" not in lines  # user-owned, filtered
+    assert any("pkg" in w and "user-owned" in w for w in result.warnings)
+    # A nameless entry must never be reported as user-owned.
+    assert not any("libs/foo" in w for w in result.warnings)
+    tracking = read_tracking(pyproject)
+    assert tracking is not None
+    assert "-e ./libs/foo" in tracking.applied
+    assert "git+https://h/y.git" in tracking.applied
