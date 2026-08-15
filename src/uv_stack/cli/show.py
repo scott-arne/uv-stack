@@ -135,9 +135,14 @@ def _show_project(as_json: bool) -> None:
     for package in tracking.applied:
         echo(f"  {package}")
     if tracking.pending is not None:
+        # An empty list is a distinct state from no record at all: it still
+        # marks an interrupted run. Say so rather than leaving a bare heading.
         echo("Pending (interrupted run — the next successful 'stack refresh' clears it):")
-        for package in tracking.pending:
-            echo(f"  {package}")
+        if tracking.pending:
+            for package in tracking.pending:
+                echo(f"  {package}")
+        else:
+            echo("  (none — the interrupted run had no packages to apply)")
 
 
 def _show_profile(config: ConfigRoot, name: str, as_json: bool) -> None:

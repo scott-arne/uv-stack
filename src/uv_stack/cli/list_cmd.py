@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import rich_click as click
+from rich.markup import escape
 
 from uv_stack.cli._render import console, echo, render_table
 from uv_stack.config import ConfigRoot
@@ -26,7 +27,7 @@ def _print_empty_hint(kind: str, wanted: set[str]) -> None:
     """Print the empty-result hint for ``kind`` (tag-aware) instead of a table."""
     if wanted:
         console.print(
-            f"[dim]No {kind}s match tags: {', '.join(sorted(wanted))}.[/dim]"
+            f"[dim]No {kind}s match tags: {escape(', '.join(sorted(wanted)))}.[/dim]"
         )
     else:
         console.print(f"[dim]{_EMPTY_HINTS[kind]}[/dim]")

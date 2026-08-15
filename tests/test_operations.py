@@ -823,7 +823,7 @@ def test_refresh_requires_tracked_project(config_tree: ConfigRoot, tmp_path):
         refresh_project(
             config_tree, RecordingRunner(), RefreshOptions(), cwd=project_dir
         )
-    assert "No tracked project here." in str(excinfo.value)
+    assert f"No tracked project in {project_dir}." in str(excinfo.value)
 
 
 def test_refresh_schema_version_guard(config_tree: ConfigRoot, tmp_path):

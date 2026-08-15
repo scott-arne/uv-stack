@@ -442,7 +442,7 @@ def refresh_project(
     tracking = read_tracking(pyproject)
     if tracking is None:
         raise ConfigError(
-            "No tracked project here.",
+            f"No tracked project in {cwd}.",
             hint=(
                 "Run inside a project created by 'stack create project' (or "
                 "add a [tool.uv-stack] table with 'stack' tokens)."

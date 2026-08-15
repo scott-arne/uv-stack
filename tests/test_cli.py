@@ -28,6 +28,20 @@ def _combined_output(result) -> str:
         return result.output
 
 
+def _flat_panel(result) -> str:
+    """Output with rich's error-panel borders removed and whitespace collapsed.
+
+    ``render_error`` prints a :class:`~rich.panel.Panel`, so a long message is
+    folded at the console width and every row is padded out to the border.
+    Stripping newlines alone is not enough — the ``│`` and the padding remain
+    between the halves of a split message. Callers that assert a contiguous
+    string containing an absolute path also need a width wide enough that the
+    path is not broken mid-token, since no normalisation can rejoin that
+    without also collapsing a genuine space.
+    """
+    return " ".join(_combined_output(result).replace("│", " ").split())
+
+
 def _seeded_root(tmp_path: Path) -> Path:
     """A config root with the profiles and bundles the CLI tests reference.
 
@@ -101,7 +115,7 @@ def _two_failing_envs_root(tmp_path: Path) -> Path:
 def test_version():
     result = CliRunner().invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "stack, version 0.4.0" in result.output
+    assert "stack, version 0.4.1" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -244,13 +258,17 @@ def test_create_no_subcommand_shows_help():
     assert "project" in result.output
 
 
-def test_create_project_help():
+def test_create_project_help(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
     result = CliRunner().invoke(cli, ["create", "project", "--help"])
     assert result.exit_code == 0
     assert "--python" in result.output
     assert "--no-sync" in result.output
     # The --python help advertises micromamba env-name support.
     assert "micromamba" in result.output
+    # rich-click parses option help as markup; the bracketed table name must
+    # survive rather than being eaten as an unknown style tag.
+    assert "[tool.uv-stack]" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1433,10 +1451,13 @@ def test_refresh_outside_project_fails_with_hint(tmp_path: Path, monkeypatch):
     empty = tmp_path / "empty"
     empty.mkdir()
     monkeypatch.chdir(empty)
+    # The width pin keeps the tmp path from being broken mid-token; flattening
+    # the panel handles the fold that still lands between the message's words.
+    monkeypatch.setenv("COLUMNS", "1000")
     runner = CliRunner()
     result = runner.invoke(cli, ["--root", str(root), "refresh"])
     assert result.exit_code == 1
-    assert "No tracked project here." in _combined_output(result)
+    assert f"No tracked project in {empty}." in _flat_panel(result)
 
 
 def test_refresh_happy_path_prints_summary(tmp_path: Path, monkeypatch):
@@ -1513,6 +1534,12 @@ def test_command_panels_separate_create_env_and_project_work():
     assert panels.get("Create") == ["create"], panels
     assert panels.get("Environments") == ["upgrade"], panels
     assert panels.get("Projects") == ["refresh"], panels
+
+    # Completeness: the per-panel assertions above pin what each panel holds,
+    # but a newly registered command filed in no panel would still pass them.
+    # rich-click silently drops such a command from the help screen.
+    placed = [name for group in command_groups for name in group["commands"]]
+    assert sorted(placed) == sorted(cli.commands), (placed, sorted(cli.commands))
 
     # Smoke assertion: help renders and the Projects panel is visible, so
     # "project" appears as a heading on the top-level help screen.
@@ -1697,15 +1724,245 @@ def test_newer_schema_with_extra_keys_friendly_via_cli(tmp_path: Path, monkeypat
         'future_key = "whatever"\n'
     )
     monkeypatch.chdir(project_dir)
+    monkeypatch.setenv("COLUMNS", "200")
     runner = CliRunner()
     refresh_result = runner.invoke(cli, ["--root", str(root), "refresh"])
     assert refresh_result.exit_code == 1
-    assert "newer uv-stack (schema 2)" in _combined_output(refresh_result)
+    refresh_output = _combined_output(refresh_result)
+    assert "newer uv-stack (schema 2)" in refresh_output
+    # The hint names the table the user must edit; rich must not eat it.
+    assert "edit [tool.uv-stack] manually" in refresh_output
     create_result = runner.invoke(
         cli, ["--root", str(root), "create", "project", "ds", "--force"]
     )
     assert create_result.exit_code == 1
     assert "newer uv-stack (schema 2)" in _combined_output(create_result)
+
+
+def test_error_panel_preserves_bracketed_text(tmp_path: Path, monkeypatch):
+    """An error message and its hint are data, not rich markup.
+
+    ``[tool.uv-stack]`` is the single most likely bracketed literal to appear
+    in a uv-stack error, and it is also valid rich markup — unescaped, rich
+    parses it as a style tag and renders it as nothing, deleting the subject
+    of the sentence.
+    """
+    root = _seeded_root(tmp_path)
+    project_dir = tmp_path / "scalarproj"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n[tool]\nuv-stack = "nope"\n'
+    )
+    monkeypatch.chdir(project_dir)
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "refresh"])
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert "[tool.uv-stack] in" in output
+    assert "Replace the scalar/array value with a [tool.uv-stack] table." in output
+
+
+def test_table_cells_preserve_bracketed_text(tmp_path: Path, monkeypatch):
+    """Table cells carry user text (descriptions, tags) and are not markup."""
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    ConfigRoot(root).profile_path("web").write_text(
+        "description: Installs requests[security]\nincludes:\n  - requests\n"
+    )
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "list", "profile"])
+    assert result.exit_code == 0
+    assert "requests[security]" in result.output
+
+
+def test_warning_preserves_bracketed_text(tmp_path: Path, monkeypatch):
+    """Warnings emitted by operations carry bracketed tokens like [project.dependencies].
+
+    Those tokens are user data, not rich markup — unescaped, rich parses them
+    as style tags and renders them as nothing.
+    """
+    root = _seeded_root(tmp_path)
+    project_dir = tmp_path / "warnproj"
+    project_dir.mkdir()
+    # The stack asks for requests[security], but the user already owns that
+    # requirement in [project.dependencies], so refresh skips it and warns —
+    # quoting the extras-bearing requirement back at the user.
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["requests[security]"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["requests[security]"]\n'
+        "applied = []\n"
+    )
+    monkeypatch.chdir(project_dir)
+    monkeypatch.setenv("COLUMNS", "200")
+    # --dry-run keeps this hermetic: warnings are rendered either way, but no
+    # uv subprocess runs.
+    result = CliRunner().invoke(cli, ["--root", str(root), "refresh", "--dry-run"])
+    assert result.exit_code == 0
+    output = _combined_output(result)
+    assert "requests[security]" in output
+    assert "is user-owned" in output
+
+
+def test_upgrade_summary_failure_reason_preserves_bracketed_text(tmp_path: Path, monkeypatch):
+    """The rule, the row name, and the failure reason are all user data.
+
+    The bracketed token in the reason is a stand-in: any error message quoting
+    a requirement extra or a TOML table name reaches that line the same way.
+    The environment name is user data too — it is a CLI argument, and it is
+    rendered separately in the batch rule and in the summary row.
+    """
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    root = tmp_path / "python-envs"
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    env_dir = cfg.env_dir("al[p]ha")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    # A missing profile fails during the pure resolve step, before any
+    # subprocess call, and the reason quotes the token verbatim.
+    (env_dir / "stack.txt").write_text("profile:ghost[security]\n")
+    # The reason embeds an absolute tmp_path; without a pinned width rich folds
+    # it at whatever column the path length happens to land on, which can split
+    # the very token under test. Strip newlines on top so the assertion tests
+    # escaping, not wrapping.
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "al[p]ha"])
+    assert result.exit_code == 1
+    flat = result.output.replace("\n", "")
+    assert "Upgrading al[p]ha" in flat
+    summary = flat.split("Summary", 1)[1]
+    assert "al[p]ha" in summary
+    assert "ghost[security]" in summary
+
+
+def test_upgrade_success_summary_preserves_bracketed_env_name(tmp_path: Path, monkeypatch):
+    """The ✓ row names the environment, and that name is user data.
+
+    Stubbing ``upgrade_env`` is what makes a successful batch reachable without
+    micromamba or uv; the ✓ branch of the summary has no other CLI-level route.
+    """
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+    from uv_stack.operations.upgrade import UpgradeResult
+
+    root = tmp_path / "python-envs"
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    env_dir = cfg.env_dir("al[p]ha")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    (env_dir / "stack.txt").write_text("numpy\n")
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env",
+        lambda config, runner, name, options: UpgradeResult(env_name=name),
+    )
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "al[p]ha"])
+    assert result.exit_code == 0
+    flat = result.output.replace("\n", "")
+    assert "✓ al[p]ha" in flat
+    assert "All requested environments upgraded." in flat
+
+
+def test_status_message_preserves_bracketed_text(tmp_path: Path, monkeypatch):
+    """The ``config error`` note under the status table is user data, not markup.
+
+    That note is a :class:`ConfigError` wrapping a pydantic ``ValidationError``,
+    whose text is bracketed by construction (``[type=list_type, ...]``) — so
+    this render site cannot be dismissed as carrying only safe constants. The
+    environment name prefixing it is a second, independent interpolation.
+    """
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    root = tmp_path / "python-envs"
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    # A scalar where the schema wants a list: pydantic reports the mismatch with
+    # a bracketed type/input suffix.
+    cfg.profile_path("web").write_text("includes: 123\n")
+    env_dir = cfg.env_dir("al[p]ha")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    (env_dir / "stack.txt").write_text("profile:web\n")
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "status"])
+    assert result.exit_code == 0
+    output = _combined_output(result).replace("\n", "")
+    assert "config error" in output
+    assert "al[p]ha: Invalid profile config" in output
+    assert "[type=list_type" in output
+
+
+def test_table_directory_line_preserves_bracketed_path(tmp_path: Path, monkeypatch):
+    """The ``<title> in <directory>`` line above a table carries the config root.
+
+    That path comes from ``--root``/``UV_STACK_ROOT``, so it is user-controlled
+    and must survive verbatim. A swallowed segment here is worse than a visible
+    hole: it prints a plausible but wrong absolute path.
+    """
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    root = tmp_path / "root[x]" / "python-envs"
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    cfg.profile_path("demo").write_text("includes:\n  - numpy\n")
+    monkeypatch.setenv("COLUMNS", "250")
+    result = CliRunner().invoke(cli, ["--root", str(root), "list", "profile"])
+    assert result.exit_code == 0
+    assert "root[x]" in result.output.replace("\n", "")
+
+
+def test_doctor_output_preserves_bracketed_paths(tmp_path: Path, monkeypatch):
+    """Every ``doctor`` line quotes paths derived from the config root.
+
+    Findings, their fixes, and both repair outcomes are separate render sites,
+    so each is asserted on its own line rather than on the output as a whole.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = tmp_path / "root[x]" / "python-envs"
+    # Doctor lines quote two absolute paths apiece; the width must exceed that
+    # so the assertions below test escaping rather than where rich folds.
+    monkeypatch.setenv("COLUMNS", "1000")
+    runner = CliRunner()
+
+    # An absent root is the one finding that needs no seeding, and repairing it
+    # reports the directories it created.
+    fixed = _combined_output(runner.invoke(cli, ["--root", str(root), "doctor", "--fix"]))
+    assert [line for line in fixed.splitlines() if line.startswith("fixed:") and "root[x]" in line]
+
+    cfg = ConfigRoot(root)
+    # A legacy .in profile whose .bak backup already exists cannot be converted,
+    # which is the only path that reports a skipped repair and its reason.
+    cfg.profiles_dir.joinpath("old[y].in").write_text("numpy\n")
+    cfg.profiles_dir.joinpath("old[y].in.bak").write_text("stale\n")
+    output = _combined_output(runner.invoke(cli, ["--root", str(root), "doctor", "--fix"]))
+    lines = output.splitlines()
+    skipped = [line for line in lines if line.startswith("skipped:")]
+    assert skipped and "root[x]" in skipped[0]
+    # The parenthesised reason is a second interpolation on the same line.
+    assert "(old[y].in.bak already exists)" in skipped[0]
+    assert [line for line in lines if line.startswith("WARN") and "old[y].in" in line]
+    assert [line for line in lines if line.strip().startswith("fix:") and "old[y].yaml" in line]
+
+
+def test_list_profile_no_match_preserves_bracketed_tag(tmp_path: Path, monkeypatch):
+    """The no-match message in ``list profile --tag`` carries the tag verbatim.
+
+    Tags are user-controlled, so a bracketed tag must survive.
+    """
+    root = _seeded_root(tmp_path)
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "list", "profile", "--tag", "[nope]"])
+    assert result.exit_code == 0
+    assert "No profiles match tags: [nope]." in result.output.replace("\n", "")
 
 
 # ---------------------------------------------------------------------------
@@ -1778,6 +2035,28 @@ def test_show_project_prints_pending_when_present(tmp_path: Path, monkeypatch):
     assert "  scipy" in result.output
 
 
+def test_show_project_marks_an_empty_pending_record(tmp_path: Path, monkeypatch):
+    """``pending = []`` is a real state and must stay distinguishable.
+
+    An empty list still records that a run was interrupted, so the heading has
+    to appear — but a heading with nothing under it reads as a rendering bug,
+    so the empty case says so explicitly.
+    """
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["numpy"]\n'
+        "pending = []\n",
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 0
+    assert "Pending (interrupted run" in result.output
+    assert "  (none — the interrupted run had no packages to apply)" in result.output
+
+
 def test_show_project_omits_pending_when_absent(tmp_path: Path, monkeypatch):
     root = _seeded_root(tmp_path)
     project_dir = _project_with_tracking(
@@ -1795,12 +2074,12 @@ def test_show_project_outside_project_fails_with_hint(tmp_path: Path, monkeypatc
     empty = tmp_path / "empty"
     empty.mkdir()
     monkeypatch.chdir(empty)
-    # The error panel is rendered by rich, which wraps to the console width.
-    # Pin the width so the absolute path cannot be folded across lines.
-    monkeypatch.setenv("COLUMNS", "200")
+    # The width pin keeps the tmp path from being broken mid-token; flattening
+    # the panel handles the fold that still lands between the message's words.
+    monkeypatch.setenv("COLUMNS", "1000")
     result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
     assert result.exit_code == 1
-    output = _combined_output(result)
+    output = _flat_panel(result)
     assert f"No tracked project in {empty}." in output
     assert "stack create project" in output
 
@@ -1817,15 +2096,19 @@ def test_show_project_rejects_a_name(tmp_path: Path, monkeypatch):
     assert "takes no NAME" in _combined_output(result)
 
 
-def test_show_project_json_shape(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("pending_value", [None, []])
+def test_show_project_json_shape(tmp_path: Path, monkeypatch, pending_value):
     import json
 
     root = _seeded_root(tmp_path)
+    pending_line = (
+        'pending = []\n' if pending_value == [] else ""
+    )
     project_dir = _project_with_tracking(
         tmp_path,
         "[tool.uv-stack]\nversion = 1\n"
         'stack = ["@standard"]\n'
-        'applied = ["httpx"]\n',
+        f'applied = ["httpx"]\n{pending_line}',
     )
     monkeypatch.chdir(project_dir)
     result = CliRunner().invoke(cli, ["--root", str(root), "show", "project", "--json"])
@@ -1838,7 +2121,7 @@ def test_show_project_json_shape(tmp_path: Path, monkeypatch):
         "stack": ["@standard"],
         "python": None,
         "applied": ["httpx"],
-        "pending": None,
+        "pending": pending_value,
     }
 
 
