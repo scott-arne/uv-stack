@@ -138,9 +138,10 @@ def _show_project(as_json: bool) -> None:
         # An empty list is a distinct state from no record at all: it still
         # marks an interrupted run. Say so rather than leaving a bare heading.
         echo("Pending (interrupted run — the next successful 'stack refresh' clears it):")
-        for package in tracking.pending:
-            echo(f"  {package}")
-        if not tracking.pending:
+        if tracking.pending:
+            for package in tracking.pending:
+                echo(f"  {package}")
+        else:
             echo("  (none — the run was interrupted before it recorded any)")
 
 

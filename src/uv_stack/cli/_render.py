@@ -58,7 +58,9 @@ def render_table(
 ) -> None:
     """Print a multi-column table, optionally headed by its directory.
 
-    :param title: Table title (also used in the directory header line).
+    :param title: Table title (also used in the directory header line). Must be
+        a literal string, not user-controlled text, as it is parsed as rich
+        markup.
     :param columns: ``(header, justify)`` pairs, where ``justify`` is a
         :mod:`rich` justification such as ``"left"`` or ``"right"``.
     :param rows: Row tuples, already stringified, one value per column.

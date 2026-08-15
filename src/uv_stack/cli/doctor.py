@@ -82,7 +82,7 @@ def doctor(config_root: ConfigRoot, fix: bool, as_json: bool) -> None:
             else:
                 console.print(
                     f"[yellow]skipped:[/yellow] {escape(action.description)} "
-                    f"({escape(str(action.reason))})"
+                    f"({escape(action.reason or '')})"
                 )
         _print_findings(remaining)
     if any(f.level == "error" for f in remaining):
