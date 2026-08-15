@@ -156,7 +156,7 @@ def create_env(
     "--no-track",
     "no_track",
     is_flag=True,
-    help="Do not record [tool.uv-stack] tracking metadata.",
+    help=r"Do not record \[tool.uv-stack] tracking metadata.",
 )
 @click.option(
     "--strict",

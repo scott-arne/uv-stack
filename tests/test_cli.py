@@ -244,13 +244,17 @@ def test_create_no_subcommand_shows_help():
     assert "project" in result.output
 
 
-def test_create_project_help():
+def test_create_project_help(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
     result = CliRunner().invoke(cli, ["create", "project", "--help"])
     assert result.exit_code == 0
     assert "--python" in result.output
     assert "--no-sync" in result.output
     # The --python help advertises micromamba env-name support.
     assert "micromamba" in result.output
+    # rich-click parses option help as markup; the bracketed table name must
+    # survive rather than being eaten as an unknown style tag.
+    assert "[tool.uv-stack]" in result.output
 
 
 # ---------------------------------------------------------------------------
