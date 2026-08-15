@@ -1697,15 +1697,56 @@ def test_newer_schema_with_extra_keys_friendly_via_cli(tmp_path: Path, monkeypat
         'future_key = "whatever"\n'
     )
     monkeypatch.chdir(project_dir)
+    monkeypatch.setenv("COLUMNS", "200")
     runner = CliRunner()
     refresh_result = runner.invoke(cli, ["--root", str(root), "refresh"])
     assert refresh_result.exit_code == 1
-    assert "newer uv-stack (schema 2)" in _combined_output(refresh_result)
+    refresh_output = _combined_output(refresh_result)
+    assert "newer uv-stack (schema 2)" in refresh_output
+    # The hint names the table the user must edit; rich must not eat it.
+    assert "edit [tool.uv-stack] manually" in refresh_output
     create_result = runner.invoke(
         cli, ["--root", str(root), "create", "project", "ds", "--force"]
     )
     assert create_result.exit_code == 1
     assert "newer uv-stack (schema 2)" in _combined_output(create_result)
+
+
+def test_error_panel_preserves_bracketed_text(tmp_path: Path, monkeypatch):
+    """An error message and its hint are data, not rich markup.
+
+    ``[tool.uv-stack]`` is the single most likely bracketed literal to appear
+    in a uv-stack error, and it is also valid rich markup — unescaped, rich
+    parses it as a style tag and renders it as nothing, deleting the subject
+    of the sentence.
+    """
+    root = _seeded_root(tmp_path)
+    project_dir = tmp_path / "scalarproj"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n[tool]\nuv-stack = "nope"\n'
+    )
+    monkeypatch.chdir(project_dir)
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "refresh"])
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert "[tool.uv-stack] in" in output
+    assert "Replace the scalar/array value with a [tool.uv-stack] table." in output
+
+
+def test_table_cells_preserve_bracketed_text(tmp_path: Path, monkeypatch):
+    """Table cells carry user text (descriptions, tags) and are not markup."""
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    ConfigRoot(root).profile_path("web").write_text(
+        "description: Installs requests[security]\nincludes:\n  - requests\n"
+    )
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "list", "profile"])
+    assert result.exit_code == 0
+    assert "requests[security]" in result.output
 
 
 # ---------------------------------------------------------------------------
