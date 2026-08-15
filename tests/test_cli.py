@@ -1788,7 +1788,7 @@ def test_warning_preserves_bracketed_text(tmp_path: Path, monkeypatch):
     assert "is user-owned" in output
 
 
-def test_upgrade_summary_failure_reason_preserves_bracketed_text(tmp_path: Path):
+def test_upgrade_summary_failure_reason_preserves_bracketed_text(tmp_path: Path, monkeypatch):
     """The per-env failure reason in the upgrade summary is user data, not markup.
 
     The bracketed token here is a stand-in: any error message quoting a
@@ -1806,10 +1806,43 @@ def test_upgrade_summary_failure_reason_preserves_bracketed_text(tmp_path: Path)
     # A missing profile fails during the pure resolve step, before any
     # subprocess call, and the reason quotes the token verbatim.
     (env_dir / "stack.txt").write_text("profile:ghost[security]\n")
+    # The reason embeds an absolute tmp_path; without a pinned width rich folds
+    # it at whatever column the path length happens to land on, which can split
+    # the very token under test. Strip newlines on top so the assertion tests
+    # escaping, not wrapping.
+    monkeypatch.setenv("COLUMNS", "200")
     result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "alpha"])
     assert result.exit_code == 1
     summary = result.output.split("Summary", 1)[1]
-    assert "ghost[security]" in summary
+    assert "ghost[security]" in summary.replace("\n", "")
+
+
+def test_status_message_preserves_bracketed_text(tmp_path: Path, monkeypatch):
+    """The ``config error`` note under the status table is user data, not markup.
+
+    That note is a :class:`ConfigError` wrapping a pydantic ``ValidationError``,
+    whose text is bracketed by construction (``[type=list_type, ...]``) — so
+    this render site cannot be dismissed as carrying only safe constants.
+    """
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    root = tmp_path / "python-envs"
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    # A scalar where the schema wants a list: pydantic reports the mismatch with
+    # a bracketed type/input suffix.
+    cfg.profile_path("web").write_text("includes: 123\n")
+    env_dir = cfg.env_dir("alpha")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    (env_dir / "stack.txt").write_text("profile:web\n")
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "status"])
+    assert result.exit_code == 0
+    output = _combined_output(result).replace("\n", "")
+    assert "config error" in output
+    assert "[type=list_type" in output
 
 
 # ---------------------------------------------------------------------------
