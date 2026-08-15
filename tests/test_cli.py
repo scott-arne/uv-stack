@@ -1849,6 +1849,47 @@ def test_status_message_preserves_bracketed_text(tmp_path: Path, monkeypatch):
     assert "[type=list_type" in output
 
 
+def test_list_and_doctor_preserve_bracketed_paths(tmp_path: Path, monkeypatch):
+    """Directory paths in ``list profile`` and ``doctor`` are user-controlled.
+
+    The config root is set via ``--root`` or ``UV_STACK_ROOT``, so a bracketed
+    segment in the path must survive rather than being eaten as a style tag.
+    """
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    root = tmp_path / "root[x]" / "python-envs"
+    monkeypatch.setenv("COLUMNS", "200")
+
+    # First check doctor with a missing config root to get finding messages.
+    result = CliRunner().invoke(cli, ["--root", str(root), "doctor"])
+    # Exits non-zero when it finds errors; we just care about the output.
+    output = _combined_output(result).replace("\n", "")
+    assert "root[x]" in output
+
+    # Now initialize and populate for list profile.
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    cfg.profile_path("demo").write_text("includes:\n  - numpy\n")
+
+    # list profile renders "Profiles in <directory>".
+    result = CliRunner().invoke(cli, ["--root", str(root), "list", "profile"])
+    assert result.exit_code == 0
+    output = result.output.replace("\n", "")
+    assert "root[x]" in output
+
+
+def test_list_profile_no_match_preserves_bracketed_tag(tmp_path: Path):
+    """The no-match message in ``list profile --tag`` carries the tag verbatim.
+
+    Tags are user-controlled, so a bracketed tag must survive.
+    """
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "list", "profile", "--tag", "[nope]"])
+    assert result.exit_code == 0
+    assert "No profiles match tags: [nope]." in result.output
+
+
 # ---------------------------------------------------------------------------
 # show project
 # ---------------------------------------------------------------------------

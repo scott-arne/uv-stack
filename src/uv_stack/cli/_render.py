@@ -65,7 +65,8 @@ def render_table(
         :mod:`rich` justification such as ``"left"`` or ``"right"``.
     :param rows: Row tuples, already stringified, one value per column.
     :param directory: When given, a dim ``"{title} in {directory}"`` line is
-        printed above the table.
+        printed above the table. User-controlled (derived from ``--root`` or
+        ``UV_STACK_ROOT``), so rendered as :class:`Text` rather than markup.
     """
     if directory is not None:
         # A full-width line, not a table caption: captions wrap to the
