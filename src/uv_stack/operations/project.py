@@ -275,7 +275,7 @@ def init_project(
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-stack.", suffix=".txt")
     tmp_req = Path(tmp_name)
     try:
-        with open(fd, "w") as handle:
+        with open(fd, "w", encoding="utf-8") as handle:
             for entry in stack_adds:
                 handle.write(entry)
                 handle.write("\n")
@@ -555,7 +555,7 @@ def refresh_project(
     tmp_req = Path(tmp_name)
     try:
         # Render only stack-owned dependencies to the temp requirements file.
-        with open(fd, "w") as handle:
+        with open(fd, "w", encoding="utf-8") as handle:
             for entry in stack_adds:
                 handle.write(entry)
                 handle.write("\n")

@@ -164,7 +164,7 @@ class ConfigRoot:
                 hint=f"Create {path} or check the name.",
             )
         try:
-            data = yaml.safe_load(path.read_text())
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
         except yaml.YAMLError as exc:
             raise ConfigError(
                 f"Invalid YAML in {path}: {exc}",

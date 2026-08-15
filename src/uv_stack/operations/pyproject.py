@@ -79,7 +79,7 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     """
     if not pyproject.is_file():
         return None
-    text = pyproject.read_text()
+    text = pyproject.read_text(encoding="utf-8")
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -294,8 +294,8 @@ def read_project_dependency_names(pyproject: Path) -> set[str]:
     read reports real errors).
     """
     try:
-        data = tomllib.loads(pyproject.read_text())
-    except (OSError, tomllib.TOMLDecodeError):
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return set()
     dependencies = data.get("project", {}).get("dependencies", [])
     names: set[str] = set()

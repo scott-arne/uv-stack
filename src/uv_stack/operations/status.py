@@ -22,8 +22,8 @@ from uv_stack.runner import Runner
 
 def _read_text_or_none(path: Path) -> str | None:
     try:
-        return path.read_text()
-    except (FileNotFoundError, OSError):
+        return path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
         return None
 
 
