@@ -15,7 +15,7 @@ from pathlib import Path
 
 from uv_stack.commands import micromamba_python_path, uv_add, uv_init, uv_remove, uv_sync
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError, EnvError
+from uv_stack.errors import ConfigError, EnvError, NewerSchemaError
 from uv_stack.models import ProjectTracking
 from uv_stack.operations.pyproject import (
     NEWER_SCHEMA_HINT,
@@ -153,12 +153,12 @@ def init_project(
     if pyproject.is_file() and not options.force:
         try:
             interrupted = read_tracking(pyproject)
-        except ConfigError as exc:
-            # Tolerate corrupt/absent tracking here (the guard only decides
-            # which hint to show) — but never mask the newer-schema
-            # compatibility error.
-            if str(exc).startswith(NEWER_SCHEMA_MESSAGE.split("{", 1)[0]):
-                raise
+        except NewerSchemaError:
+            # Never mask a forward-compatibility refusal.
+            raise
+        except ConfigError:
+            # Tolerate corrupt/absent tracking here: the guard only decides
+            # which hint to show.
             interrupted = None
         if interrupted is not None and interrupted.pending is not None:
             raise ConfigError(
@@ -180,7 +180,7 @@ def init_project(
     existing_tracking = read_tracking(pyproject) if pyproject.is_file() else None
     if existing_tracking is not None:
         if existing_tracking.version > 1:
-            raise ConfigError(
+            raise NewerSchemaError(
                 NEWER_SCHEMA_MESSAGE.format(version=existing_tracking.version),
                 hint=NEWER_SCHEMA_HINT,
             )
@@ -449,7 +449,7 @@ def refresh_project(
             ),
         )
     if tracking.version > 1:
-        raise ConfigError(
+        raise NewerSchemaError(
             NEWER_SCHEMA_MESSAGE.format(version=tracking.version),
             hint=NEWER_SCHEMA_HINT,
         )

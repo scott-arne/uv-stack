@@ -14,7 +14,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from uv_stack.errors import ConfigError
+from uv_stack.errors import ConfigError, NewerSchemaError
 from uv_stack.fsutil import atomic_write
 from uv_stack.models import ProjectTracking
 from uv_stack.parse import ownership_name
@@ -102,7 +102,7 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     raw_version = table.get("version")
     if isinstance(raw_version, int) and not isinstance(raw_version, bool):
         if raw_version > 1:
-            raise ConfigError(
+            raise NewerSchemaError(
                 NEWER_SCHEMA_MESSAGE.format(version=raw_version),
                 hint=NEWER_SCHEMA_HINT,
             )

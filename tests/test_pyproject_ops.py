@@ -396,7 +396,13 @@ def test_read_tracking_strict_version_typing(tmp_path: Path, version_value: str)
 
 
 def test_read_tracking_version_2_int_still_raises_newer_schema(tmp_path: Path):
-    """version = 2 (real int) still raises the newer-schema message."""
+    """version = 2 (real int) raises NewerSchemaError, not a plain ConfigError.
+
+    The type, not the message text, is what init's ``--force`` guard keys on
+    to tell a forward-compatibility refusal apart from corrupt tracking.
+    """
+    from uv_stack.errors import NewerSchemaError
+
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
         '[project]\nname = "x"\nversion = "0.1.0"\n\n'
@@ -404,7 +410,7 @@ def test_read_tracking_version_2_int_still_raises_newer_schema(tmp_path: Path):
         'stack = ["ds"]\n'
         'applied = []\n'
     )
-    with pytest.raises(ConfigError) as excinfo:
+    with pytest.raises(NewerSchemaError) as excinfo:
         read_tracking(pyproject)
     assert "newer uv-stack (schema 2)" in str(excinfo.value)
 
