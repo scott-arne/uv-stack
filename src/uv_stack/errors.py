@@ -28,6 +28,15 @@ class ConfigError(UvStackError):
     """A config file or directory is missing or invalid."""
 
 
+class NewerSchemaError(ConfigError):
+    """A ``[tool.uv-stack]`` table declares a schema this version cannot read.
+
+    Distinct from a plain :class:`ConfigError` because the ``--force`` guards
+    tolerate unreadable tracking (it only decides which hint to show) but must
+    never mask a forward-compatibility refusal.
+    """
+
+
 class ResolutionError(UvStackError):
     """A stack token could not be resolved (bad token, missing profile/bundle, cycle)."""
 

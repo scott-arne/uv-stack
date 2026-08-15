@@ -29,7 +29,7 @@ def read_clean_lines(path: Path) -> list[str]:
     """
     if not path.is_file():
         return []
-    cleaned = (clean_line(raw) for raw in path.read_text().splitlines())
+    cleaned = (clean_line(raw) for raw in path.read_text(encoding="utf-8").splitlines())
     return [line for line in cleaned if line]
 
 

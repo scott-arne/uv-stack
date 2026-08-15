@@ -1,4 +1,17 @@
-"""Shared rich rendering helpers for the CLI."""
+"""Shared rich rendering helpers for the CLI.
+
+**Rendering policy.** ``cli/__init__.py`` sets ``TEXT_MARKUP = "rich"``, so any
+string handed to :meth:`~rich.console.Console.print` is parsed for style tags —
+and a bracketed value such as ``[tool.uv-stack]`` or ``requests[security]``
+renders as *nothing*, silently deleting the subject of the sentence. Emoji
+codes (``:100:``) are substituted the same way, and :func:`rich.markup.escape`
+neutralises the former but not the latter.
+
+So: **never interpolate user data into a markup string.** A line that carries
+any user-controlled text is assembled as :class:`~rich.text.Text`, which does
+not parse markup at all; markup strings stay reserved for wholly literal lines
+the author controls. :func:`echo` is plain click output and is unaffected.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +22,6 @@ from typing import Literal
 
 import rich_click as click
 from rich.console import Console
-from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -45,7 +57,7 @@ def render_warnings(warnings: Iterable[str], *, styled: bool = True) -> None:
     """
     for warning in warnings:
         if styled:
-            error_console.print(f"[yellow]warning:[/yellow] {escape(warning)}")
+            error_console.print(Text.assemble(("warning:", "yellow"), f" {warning}"))
         else:
             click.echo(f"warning: {warning}", err=True)
 
@@ -58,9 +70,9 @@ def render_table(
 ) -> None:
     """Print a multi-column table, optionally headed by its directory.
 
-    :param title: Table title (also used in the directory header line). Must be
-        a literal string, not user-controlled text, as it is parsed as rich
-        markup.
+    :param title: Table title, also used in the directory header line. Callers
+        pass a literal, but it is wrapped as :class:`Text` like everything else
+        here so no future caller can reintroduce the swallowing bug.
     :param columns: ``(header, justify)`` pairs, where ``justify`` is a
         :mod:`rich` justification such as ``"left"`` or ``"right"``.
     :param rows: Row tuples, already stringified, one value per column.
@@ -72,7 +84,7 @@ def render_table(
         # A full-width line, not a table caption: captions wrap to the
         # content-sized table width and mangle long absolute paths.
         console.print(Text(f"{title} in {directory}", style="dim"))
-    table = Table(title=title)
+    table = Table(title=Text(title))
     for header, justify in columns:
         table.add_column(header, justify=justify)
     for row in rows:

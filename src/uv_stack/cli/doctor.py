@@ -6,7 +6,7 @@ import json
 import sys
 
 import rich_click as click
-from rich.markup import escape
+from rich.text import Text
 
 from uv_stack.cli._render import console, echo
 from uv_stack.config import ConfigRoot
@@ -29,10 +29,10 @@ def _print_findings(findings: list[Finding]) -> None:
     for finding in findings:
         color = "red" if finding.level == "error" else "yellow"
         console.print(
-            f"[{color}]{finding.level.upper()}[/{color}] {escape(finding.message)}"
+            Text.assemble((finding.level.upper(), color), f" {finding.message}")
         )
         if finding.fix:
-            console.print(f"    [dim]fix:[/dim] {escape(finding.fix)}")
+            console.print(Text.assemble("    ", ("fix:", "dim"), f" {finding.fix}"))
 
 
 @click.command("doctor")
@@ -78,11 +78,15 @@ def doctor(config_root: ConfigRoot, fix: bool, as_json: bool) -> None:
     else:
         for action in actions:
             if action.applied:
-                console.print(f"[green]fixed:[/green] {escape(action.description)}")
+                console.print(
+                    Text.assemble(("fixed:", "green"), f" {action.description}")
+                )
             else:
                 console.print(
-                    f"[yellow]skipped:[/yellow] {escape(action.description)} "
-                    f"({escape(action.reason or '')})"
+                    Text.assemble(
+                        ("skipped:", "yellow"),
+                        f" {action.description} ({action.reason or ''})",
+                    )
                 )
         _print_findings(remaining)
     if any(f.level == "error" for f in remaining):

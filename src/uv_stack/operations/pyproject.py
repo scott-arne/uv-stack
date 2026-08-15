@@ -14,7 +14,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from uv_stack.errors import ConfigError
+from uv_stack.errors import ConfigError, NewerSchemaError
 from uv_stack.fsutil import atomic_write
 from uv_stack.models import ProjectTracking
 from uv_stack.parse import ownership_name
@@ -79,7 +79,7 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     """
     if not pyproject.is_file():
         return None
-    text = pyproject.read_text()
+    text = pyproject.read_text(encoding="utf-8")
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -102,7 +102,7 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     raw_version = table.get("version")
     if isinstance(raw_version, int) and not isinstance(raw_version, bool):
         if raw_version > 1:
-            raise ConfigError(
+            raise NewerSchemaError(
                 NEWER_SCHEMA_MESSAGE.format(version=raw_version),
                 hint=NEWER_SCHEMA_HINT,
             )
@@ -294,8 +294,8 @@ def read_project_dependency_names(pyproject: Path) -> set[str]:
     read reports real errors).
     """
     try:
-        data = tomllib.loads(pyproject.read_text())
-    except (OSError, tomllib.TOMLDecodeError):
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return set()
     dependencies = data.get("project", {}).get("dependencies", [])
     names: set[str] = set()

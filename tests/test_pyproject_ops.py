@@ -298,16 +298,19 @@ def test_replace_at_eof_preserves_trailing_newline(tmp_path: Path):
     pyproject.write_text(_BASE + "\n[tool.uv-stack]\nversion = 1\nstack = []\napplied = []\n")
     original_bytes = pyproject.read_bytes()
     assert original_bytes.endswith(b"\n")  # precondition: original has trailing newline
-    # write_tracking with an identical table should be byte-identical
-    write_tracking(pyproject, ProjectTracking(version=1, stack=[], applied=[]))
-    # Identical table at EOF must round-trip the whole file byte-for-byte,
+    # An identical table at EOF must round-trip the whole file byte-for-byte,
     # including the trailing newline.
+    write_tracking(pyproject, ProjectTracking(version=1, stack=[], applied=[]))
     assert pyproject.read_bytes() == original_bytes
-    # write_tracking with a changed table should also end with exactly newline
+    # A *changed* table is where the splice can lose or double the final
+    # newline, so pin the entire resulting file rather than just its suffix.
     write_tracking(pyproject, _tracking())
-    result = pyproject.read_text()
-    assert result.endswith("\n"), "trailing newline lost on changed replace"
-    assert not result.endswith("\n\n"), "extra newline added"
+    assert pyproject.read_text() == _BASE + (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = [\n    "@standard",\n    "pkg:httpx",\n]\n'
+        'python = "main"\n'
+        'applied = [\n    "numpy",\n    "pandas",\n    "httpx",\n]\n'
+    )
 
 
 def test_validate_tracking_write_accepts_valid_result(tmp_path: Path):
@@ -396,7 +399,13 @@ def test_read_tracking_strict_version_typing(tmp_path: Path, version_value: str)
 
 
 def test_read_tracking_version_2_int_still_raises_newer_schema(tmp_path: Path):
-    """version = 2 (real int) still raises the newer-schema message."""
+    """version = 2 (real int) raises NewerSchemaError, not a plain ConfigError.
+
+    The type, not the message text, is what init's ``--force`` guard keys on
+    to tell a forward-compatibility refusal apart from corrupt tracking.
+    """
+    from uv_stack.errors import NewerSchemaError
+
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
         '[project]\nname = "x"\nversion = "0.1.0"\n\n'
@@ -404,7 +413,7 @@ def test_read_tracking_version_2_int_still_raises_newer_schema(tmp_path: Path):
         'stack = ["ds"]\n'
         'applied = []\n'
     )
-    with pytest.raises(ConfigError) as excinfo:
+    with pytest.raises(NewerSchemaError) as excinfo:
         read_tracking(pyproject)
     assert "newer uv-stack (schema 2)" in str(excinfo.value)
 

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from uv_stack.commands import micromamba_python_path, uv_add, uv_init, uv_remove, uv_sync
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError, EnvError
+from uv_stack.errors import ConfigError, EnvError, NewerSchemaError
 from uv_stack.models import ProjectTracking
 from uv_stack.operations.pyproject import (
     NEWER_SCHEMA_HINT,
@@ -153,12 +153,12 @@ def init_project(
     if pyproject.is_file() and not options.force:
         try:
             interrupted = read_tracking(pyproject)
-        except ConfigError as exc:
-            # Tolerate corrupt/absent tracking here (the guard only decides
-            # which hint to show) — but never mask the newer-schema
-            # compatibility error.
-            if str(exc).startswith(NEWER_SCHEMA_MESSAGE.split("{", 1)[0]):
-                raise
+        except NewerSchemaError:
+            # Never mask a forward-compatibility refusal.
+            raise
+        except ConfigError:
+            # Tolerate corrupt/absent tracking here: the guard only decides
+            # which hint to show.
             interrupted = None
         if interrupted is not None and interrupted.pending is not None:
             raise ConfigError(
@@ -180,7 +180,7 @@ def init_project(
     existing_tracking = read_tracking(pyproject) if pyproject.is_file() else None
     if existing_tracking is not None:
         if existing_tracking.version > 1:
-            raise ConfigError(
+            raise NewerSchemaError(
                 NEWER_SCHEMA_MESSAGE.format(version=existing_tracking.version),
                 hint=NEWER_SCHEMA_HINT,
             )
@@ -216,10 +216,12 @@ def init_project(
             )
 
     # Adopt orphans left by a crashed tracked init/refresh (spec §2.3):
-    # durable from the FIRST write below.
+    # durable from the FIRST write below. Skipped entirely with --no-track:
+    # the table is deleted below, so there is no ledger to adopt into and the
+    # warnings would point at a 'stack refresh' that can no longer run.
     adopted = (
         _adopt_orphans(previous_pending, previous_applied, stack_adds, dep_names, warnings)
-        if previous_pending
+        if options.track and previous_pending
         else []
     )
 
@@ -230,7 +232,7 @@ def init_project(
     # above and not in stack_adds either). The carried entries ride to the next
     # refresh, whose dropped-diff removes or reports them loudly.
     carried = []
-    if previous_pending:
+    if options.track and previous_pending:
         stack_names = {
             canonical_name(n) for n in (ownership_name(e) for e in stack_adds) if n
         }
@@ -275,7 +277,7 @@ def init_project(
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-stack.", suffix=".txt")
     tmp_req = Path(tmp_name)
     try:
-        with open(fd, "w") as handle:
+        with open(fd, "w", encoding="utf-8") as handle:
             for entry in stack_adds:
                 handle.write(entry)
                 handle.write("\n")
@@ -427,8 +429,9 @@ def refresh_project(
     by the following refresh (direct references follow the loud
     skipped-removals path instead). If a run crashed before its add took
     effect and the same name was added manually before the retry, adoption
-    cannot distinguish provenance (spec §2.3 accepted corner) — the warning
-    names the escape hatch a full refresh before any removal.
+    cannot distinguish provenance (spec §2.3 accepted corner) — hence the
+    warning, which gives the user a full refresh cycle to intervene before
+    anything is removed.
 
     :param config: Configuration root.
     :param runner: Command runner.
@@ -449,7 +452,7 @@ def refresh_project(
             ),
         )
     if tracking.version > 1:
-        raise ConfigError(
+        raise NewerSchemaError(
             NEWER_SCHEMA_MESSAGE.format(version=tracking.version),
             hint=NEWER_SCHEMA_HINT,
         )
@@ -511,6 +514,8 @@ def refresh_project(
     names = [n for n in dict.fromkeys(removable_names) if canonical_name(n) in current_names]
     added = [entry for entry in stack_adds if entry not in tracking.applied]
 
+    # An explicit --python overrides the recorded spec; both written tables and
+    # the interpreter resolution below must agree on the value.
     spec_flag = options.python if options.python is not None else tracking.python
 
     # Build both tables once, pre-flight the PENDING one (it is the first write
@@ -518,14 +523,14 @@ def refresh_project(
     pending_tracking = ProjectTracking(
         version=1,
         stack=tracking.stack,
-        python=options.python if options.python is not None else tracking.python,
+        python=spec_flag,
         applied=[*tracking.applied, *adopted],
         pending=stack_adds,
     )
     final_tracking = ProjectTracking(
         version=1,
         stack=tracking.stack,
-        python=options.python if options.python is not None else tracking.python,
+        python=spec_flag,
         applied=[*stack_adds, *adopted],
         pending=None,
     )
@@ -555,7 +560,7 @@ def refresh_project(
     tmp_req = Path(tmp_name)
     try:
         # Render only stack-owned dependencies to the temp requirements file.
-        with open(fd, "w") as handle:
+        with open(fd, "w", encoding="utf-8") as handle:
             for entry in stack_adds:
                 handle.write(entry)
                 handle.write("\n")

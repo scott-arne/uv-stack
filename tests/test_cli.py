@@ -115,7 +115,7 @@ def _two_failing_envs_root(tmp_path: Path) -> Path:
 def test_version():
     result = CliRunner().invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "stack, version 0.4.1" in result.output
+    assert "stack, version 0.4.2" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -1838,6 +1838,34 @@ def test_upgrade_summary_failure_reason_preserves_bracketed_text(tmp_path: Path,
     summary = flat.split("Summary", 1)[1]
     assert "al[p]ha" in summary
     assert "ghost[security]" in summary
+
+
+def test_upgrade_summary_failure_reason_preserves_emoji_code(tmp_path: Path, monkeypatch):
+    """A ``:name:`` run in the reason must not be substituted for an emoji.
+
+    ``rich.markup.escape`` neutralises style tags but not emoji codes, so this
+    line survived the escaping sweep and still turned ``:100:`` into 💯. Only
+    rendering the whole line as ``Text`` closes it. Colons are ordinary in
+    filenames and in tool diagnostics, so the shape is reachable.
+    """
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    root = tmp_path / "python-envs"
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    env_dir = cfg.env_dir("alpha")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    # Resolution fails before any subprocess call and quotes the missing
+    # profile's path, carrying the emoji code into the summary reason.
+    (env_dir / "stack.txt").write_text("profile:ghost:100:\n")
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "alpha"])
+    assert result.exit_code == 1
+    flat = result.output.replace("\n", "")
+    assert "ghost:100:.yaml" in flat, flat
+    assert "💯" not in flat
 
 
 def test_upgrade_success_summary_preserves_bracketed_env_name(tmp_path: Path, monkeypatch):
