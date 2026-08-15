@@ -555,6 +555,64 @@ def test_init_project_force_no_track_removes_stale_table(
     assert read_tracking(project_dir / "pyproject.toml") is None
 
 
+def test_init_project_force_no_track_over_pending_skips_adoption(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """--no-track deletes the table, so nothing may be adopted into it.
+
+    The orphan warnings tell the user the next 'stack refresh' will report the
+    entry — advice that cannot hold once the project is untracked.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_notrack_pending"
+    project_dir.mkdir()
+    # A crashed tracked run: chemprop reached the dependencies and the pending
+    # record, and the stack (ds) no longer provides it — the adoption trigger.
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["chemprop"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = []\n'
+        'pending = ["chemprop"]\n'
+    )
+    warnings = init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(force=True, track=False), cwd=project_dir,
+    )
+    assert read_tracking(project_dir / "pyproject.toml") is None
+    assert not any("interrupted run" in w for w in warnings), warnings
+    assert not any("refresh" in w for w in warnings), warnings
+
+
+def test_init_project_force_tracked_over_pending_still_adopts(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """The tracked path is unchanged: the same state still adopts and warns."""
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_track_pending"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["chemprop"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = []\n'
+        'pending = ["chemprop"]\n'
+    )
+    warnings = init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None and "chemprop" in tracking.applied
+    assert any("interrupted run" in w for w in warnings), warnings
+
+
 def test_init_add_failure_leaves_pending_intent(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):
