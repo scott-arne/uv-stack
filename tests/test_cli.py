@@ -1938,7 +1938,7 @@ def test_show_project_marks_an_empty_pending_record(tmp_path: Path, monkeypatch)
     result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
     assert result.exit_code == 0
     assert "Pending (interrupted run" in result.output
-    assert "  (none — the run was interrupted before it recorded any)" in result.output
+    assert "  (none — the interrupted run had no packages to apply)" in result.output
 
 
 def test_show_project_omits_pending_when_absent(tmp_path: Path, monkeypatch):

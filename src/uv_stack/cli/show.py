@@ -142,7 +142,7 @@ def _show_project(as_json: bool) -> None:
             for package in tracking.pending:
                 echo(f"  {package}")
         else:
-            echo("  (none — the run was interrupted before it recorded any)")
+            echo("  (none — the interrupted run had no packages to apply)")
 
 
 def _show_profile(config: ConfigRoot, name: str, as_json: bool) -> None:
