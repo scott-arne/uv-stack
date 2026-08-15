@@ -15,6 +15,13 @@ def test_discover_precedence_explicit_over_env(monkeypatch, tmp_path: Path):
     assert cfg.root == (tmp_path / "explicit")
 
 
+def test_discover_explicit_root_wins_over_both_env_vars(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("UV_STACK_ROOT", str(tmp_path / "stack-root"))
+    monkeypatch.setenv("UV_ENV_ROOT", str(tmp_path / "env-root"))
+    cfg = ConfigRoot.discover(root=tmp_path / "explicit")
+    assert cfg.root == (tmp_path / "explicit")
+
+
 def test_discover_uses_env_when_no_explicit(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("UV_STACK_ROOT", raising=False)
     monkeypatch.setenv("UV_ENV_ROOT", str(tmp_path / "from-env"))
