@@ -28,6 +28,20 @@ def _combined_output(result) -> str:
         return result.output
 
 
+def _flat_panel(result) -> str:
+    """Output with rich's error-panel borders removed and whitespace collapsed.
+
+    ``render_error`` prints a :class:`~rich.panel.Panel`, so a long message is
+    folded at the console width and every row is padded out to the border.
+    Stripping newlines alone is not enough — the ``│`` and the padding remain
+    between the halves of a split message. Callers that assert a contiguous
+    string containing an absolute path also need a width wide enough that the
+    path is not broken mid-token, since no normalisation can rejoin that
+    without also collapsing a genuine space.
+    """
+    return " ".join(_combined_output(result).replace("│", " ").split())
+
+
 def _seeded_root(tmp_path: Path) -> Path:
     """A config root with the profiles and bundles the CLI tests reference.
 
@@ -1437,13 +1451,13 @@ def test_refresh_outside_project_fails_with_hint(tmp_path: Path, monkeypatch):
     empty = tmp_path / "empty"
     empty.mkdir()
     monkeypatch.chdir(empty)
-    # The error panel is rendered by rich, which wraps to the console width.
-    # Pin the width so the absolute path cannot be folded across lines.
-    monkeypatch.setenv("COLUMNS", "200")
+    # The width pin keeps the tmp path from being broken mid-token; flattening
+    # the panel handles the fold that still lands between the message's words.
+    monkeypatch.setenv("COLUMNS", "1000")
     runner = CliRunner()
     result = runner.invoke(cli, ["--root", str(root), "refresh"])
     assert result.exit_code == 1
-    assert f"No tracked project in {empty}." in _combined_output(result)
+    assert f"No tracked project in {empty}." in _flat_panel(result)
 
 
 def test_refresh_happy_path_prints_summary(tmp_path: Path, monkeypatch):
@@ -2060,12 +2074,12 @@ def test_show_project_outside_project_fails_with_hint(tmp_path: Path, monkeypatc
     empty = tmp_path / "empty"
     empty.mkdir()
     monkeypatch.chdir(empty)
-    # The error panel is rendered by rich, which wraps to the console width.
-    # Pin the width so the absolute path cannot be folded across lines.
-    monkeypatch.setenv("COLUMNS", "200")
+    # The width pin keeps the tmp path from being broken mid-token; flattening
+    # the panel handles the fold that still lands between the message's words.
+    monkeypatch.setenv("COLUMNS", "1000")
     result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
     assert result.exit_code == 1
-    output = _combined_output(result)
+    output = _flat_panel(result)
     assert f"No tracked project in {empty}." in output
     assert "stack create project" in output
 
