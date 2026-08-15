@@ -83,7 +83,11 @@ def render_table(
 
 
 def echo(message: str) -> None:
-    """Print a plain line to stdout (kept here so commands avoid importing rich)."""
+    """Print a plain line to stdout.
+
+    Unlike the console renderers above, this never parses markup, so callers
+    printing user data through it need no escaping.
+    """
     click.echo(message)
 
 
