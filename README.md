@@ -240,7 +240,7 @@ ones uv-stack itself added. Dependencies whose names uv-stack never applied
 are never touched. One caveat: ownership is by package name, so if you
 re-pin a stack-applied package yourself (say `uv add 'numpy<2'` after a
 profile applied `numpy`), uv-stack still owns that name and a later refresh
-may rewrite or remove it. After an interrupted run, recovery adopts leftover `pending` names that are still installed but no longer in the stack — it warns first and the next refresh removes them (the warning tells you how to keep one). Day to day, the project is still a normal `uv`
+may rewrite or remove it. After an interrupted run, recovery adopts leftover `pending` names that are still installed but no longer in the stack — it warns first and the next successful `stack refresh` removes them (the warning tells you how to keep one). Day to day, the project is still a normal `uv`
 project — `uv add`, `uv sync`, and `uv run` all work as usual.
 
 ## Everyday commands
@@ -248,12 +248,12 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | Command | What it does |
 | --- | --- |
 | `stack init` | Guided first-run setup (config tree, starter profile, first env) |
-| `stack create env NAME [TOKENS]...` | Scaffold (optional) and build an environment (`--recreate` wipes it first) |
+| `stack create env NAME [TOKENS]...` | Scaffold (optional) and build a shared environment (`--recreate` wipes it first) |
 | `stack create profile NAME PKG...` | Write a new profile YAML (`--description`, `--tag`) |
 | `stack create bundle NAME TOKEN...` | Write a new bundle YAML (`--description`, `--tag`) |
-| `stack upgrade [NAMES]...` | Re-render, re-lock, and sync environments |
+| `stack upgrade [NAMES]...` | Re-render, re-lock, and sync shared environments |
 | `stack refresh` | Re-resolve a tracked project against current profiles/bundles |
-| `stack status [NAMES]...` | Per-env build state: drift, lock freshness, existence |
+| `stack status [NAMES]...` | Shared-env build state: drift, lock freshness, existence |
 | `stack list env\|profile\|bundle` | Tables of what exists (`--tag` filters, `--json` for scripts) |
 | `stack show env\|profile\|bundle [NAME]` | Details for one item (`NAME` defaults to `main` for envs) |
 | `stack show project` | The tracked project in this directory: tokens, applied packages, pending state |
