@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 import rich_click as click
-from rich.markup import escape
+from rich.text import Text
 
 from uv_stack.cli._complete import complete_env_names
 from uv_stack.cli._render import console, echo, render_error, render_warnings
@@ -37,7 +37,7 @@ def _run_upgrade(
     failures: list[tuple[str, UvStackError]] = []
 
     for name in names:
-        console.rule(f"Upgrading {escape(name)}")
+        console.rule(Text(f"Upgrading {name}"))
         try:
             result = upgrade_env(config, runner, name, options)
         except UvStackError as error:
@@ -87,10 +87,14 @@ def _print_summary(names: list[str], failures: list[tuple[str, UvStackError]]) -
     console.rule("Summary")
     for name in names:
         if name in reasons:
-            padded = escape(name.ljust(width))
-            console.print(f"  [red]✗[/red] {padded}  [dim]{escape(reasons[name])}[/dim]")
+            console.print(
+                Text.assemble(
+                    "  ", ("✗", "red"), f" {name.ljust(width)}  ",
+                    (reasons[name], "dim"),
+                )
+            )
         else:
-            console.print(f"  [green]✓[/green] {escape(name)}")
+            console.print(Text.assemble("  ", ("✓", "green"), f" {name}"))
     if failures:
         console.print(
             f"[red]{len(failures)} of {len(names)} environment(s) failed.[/red]"

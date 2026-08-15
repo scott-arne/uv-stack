@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import rich_click as click
-from rich.markup import escape
+from rich.text import Text
 
 from uv_stack.cli._complete import complete_env_names
 from uv_stack.cli._render import console, echo, render_table
@@ -61,4 +61,4 @@ def status(config: ConfigRoot, names: tuple[str, ...], as_json: bool) -> None:
     )
     for s in statuses:
         if s.message:
-            console.print(f"[dim]{escape(s.name)}: {escape(s.message)}[/dim]")
+            console.print(Text(f"{s.name}: {s.message}", style="dim"))
