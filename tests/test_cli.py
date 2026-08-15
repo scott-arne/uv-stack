@@ -1828,6 +1828,28 @@ def test_show_project_prints_pending_when_present(tmp_path: Path, monkeypatch):
     assert "  scipy" in result.output
 
 
+def test_show_project_marks_an_empty_pending_record(tmp_path: Path, monkeypatch):
+    """``pending = []`` is a real state and must stay distinguishable.
+
+    An empty list still records that a run was interrupted, so the heading has
+    to appear — but a heading with nothing under it reads as a rendering bug,
+    so the empty case says so explicitly.
+    """
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["numpy"]\n'
+        "pending = []\n",
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 0
+    assert "Pending (interrupted run" in result.output
+    assert "  (none — the run was interrupted before it recorded any)" in result.output
+
+
 def test_show_project_omits_pending_when_absent(tmp_path: Path, monkeypatch):
     root = _seeded_root(tmp_path)
     project_dir = _project_with_tracking(
