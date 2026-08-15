@@ -1,4 +1,4 @@
-"""``stack show KIND [NAME]``: show an environment, project, profile, or bundle."""
+"""``stack show KIND [NAME]``: show a shared environment, project, profile, or bundle."""
 
 from __future__ import annotations
 

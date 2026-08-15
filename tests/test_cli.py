@@ -1879,3 +1879,19 @@ def test_show_project_never_resolves_tokens(tmp_path: Path, monkeypatch, broken:
     as_json = runner.invoke(cli, ["--root", str(root), "show", "project", "--json"])
     assert as_json.exit_code == 0, _combined_output(as_json)
     assert json.loads(as_json.output)["stack"] == [token]
+
+
+def test_enumerated_kind_help_qualifies_shared_environment():
+    """'environment' must be qualified wherever 'project' shares the sentence.
+
+    Adjudicated during the 0.4.0 terminology work: the vocabulary rule governs
+    these enumerations, so a bare 'environment' beside 'project' is a defect.
+    Asserted against the module docstrings and the command's help attribute
+    rather than rendered output, which rich wraps at the console width.
+    """
+    from uv_stack.cli import create as create_mod
+    from uv_stack.cli import show as show_mod
+
+    assert "shared environment" in (create_mod.__doc__ or "")
+    assert "shared environment" in (show_mod.__doc__ or "")
+    assert "shared environment" in (cli.commands["create"].help or "")

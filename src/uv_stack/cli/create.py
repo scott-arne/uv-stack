@@ -1,4 +1,4 @@
-"""``stack create``: create an environment, project, profile, or bundle."""
+"""``stack create``: create a shared environment, project, profile, or bundle."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def _bare_usage_warnings(
 
 @click.group("create")
 def create() -> None:
-    """Create an environment, project, profile, or bundle."""
+    """Create a shared environment, project, profile, or bundle."""
 
 
 @create.command("env")
