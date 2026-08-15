@@ -1849,34 +1849,58 @@ def test_status_message_preserves_bracketed_text(tmp_path: Path, monkeypatch):
     assert "[type=list_type" in output
 
 
-def test_list_and_doctor_preserve_bracketed_paths(tmp_path: Path, monkeypatch):
-    """Directory paths in ``list profile`` and ``doctor`` are user-controlled.
+def test_table_directory_line_preserves_bracketed_path(tmp_path: Path, monkeypatch):
+    """The ``<title> in <directory>`` line above a table carries the config root.
 
-    The config root is set via ``--root`` or ``UV_STACK_ROOT``, so a bracketed
-    segment in the path must survive rather than being eaten as a style tag.
+    That path comes from ``--root``/``UV_STACK_ROOT``, so it is user-controlled
+    and must survive verbatim. A swallowed segment here is worse than a visible
+    hole: it prints a plausible but wrong absolute path.
     """
     from uv_stack.config import ConfigRoot
     from uv_stack.operations.init import init_config_root
 
     root = tmp_path / "root[x]" / "python-envs"
-    monkeypatch.setenv("COLUMNS", "200")
-
-    # First check doctor with a missing config root to get finding messages.
-    result = CliRunner().invoke(cli, ["--root", str(root), "doctor"])
-    # Exits non-zero when it finds errors; we just care about the output.
-    output = _combined_output(result).replace("\n", "")
-    assert "root[x]" in output
-
-    # Now initialize and populate for list profile.
     cfg = ConfigRoot(root)
     init_config_root(cfg)
     cfg.profile_path("demo").write_text("includes:\n  - numpy\n")
-
-    # list profile renders "Profiles in <directory>".
+    monkeypatch.setenv("COLUMNS", "250")
     result = CliRunner().invoke(cli, ["--root", str(root), "list", "profile"])
     assert result.exit_code == 0
-    output = result.output.replace("\n", "")
-    assert "root[x]" in output
+    assert "root[x]" in result.output.replace("\n", "")
+
+
+def test_doctor_output_preserves_bracketed_paths(tmp_path: Path, monkeypatch):
+    """Every ``doctor`` line quotes paths derived from the config root.
+
+    Findings, their fixes, and both repair outcomes are separate render sites,
+    so each is asserted on its own line rather than on the output as a whole.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = tmp_path / "root[x]" / "python-envs"
+    # Doctor lines quote two absolute paths apiece; the width must exceed that
+    # so the assertions below test escaping rather than where rich folds.
+    monkeypatch.setenv("COLUMNS", "1000")
+    runner = CliRunner()
+
+    # An absent root is the one finding that needs no seeding, and repairing it
+    # reports the directories it created.
+    fixed = _combined_output(runner.invoke(cli, ["--root", str(root), "doctor", "--fix"]))
+    assert [line for line in fixed.splitlines() if line.startswith("fixed:") and "root[x]" in line]
+
+    cfg = ConfigRoot(root)
+    # A legacy .in profile whose .bak backup already exists cannot be converted,
+    # which is the only path that reports a skipped repair and its reason.
+    cfg.profiles_dir.joinpath("old[y].in").write_text("numpy\n")
+    cfg.profiles_dir.joinpath("old[y].in.bak").write_text("stale\n")
+    output = _combined_output(runner.invoke(cli, ["--root", str(root), "doctor", "--fix"]))
+    lines = output.splitlines()
+    skipped = [line for line in lines if line.startswith("skipped:")]
+    assert skipped and "root[x]" in skipped[0]
+    # The parenthesised reason is a second interpolation on the same line.
+    assert "(old[y].in.bak already exists)" in skipped[0]
+    assert [line for line in lines if line.startswith("WARN") and "old[y].in" in line]
+    assert [line for line in lines if line.strip().startswith("fix:") and "old[y].yaml" in line]
 
 
 def test_list_profile_no_match_preserves_bracketed_tag(tmp_path: Path):
