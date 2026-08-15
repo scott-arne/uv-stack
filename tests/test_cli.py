@@ -1793,10 +1793,12 @@ def test_warning_preserves_bracketed_text(tmp_path: Path, monkeypatch):
 
 
 def test_upgrade_summary_failure_reason_preserves_bracketed_text(tmp_path: Path, monkeypatch):
-    """The per-env failure reason in the upgrade summary is user data, not markup.
+    """The rule, the row name, and the failure reason are all user data.
 
-    The bracketed token here is a stand-in: any error message quoting a
-    requirement extra or a TOML table name reaches this line the same way.
+    The bracketed token in the reason is a stand-in: any error message quoting
+    a requirement extra or a TOML table name reaches that line the same way.
+    The environment name is user data too — it is a CLI argument, and it is
+    rendered separately in the batch rule and in the summary row.
     """
     from uv_stack.config import ConfigRoot
     from uv_stack.operations.init import init_config_root
@@ -1804,7 +1806,7 @@ def test_upgrade_summary_failure_reason_preserves_bracketed_text(tmp_path: Path,
     root = tmp_path / "python-envs"
     cfg = ConfigRoot(root)
     init_config_root(cfg)
-    env_dir = cfg.env_dir("alpha")
+    env_dir = cfg.env_dir("al[p]ha")
     env_dir.mkdir(parents=True)
     (env_dir / "python.txt").write_text("3.12\n")
     # A missing profile fails during the pure resolve step, before any
@@ -1815,10 +1817,42 @@ def test_upgrade_summary_failure_reason_preserves_bracketed_text(tmp_path: Path,
     # the very token under test. Strip newlines on top so the assertion tests
     # escaping, not wrapping.
     monkeypatch.setenv("COLUMNS", "200")
-    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "alpha"])
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "al[p]ha"])
     assert result.exit_code == 1
-    summary = result.output.split("Summary", 1)[1]
-    assert "ghost[security]" in summary.replace("\n", "")
+    flat = result.output.replace("\n", "")
+    assert "Upgrading al[p]ha" in flat
+    summary = flat.split("Summary", 1)[1]
+    assert "al[p]ha" in summary
+    assert "ghost[security]" in summary
+
+
+def test_upgrade_success_summary_preserves_bracketed_env_name(tmp_path: Path, monkeypatch):
+    """The ✓ row names the environment, and that name is user data.
+
+    Stubbing ``upgrade_env`` is what makes a successful batch reachable without
+    micromamba or uv; the ✓ branch of the summary has no other CLI-level route.
+    """
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+    from uv_stack.operations.upgrade import UpgradeResult
+
+    root = tmp_path / "python-envs"
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    env_dir = cfg.env_dir("al[p]ha")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    (env_dir / "stack.txt").write_text("numpy\n")
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env",
+        lambda config, runner, name, options: UpgradeResult(env_name=name),
+    )
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "al[p]ha"])
+    assert result.exit_code == 0
+    flat = result.output.replace("\n", "")
+    assert "✓ al[p]ha" in flat
+    assert "All requested environments upgraded." in flat
 
 
 def test_status_message_preserves_bracketed_text(tmp_path: Path, monkeypatch):
@@ -1826,7 +1860,8 @@ def test_status_message_preserves_bracketed_text(tmp_path: Path, monkeypatch):
 
     That note is a :class:`ConfigError` wrapping a pydantic ``ValidationError``,
     whose text is bracketed by construction (``[type=list_type, ...]``) — so
-    this render site cannot be dismissed as carrying only safe constants.
+    this render site cannot be dismissed as carrying only safe constants. The
+    environment name prefixing it is a second, independent interpolation.
     """
     from uv_stack.config import ConfigRoot
     from uv_stack.operations.init import init_config_root
@@ -1837,7 +1872,7 @@ def test_status_message_preserves_bracketed_text(tmp_path: Path, monkeypatch):
     # A scalar where the schema wants a list: pydantic reports the mismatch with
     # a bracketed type/input suffix.
     cfg.profile_path("web").write_text("includes: 123\n")
-    env_dir = cfg.env_dir("alpha")
+    env_dir = cfg.env_dir("al[p]ha")
     env_dir.mkdir(parents=True)
     (env_dir / "python.txt").write_text("3.12\n")
     (env_dir / "stack.txt").write_text("profile:web\n")
@@ -1846,6 +1881,7 @@ def test_status_message_preserves_bracketed_text(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     output = _combined_output(result).replace("\n", "")
     assert "config error" in output
+    assert "al[p]ha: Invalid profile config" in output
     assert "[type=list_type" in output
 
 
@@ -1903,15 +1939,16 @@ def test_doctor_output_preserves_bracketed_paths(tmp_path: Path, monkeypatch):
     assert [line for line in lines if line.strip().startswith("fix:") and "old[y].yaml" in line]
 
 
-def test_list_profile_no_match_preserves_bracketed_tag(tmp_path: Path):
+def test_list_profile_no_match_preserves_bracketed_tag(tmp_path: Path, monkeypatch):
     """The no-match message in ``list profile --tag`` carries the tag verbatim.
 
     Tags are user-controlled, so a bracketed tag must survive.
     """
     root = _seeded_root(tmp_path)
+    monkeypatch.setenv("COLUMNS", "200")
     result = CliRunner().invoke(cli, ["--root", str(root), "list", "profile", "--tag", "[nope]"])
     assert result.exit_code == 0
-    assert "No profiles match tags: [nope]." in result.output
+    assert "No profiles match tags: [nope]." in result.output.replace("\n", "")
 
 
 # ---------------------------------------------------------------------------
