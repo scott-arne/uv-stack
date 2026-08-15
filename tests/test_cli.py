@@ -1433,10 +1433,13 @@ def test_refresh_outside_project_fails_with_hint(tmp_path: Path, monkeypatch):
     empty = tmp_path / "empty"
     empty.mkdir()
     monkeypatch.chdir(empty)
+    # The error panel is rendered by rich, which wraps to the console width.
+    # Pin the width so the absolute path cannot be folded across lines.
+    monkeypatch.setenv("COLUMNS", "200")
     runner = CliRunner()
     result = runner.invoke(cli, ["--root", str(root), "refresh"])
     assert result.exit_code == 1
-    assert "No tracked project here." in _combined_output(result)
+    assert f"No tracked project in {empty}." in _combined_output(result)
 
 
 def test_refresh_happy_path_prints_summary(tmp_path: Path, monkeypatch):
