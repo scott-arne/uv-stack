@@ -1517,6 +1517,12 @@ def test_command_panels_separate_create_env_and_project_work():
     assert panels.get("Environments") == ["upgrade"], panels
     assert panels.get("Projects") == ["refresh"], panels
 
+    # Completeness: the per-panel assertions above pin what each panel holds,
+    # but a newly registered command filed in no panel would still pass them.
+    # rich-click silently drops such a command from the help screen.
+    placed = [name for group in command_groups for name in group["commands"]]
+    assert sorted(placed) == sorted(cli.commands), (placed, sorted(cli.commands))
+
     # Smoke assertion: help renders and the Projects panel is visible, so
     # "project" appears as a heading on the top-level help screen.
     runner = CliRunner()
