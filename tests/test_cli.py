@@ -1771,7 +1771,10 @@ def test_show_project_prints_pending_when_present(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(project_dir)
     result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
     assert result.exit_code == 0
-    assert "Pending (interrupted run — the next 'stack refresh' clears it):" in result.output
+    expected_pending = (
+        "Pending (interrupted run — the next successful 'stack refresh' clears it):"
+    )
+    assert expected_pending in result.output
     assert "  scipy" in result.output
 
 

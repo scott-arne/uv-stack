@@ -106,7 +106,6 @@ From now on, changing what's installed is always the same two steps: edit a
 source file (a profile, a bundle, or stack.txt), then run stack upgrade main.
 Check what needs rebuilding at any time with stack status.
 
-
 ## What you define
 
 ### Profiles

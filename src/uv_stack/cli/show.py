@@ -135,7 +135,7 @@ def _show_project(as_json: bool) -> None:
     for package in tracking.applied:
         echo(f"  {package}")
     if tracking.pending is not None:
-        echo("Pending (interrupted run — the next 'stack refresh' clears it):")
+        echo("Pending (interrupted run — the next successful 'stack refresh' clears it):")
         for package in tracking.pending:
             echo(f"  {package}")
 
