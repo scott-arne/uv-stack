@@ -1758,6 +1758,60 @@ def test_table_cells_preserve_bracketed_text(tmp_path: Path, monkeypatch):
     assert "requests[security]" in result.output
 
 
+def test_warning_preserves_bracketed_text(tmp_path: Path, monkeypatch):
+    """Warnings emitted by operations carry bracketed tokens like [project.dependencies].
+
+    Those tokens are user data, not rich markup — unescaped, rich parses them
+    as style tags and renders them as nothing.
+    """
+    root = _seeded_root(tmp_path)
+    project_dir = tmp_path / "warnproj"
+    project_dir.mkdir()
+    # The stack asks for requests[security], but the user already owns that
+    # requirement in [project.dependencies], so refresh skips it and warns —
+    # quoting the extras-bearing requirement back at the user.
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["requests[security]"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["requests[security]"]\n'
+        "applied = []\n"
+    )
+    monkeypatch.chdir(project_dir)
+    monkeypatch.setenv("COLUMNS", "200")
+    # --dry-run keeps this hermetic: warnings are rendered either way, but no
+    # uv subprocess runs.
+    result = CliRunner().invoke(cli, ["--root", str(root), "refresh", "--dry-run"])
+    assert result.exit_code == 0
+    output = _combined_output(result)
+    assert "requests[security]" in output
+    assert "is user-owned" in output
+
+
+def test_upgrade_summary_failure_reason_preserves_bracketed_text(tmp_path: Path):
+    """The per-env failure reason in the upgrade summary is user data, not markup.
+
+    The bracketed token here is a stand-in: any error message quoting a
+    requirement extra or a TOML table name reaches this line the same way.
+    """
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    root = tmp_path / "python-envs"
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    env_dir = cfg.env_dir("alpha")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    # A missing profile fails during the pure resolve step, before any
+    # subprocess call, and the reason quotes the token verbatim.
+    (env_dir / "stack.txt").write_text("profile:ghost[security]\n")
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "alpha"])
+    assert result.exit_code == 1
+    summary = result.output.split("Summary", 1)[1]
+    assert "ghost[security]" in summary
+
+
 # ---------------------------------------------------------------------------
 # show project
 # ---------------------------------------------------------------------------
@@ -1889,15 +1943,19 @@ def test_show_project_rejects_a_name(tmp_path: Path, monkeypatch):
     assert "takes no NAME" in _combined_output(result)
 
 
-def test_show_project_json_shape(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("pending_value", [None, []])
+def test_show_project_json_shape(tmp_path: Path, monkeypatch, pending_value):
     import json
 
     root = _seeded_root(tmp_path)
+    pending_line = (
+        'pending = []\n' if pending_value == [] else ""
+    )
     project_dir = _project_with_tracking(
         tmp_path,
         "[tool.uv-stack]\nversion = 1\n"
         'stack = ["@standard"]\n'
-        'applied = ["httpx"]\n',
+        f'applied = ["httpx"]\n{pending_line}',
     )
     monkeypatch.chdir(project_dir)
     result = CliRunner().invoke(cli, ["--root", str(root), "show", "project", "--json"])
@@ -1910,7 +1968,7 @@ def test_show_project_json_shape(tmp_path: Path, monkeypatch):
         "stack": ["@standard"],
         "python": None,
         "applied": ["httpx"],
-        "pending": None,
+        "pending": pending_value,
     }
 
 
