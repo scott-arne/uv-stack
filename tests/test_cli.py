@@ -1705,3 +1705,176 @@ def test_newer_schema_with_extra_keys_friendly_via_cli(tmp_path: Path, monkeypat
     )
     assert create_result.exit_code == 1
     assert "newer uv-stack (schema 2)" in _combined_output(create_result)
+
+
+# ---------------------------------------------------------------------------
+# show project
+# ---------------------------------------------------------------------------
+
+
+def _project_with_tracking(tmp_path: Path, table: str, *, name: str = "showproj") -> Path:
+    """A project directory whose pyproject.toml carries the given tracking table."""
+    project_dir = tmp_path / name
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n' + table
+    )
+    return project_dir
+
+
+def test_show_project_prints_path_stack_and_applied(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\n"
+        'stack = ["@standard", "pkg:httpx"]\n'
+        'python = "3.12"\n'
+        'applied = ["httpx", "numpy", "pandas"]\n',
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 0
+    assert f"Project: {project_dir}" in result.output
+    assert "Python: 3.12" in result.output
+    assert "Stack:" in result.output
+    assert "  @standard" in result.output
+    assert "  pkg:httpx" in result.output
+    assert "Applied packages:" in result.output
+    assert "  httpx" in result.output
+    assert "  pandas" in result.output
+
+
+def test_show_project_python_not_recorded(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\nstack = [\"ds\"]\napplied = []\n",
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 0
+    assert "Python: (not recorded)" in result.output
+    # Empty lists still print their headings, matching 'show env'.
+    assert "Applied packages:" in result.output
+
+
+def test_show_project_prints_pending_when_present(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["numpy"]\n'
+        'pending = ["scipy"]\n',
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 0
+    assert "Pending (interrupted run — the next 'stack refresh' clears it):" in result.output
+    assert "  scipy" in result.output
+
+
+def test_show_project_omits_pending_when_absent(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\nstack = [\"ds\"]\napplied = [\"numpy\"]\n",
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 0
+    assert "Pending" not in result.output
+
+
+def test_show_project_outside_project_fails_with_hint(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(empty)
+    # The error panel is rendered by rich, which wraps to the console width.
+    # Pin the width so the absolute path cannot be folded across lines.
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project"])
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert f"No tracked project in {empty}." in output
+    assert "stack create project" in output
+
+
+def test_show_project_rejects_a_name(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\nstack = [\"ds\"]\napplied = []\n",
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project", "myproj"])
+    assert result.exit_code == 2
+    assert "takes no NAME" in _combined_output(result)
+
+
+def test_show_project_json_shape(tmp_path: Path, monkeypatch):
+    import json
+
+    root = _seeded_root(tmp_path)
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\n"
+        'stack = ["@standard"]\n'
+        'applied = ["httpx"]\n',
+    )
+    monkeypatch.chdir(project_dir)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "project", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    # 'pending' is always present so consumers never branch on key existence.
+    assert payload == {
+        "path": str(project_dir),
+        "version": 1,
+        "stack": ["@standard"],
+        "python": None,
+        "applied": ["httpx"],
+        "pending": None,
+    }
+
+
+@pytest.mark.parametrize("broken", ["missing", "malformed"])
+def test_show_project_never_resolves_tokens(tmp_path: Path, monkeypatch, broken: str):
+    """'show project' is a pure read of the tracking table.
+
+    It must still succeed when the recorded stack references a profile that
+    does not exist or one whose YAML is malformed — the case where a user most
+    needs to inspect the project. 'show env' resolves tokens, so this pins the
+    guarantee against a future refactor that shares code between the two.
+    """
+    import json
+
+    from uv_stack.config import ConfigRoot
+
+    root = _seeded_root(tmp_path)
+    if broken == "missing":
+        # The 'profile:' prefix is load-bearing. A bare unknown token is a
+        # valid literal package to the resolver (resolver.py:204-206), so
+        # 'ghost' alone would resolve cleanly and the case would pass even
+        # against an implementation that wrongly resolves. 'profile:ghost'
+        # forces explicit=True, which raises ResolutionError.
+        token = "profile:ghost"  # no profiles/ghost.yaml in the seeded root
+    else:
+        token = "ds"
+        ConfigRoot(root).profile_path("ds").write_text("includes: [unterminated\n")
+    project_dir = _project_with_tracking(
+        tmp_path,
+        "[tool.uv-stack]\nversion = 1\n"
+        f'stack = ["{token}"]\n'
+        'applied = ["numpy"]\n',
+    )
+    monkeypatch.chdir(project_dir)
+    runner = CliRunner()
+
+    plain = runner.invoke(cli, ["--root", str(root), "show", "project"])
+    assert plain.exit_code == 0, _combined_output(plain)
+    assert f"  {token}" in plain.output
+
+    as_json = runner.invoke(cli, ["--root", str(root), "show", "project", "--json"])
+    assert as_json.exit_code == 0, _combined_output(as_json)
+    assert json.loads(as_json.output)["stack"] == [token]
