@@ -283,13 +283,15 @@ def write_env_sources(
     when we withdraw; nothing on disk distinguishes that writer from one that
     never asked for an interpreter.
 
-    An orphan ``python.txt`` is refused when it is a symlink (adoption is
-    deliberate; the rest of the codebase requires real files), when its
-    content differs from the requested version (that is a user edit, not our
-    debris), or when it cannot be read as UTF-8 (a file we cannot prove is
-    our own debris is refused like any other foreign file). A retry with no
-    ``--python`` skips the adoption preflight entirely, so it inherits the
-    crashed run's orphan ``python.txt`` with no byte comparison.
+    Adoption is deliberately narrow: it requires a real file (not a symlink —
+    the rest of the codebase requires real files), readable as UTF-8 (a file
+    we cannot prove is our own debris is refused like any other foreign file),
+    whose content matches the requested version (anything else is a user edit,
+    not our debris), and present before the preflight. Every other existing
+    ``python.txt`` is refused — including one that appears after the preflight,
+    which the exclusive create rejects even when its content matches. A retry
+    with no ``--python`` skips the adoption preflight entirely, so it inherits
+    the crashed run's orphan ``python.txt`` with no byte comparison.
 
     When the ``stack.txt`` publish fails for a reason other than ``ConfigError``
     (ENOSPC, EACCES, KeyboardInterrupt), the original exception propagates
@@ -302,11 +304,11 @@ def write_env_sources(
     :param python: When given, also write ``python.txt`` with this version.
     :returns: The paths written by THIS call, ``stack.txt`` first. An adopted
         ``python.txt`` is absent from the list.
-    :raises ConfigError: If the environment already has a ``stack.txt``, or a
-        ``python.txt`` that is a symlink, or whose content differs from or
-        cannot be read as the requested version, or the ``stack.txt`` publish
-        was itself refused and the ``python.txt`` this call published could
-        not then be withdrawn.
+    :raises ConfigError: If ``name`` is not a valid environment name, if the
+        environment already has a ``stack.txt``, if it has a ``python.txt``
+        that cannot be adopted on the terms above, or if the ``stack.txt``
+        publish was itself refused and the ``python.txt`` this call published
+        could not then be withdrawn.
     """
     _validate_name("environment", name)
     stack_path = config.env_stack_path(name)
