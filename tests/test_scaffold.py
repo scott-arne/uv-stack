@@ -198,60 +198,89 @@ def test_write_env_sources_refuses_existing_python_txt(config_tree: ConfigRoot):
     assert not config_tree.env_stack_path("orphan").exists()
 
 
-def test_write_env_sources_rollback_on_python_failure(config_tree: ConfigRoot):
+def test_write_env_sources_withdraws_python_when_stack_publish_fails(
+    config_tree: ConfigRoot,
+):
+    """An ordinary stack.txt failure withdraws the python.txt this call published.
+
+    The fake is keyed on the FILE, not the call number: publishing python.txt
+    first is half of what makes the crash case retryable, so the test has to
+    fail when the order is wrong, not only when the withdrawal is missing.
+    """
     from uv_stack.fsutil import atomic_write_new
 
-    call_count = 0
+    published: list[str] = []
 
     def failing_write_new(path, text):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            # First call (stack.txt) succeeds.
+        published.append(path.name)
+        if path.name == "python.txt":
             return atomic_write_new(path, text)
-        else:
-            # Second call (python.txt) fails.
-            raise RuntimeError("Simulated failure")
-
-    with mock.patch("uv_stack.operations.scaffold.atomic_write_new", side_effect=failing_write_new):
-        with pytest.raises(RuntimeError):
-            write_env_sources(config_tree, "rollback-test", ["ds"], python="3.13")
-
-    assert not config_tree.env_stack_path("rollback-test").exists()
-    assert not config_tree.env_python_path("rollback-test").exists()
-
-
-def test_write_env_sources_rollback_preserves_concurrent_replacement(config_tree: ConfigRoot):
-    """Rollback should not unlink stack.txt if a concurrent process replaced it."""
-    from uv_stack import operations
-
-    original_publish = operations.scaffold._publish
-    call_count = 0
-    stack_path = config_tree.env_stack_path("concurrent-test")
-
-    def publish_with_concurrent_replacement(path, text, message, hint):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            # First call (stack.txt) succeeds normally.
-            return original_publish(path, text, message, hint)
-        else:
-            # Second call (python.txt): first replace stack.txt, then fail.
-            # Replacement has different content and a new inode.
-            stack_path.unlink()
-            stack_path.write_text("REPLACED\n")
-            raise RuntimeError("Simulated failure after replacement")
+        raise RuntimeError("Simulated stack.txt publish failure")
 
     with mock.patch(
-        "uv_stack.operations.scaffold._publish",
-        side_effect=publish_with_concurrent_replacement,
+        "uv_stack.operations.scaffold.atomic_write_new", side_effect=failing_write_new
     ):
         with pytest.raises(RuntimeError):
-            write_env_sources(config_tree, "concurrent-test", ["ds"], python="3.13")
+            write_env_sources(config_tree, "racy", ["ds"], python="3.13")
 
-    # The replacement file should survive the rollback.
-    assert stack_path.exists()
-    assert stack_path.read_text() == "REPLACED\n"
+    assert published == ["python.txt", "stack.txt"]
+    # Nothing of ours is left attached to whatever env now owns this directory.
+    assert not config_tree.env_python_path("racy").exists()
+    assert not config_tree.env_stack_path("racy").exists()
+
+
+def test_write_env_sources_withdrawal_spares_a_concurrent_replacement(
+    config_tree: ConfigRoot,
+):
+    """The withdrawal is inode-matched, so a third party's python.txt survives."""
+    from uv_stack.fsutil import atomic_write_new
+
+    python_path = config_tree.env_python_path("racy2")
+
+    def failing_write_new(path, text):
+        if path.name == "python.txt":
+            return atomic_write_new(path, text)
+        # A third writer replaces python.txt before our stack.txt publish fails.
+        python_path.unlink()
+        python_path.write_text("3.99\n", encoding="utf-8")
+        raise RuntimeError("Simulated stack.txt publish failure")
+
+    with mock.patch(
+        "uv_stack.operations.scaffold.atomic_write_new", side_effect=failing_write_new
+    ):
+        with pytest.raises(RuntimeError):
+            write_env_sources(config_tree, "racy2", ["ds"], python="3.13")
+
+    assert python_path.read_text(encoding="utf-8") == "3.99\n"
+
+
+def test_write_env_sources_adopts_matching_orphan_python(config_tree: ConfigRoot):
+    """A hard crash leaves this orphan; the retry adopts it and completes.
+
+    The orphan is placed by hand because that is what a killed process leaves:
+    no handler ran, so nothing was withdrawn.
+    """
+    config_tree.env_python_path("crashy").parent.mkdir(parents=True, exist_ok=True)
+    config_tree.env_python_path("crashy").write_text("3.13\n")
+
+    written = write_env_sources(config_tree, "crashy", ["ds"], python="3.13")
+
+    assert written == [config_tree.env_stack_path("crashy")]
+    assert config_tree.env_stack_path("crashy").read_text() == "ds\n"
+    assert config_tree.env_python_path("crashy").read_text() == "3.13\n"
+
+
+def test_write_env_sources_refuses_orphan_python_with_other_content(
+    config_tree: ConfigRoot,
+):
+    """A python.txt that does not match is a user edit, not our debris."""
+    config_tree.env_python_path("edited").parent.mkdir(parents=True, exist_ok=True)
+    config_tree.env_python_path("edited").write_text("3.11\n")
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_sources(config_tree, "edited", ["ds"], python="3.13")
+    assert "already has a python.txt" in str(excinfo.value)
+    assert not config_tree.env_stack_path("edited").exists()
     assert not config_tree.env_python_path("concurrent-test").exists()
 
 

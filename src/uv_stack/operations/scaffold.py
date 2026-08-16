@@ -263,67 +263,94 @@ def write_env_sources(
     *,
     python: str | None = None,
 ) -> list[Path]:
-    """Write a new environment's source files (``stack.txt``, ``python.txt``).
+    """Write a new environment's source files (``python.txt``, then ``stack.txt``).
+
+    ``stack.txt`` is what makes an environment exist, so it is published LAST.
+    A hard crash between the two writes therefore leaves only an orphan
+    ``python.txt``: the env still reads as absent, and the retry adopts that
+    orphan when its bytes match what this call would have written. Ordering,
+    not rollback, is what makes the crash case retryable — a best-effort
+    rollback cannot run at all when the process is killed, which is the case
+    it was there for.
+
+    An *ordinary* failure of the ``stack.txt`` publish is different: the
+    process is still alive, and most often the cause is a concurrent writer
+    winning that race, which would leave our ``python.txt`` attached to their
+    environment. So that path withdraws the ``python.txt`` this call
+    published, matched on the inode identity ``_publish`` returned so a third
+    party's replacement is left alone.
+
+    An orphan ``python.txt`` whose content differs is refused: that is a user
+    edit, not our debris.
 
     :param config: Configuration root.
     :param name: Environment name.
     :param tokens: Stack tokens, one per ``stack.txt`` line.
     :param python: When given, also write ``python.txt`` with this version.
-    :returns: The paths written, in order.
-    :raises ConfigError: If the environment already has a ``stack.txt`` or ``python.txt``.
+    :returns: The paths written by THIS call, ``stack.txt`` first. An adopted
+        ``python.txt`` is absent from the list.
+    :raises ConfigError: If the environment already has a ``stack.txt``, or a
+        ``python.txt`` whose content differs from the requested version, or the
+        ``python.txt`` this call published could not be withdrawn after the
+        ``stack.txt`` publish failed.
     """
     _validate_name("environment", name)
     stack_path = config.env_stack_path(name)
-    python_path = config.env_python_path(name) if python else None
+    python_path = config.env_python_path(name)
+    python_text = python + "\n" if python is not None else None
 
-    # Preflight all targets before writing anything.
+    # Preflight both targets before writing anything.
     if stack_path.exists():
         raise ConfigError(
             f"Environment '{name}' already has a stack.txt.",
             hint="Edit it directly, or omit TOKENS to rebuild the env.",
         )
-    if python_path and python_path.exists():
-        raise ConfigError(
-            f"Environment '{name}' already has a python.txt.",
-            hint="Edit it directly, or omit --python.",
-        )
+    adopt_python = False
+    if python_text is not None and python_path.exists():
+        try:
+            adopt_python = python_path.read_text(encoding="utf-8") == python_text
+        except (OSError, UnicodeDecodeError):
+            adopt_python = False
+        if not adopt_python:
+            raise ConfigError(
+                f"Environment '{name}' already has a python.txt.",
+                hint="Edit it directly, or omit --python.",
+            )
 
     written: list[Path] = []
-    stack_text = "\n".join(tokens) + "\n"
-    stack_identity: tuple[int, int] | None = None
-    stack_stat = _publish(
-        stack_path,
-        stack_text,
-        f"Environment '{name}' already has a stack.txt.",
-        "Edit it directly, or omit TOKENS to rebuild the env.",
-    )
-    # Capture the identity of the file we just published for safe rollback.
-    stack_identity = (stack_stat.st_dev, stack_stat.st_ino)
-    written.append(stack_path)
-
-    if python:
-        try:
-            _publish(
-                python_path,  # type: ignore[arg-type]
-                python + "\n",
-                f"Environment '{name}' already has a python.txt.",
-                "Edit it directly, or omit --python.",
-            )
-            written.append(python_path)  # type: ignore[arg-type]
-        except BaseException:
-            # Rollback is best-effort: only remove the exact file this call created.
-            # A concurrent process could have replaced stack.txt between our publish
-            # and this rollback; we must not unlink a replacement.
-            if stack_identity is not None:
-                try:
-                    current_stat = stack_path.lstat()
-                    if (current_stat.st_dev, current_stat.st_ino) == stack_identity:
-                        stack_path.unlink(missing_ok=True)
-                except FileNotFoundError:
-                    pass
-            raise
-
-    return written
+    published_python: os.stat_result | None = None
+    if python_text is not None and not adopt_python:
+        published_python = _publish(
+            python_path,
+            python_text,
+            f"Environment '{name}' already has a python.txt.",
+            "Edit it directly, or omit --python.",
+        )
+        written.append(python_path)
+    try:
+        _publish(
+            stack_path,
+            "\n".join(tokens) + "\n",
+            f"Environment '{name}' already has a stack.txt.",
+            "Edit it directly, or omit TOKENS to rebuild the env.",
+        )
+    except BaseException as exc:
+        # Reached only while the process is alive, so most often a concurrent
+        # writer won the stack.txt race: withdraw our python.txt rather than
+        # leave this run's interpreter attached to their environment. A kill
+        # skips this handler, which is exactly the orphan adoption handles.
+        if published_python is not None and not _withdraw(python_path, published_python):
+            if isinstance(exc, ConfigError):
+                raise ConfigError(
+                    f"{exc.message}; {python_path} was just written and could "
+                    "not be removed",
+                    hint=f"Delete {python_path} by hand, then try again.",
+                ) from exc
+            # Replacing a KeyboardInterrupt or an unexpected error with a
+            # ConfigError would hide the real failure. The residual python.txt
+            # is then an orphan, which adoption already handles.
+        raise
+    return [stack_path, *written]
 
 
 _STARTER_PROFILE = """\
