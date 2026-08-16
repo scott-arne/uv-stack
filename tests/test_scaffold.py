@@ -281,7 +281,61 @@ def test_write_env_sources_refuses_orphan_python_with_other_content(
         write_env_sources(config_tree, "edited", ["ds"], python="3.13")
     assert "already has a python.txt" in str(excinfo.value)
     assert not config_tree.env_stack_path("edited").exists()
-    assert not config_tree.env_python_path("concurrent-test").exists()
+
+
+def test_write_env_sources_refuses_symlinked_python_txt(config_tree: ConfigRoot):
+    """A symlinked python.txt is refused even when its target holds the requested version."""
+    target = config_tree.root / "elsewhere.txt"
+    target.write_text("3.13\n")
+    python_path = config_tree.env_python_path("symlinked")
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.symlink_to(target)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_sources(config_tree, "symlinked", ["ds"], python="3.13")
+    assert "already has a python.txt" in str(excinfo.value)
+    assert not config_tree.env_stack_path("symlinked").exists()
+
+
+def test_write_env_sources_reports_failed_python_withdrawal(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """When stack.txt publish fails and python.txt withdrawal fails, state the residual."""
+    from pathlib import Path
+
+    from uv_stack.fsutil import atomic_write_new
+
+    python_path = config_tree.env_python_path("withdrawal-failure")
+    stack_path = config_tree.env_stack_path("withdrawal-failure")
+    original_unlink = Path.unlink
+
+    def racing_write_new(path, text):
+        # python.txt write succeeds.
+        if path.name == "python.txt":
+            return atomic_write_new(path, text)
+        # A concurrent writer creates stack.txt before we can.
+        stack_path.parent.mkdir(parents=True, exist_ok=True)
+        stack_path.write_text("concurrent\n")
+        raise FileExistsError("Stack file exists")
+
+    def failing_unlink(self, missing_ok=False):
+        if self == python_path:
+            raise PermissionError("Simulated permission error")
+        return original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr("uv_stack.operations.scaffold.atomic_write_new", racing_write_new)
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_sources(config_tree, "withdrawal-failure", ["ds"], python="3.13")
+
+    # The message should NOT contain the ".;" defect.
+    assert ".;" not in str(excinfo.value)
+    assert "was just written and could not be removed" in str(excinfo.value)
+    assert str(python_path) in str(excinfo.value)
+    assert str(python_path) in str(excinfo.value.hint)
+    # The python.txt is left on disk.
+    assert python_path.exists()
 
 
 @pytest.mark.parametrize("bad", ["pkg:x", "@x", "a b", "-x", "a\tb"])
