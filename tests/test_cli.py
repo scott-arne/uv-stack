@@ -2220,3 +2220,17 @@ def test_create_bundle_refuses_bare_self_reference(tmp_path: Path):
     assert result.exit_code == 1
     assert "cannot include itself" in _flat_panel(result)
     assert not (root / "bundles" / "app.yaml").exists()
+
+
+def test_create_bundle_surfaces_cycle_warnings_from_existing_bundles(tmp_path: Path):
+    """A cycle inside an already-existing referenced bundle must reach the user."""
+    from uv_stack.config import ConfigRoot
+
+    root = _seeded_root(tmp_path)
+    cfg = ConfigRoot(root)
+    cfg.bundle_path("loop").write_text("includes:\n  - '@loop'\n  - pkg:rich\n")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "create", "bundle", "app", "@loop"]
+    )
+    assert result.exit_code == 0
+    assert "Bundle cycle skipped: loop -> loop" in result.output

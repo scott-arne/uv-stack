@@ -236,7 +236,10 @@ def create_bundle(
     render_warnings(direct.warnings)
     # ...while existence of explicit references (recursively) is validated
     # without re-judging existing bundles' own contents.
-    Resolver(config).resolve(list(tokens))
+    recursive = Resolver(config).resolve(list(tokens))
+    # De-duplicate: direct.warnings are already rendered above.
+    new_warnings = [w for w in recursive.warnings if w not in direct.warnings]
+    render_warnings(new_warnings)
     path = write_bundle(
         config, name, list(tokens), description=description, tags=list(tags)
     )

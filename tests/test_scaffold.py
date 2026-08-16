@@ -85,6 +85,14 @@ def test_write_bundle_allows_qualified_package_of_same_name(config_tree: ConfigR
     assert config_tree.load_bundle("httpx").includes == ["pkg:httpx"]
 
 
+def test_write_bundle_refuses_self_reference_non_plain_name(config_tree: ConfigRoot):
+    """A name the resolver accepts but ``_PLAIN_NAME_RE`` rejects is still a self-reference."""
+    with pytest.raises(ConfigError) as excinfo:
+        write_bundle(config_tree, "daily+cpu", ["ds", "daily+cpu"])
+    assert "cannot include itself" in str(excinfo.value)
+    assert not config_tree.bundle_path("daily+cpu").exists()
+
+
 def test_write_env_sources_creates_stack_and_python(config_tree: ConfigRoot):
     written = write_env_sources(
         config_tree, "fresh", ["@standard", "httpx"], python="3.13"

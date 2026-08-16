@@ -57,10 +57,11 @@ def bundle_self_references(name: str, tokens: Iterable[str]) -> list[str]:
             referenced = token[1:]
         elif token.startswith("bundle:"):
             referenced = token[len("bundle:") :]
-        elif _PLAIN_NAME_RE.match(token):
-            referenced = token
         else:
-            continue
+            # Bare token: compare directly without the plain-name gate. The gate
+            # exists to scope the bare-literal near-miss warning; the resolver's
+            # actual bundle lookup has no such restriction.
+            referenced = token
         if referenced == name:
             hits.append(raw)
     return hits
