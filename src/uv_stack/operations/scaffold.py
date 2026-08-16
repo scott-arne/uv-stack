@@ -64,22 +64,35 @@ def _publish(path: Path, text: str, message: str, hint: str) -> os.stat_result:
         raise ConfigError(message, hint=hint) from exc
 
 
-def _withdraw(path: Path, published: os.stat_result) -> None:
-    """Unlink ``path`` only while it is still the inode we published there.
+def _withdraw(path: Path, published: os.stat_result) -> bool:
+    """Unlink ``path`` while it is still the inode we published there.
 
     POSIX has no unlink-by-inode, so the identity check and the unlink cannot
     be one atomic step; the check narrows the window to the point where a
-    concurrent replacement is no longer plausibly ours.
+    concurrent replacement is no longer plausibly ours. Inode numbers are
+    reusable, so on a filesystem that recycles them promptly a replacement
+    created inside that window could still match — the caller reports a
+    failed withdrawal rather than assuming either outcome.
 
     :param path: Path to withdraw.
     :param published: The stat of the inode this process published at ``path``.
+    :returns: True when ``path`` no longer holds the published inode.
     """
     try:
         current = path.lstat()
+    except FileNotFoundError:
+        return True
     except OSError:
-        return
-    if (current.st_dev, current.st_ino) == (published.st_dev, published.st_ino):
-        path.unlink(missing_ok=True)
+        return False
+    if (current.st_dev, current.st_ino) != (published.st_dev, published.st_ino):
+        return True
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _publish_unshadowed(
@@ -105,13 +118,18 @@ def _publish_unshadowed(
         opposite kind now exists under this name.
     :param shadow_message: ConfigError message when ``shadowed`` answers true.
     :raises ConfigError: If the target already exists, or the name became
-        shadowed during the publish (nothing of ours is left behind).
+        shadowed during the publish (the successfully-withdrawn case leaves
+        nothing behind; the failed-withdrawal case states so in its message).
     """
     published = _publish(path, text, exists_message, _OVERWRITE_HINT)
     if not shadowed():
         return
-    _withdraw(path, published)
-    raise ConfigError(shadow_message, hint=_SHADOW_HINT)
+    if _withdraw(path, published):
+        raise ConfigError(shadow_message, hint=_SHADOW_HINT)
+    raise ConfigError(
+        f"{shadow_message}; the file just written could not be removed",
+        hint=f"Delete {path} by hand, then choose another name.",
+    )
 
 
 def _render_yaml(

@@ -7,6 +7,7 @@ import pytest
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
 from uv_stack.operations.scaffold import (
+    _SHADOW_HINT,
     write_bundle,
     write_env_sources,
     write_profile,
@@ -274,30 +275,38 @@ def test_write_profile_withdraws_when_bundle_appears_during_publish(
     produces. The published profile must be withdrawn, not left shadowing.
     """
     path = config_tree.profile_path("racy")
+    bundle_path = config_tree.bundle_path("racy")
 
     def racing_bundle_exists(name: str) -> bool:
-        return name == "racy" and path.exists()
+        if name == "racy" and path.exists() and not bundle_path.exists():
+            bundle_path.write_text("includes: [racing-bundle]\n")
+        return name == "racy" and bundle_path.exists()
 
     monkeypatch.setattr(config_tree, "bundle_exists", racing_bundle_exists)
 
     with pytest.raises(ConfigError) as excinfo:
         write_profile(config_tree, "racy", ["numpy"])
     assert "would shadow the existing bundle" in str(excinfo.value)
+    assert excinfo.value.hint == _SHADOW_HINT
     assert not path.exists()
+    assert bundle_path.exists()
+    assert bundle_path.read_text() == "includes: [racing-bundle]\n"
 
 
 def test_write_profile_withdrawal_spares_a_concurrent_replacement(
     config_tree: ConfigRoot, monkeypatch
 ):
     """Withdrawal is inode-matched: a third writer's file is never unlinked."""
+    import os
     path = config_tree.profile_path("racy")
 
     def racing_bundle_exists(name: str) -> bool:
         if name != "racy" or not path.exists():
             return False
         # Simulate the third writer replacing our file before we withdraw.
-        path.unlink()
-        path.write_text("includes: [someone-else]\n")
+        temp = path.with_suffix(".replacement")
+        temp.write_text("includes: [someone-else]\n")
+        os.replace(temp, path)
         return True
 
     monkeypatch.setattr(config_tree, "bundle_exists", racing_bundle_exists)
@@ -305,3 +314,84 @@ def test_write_profile_withdrawal_spares_a_concurrent_replacement(
     with pytest.raises(ConfigError):
         write_profile(config_tree, "racy", ["numpy"])
     assert path.read_text() == "includes: [someone-else]\n"
+
+
+def test_write_bundle_withdraws_when_profile_appears_during_publish(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """A profile created in the pre-check/publish window is caught after the fact."""
+    path = config_tree.bundle_path("racy")
+    profile_path = config_tree.profile_path("racy")
+
+    def racing_profile_exists(name: str) -> bool:
+        if name == "racy" and path.exists() and not profile_path.exists():
+            profile_path.write_text("includes: [racing-profile]\n")
+        return name == "racy" and profile_path.exists()
+
+    monkeypatch.setattr(config_tree, "profile_exists", racing_profile_exists)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_bundle(config_tree, "racy", ["ds"])
+    assert "would be shadowed by the existing profile" in str(excinfo.value)
+    assert excinfo.value.hint == _SHADOW_HINT
+    assert not path.exists()
+    assert profile_path.exists()
+    assert profile_path.read_text() == "includes: [racing-profile]\n"
+
+
+def test_write_starter_profile_withdraws_when_bundle_appears_during_publish(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """A bundle named 'starter' created mid-publish is caught after the fact."""
+    from uv_stack.operations.scaffold import write_starter_profile
+
+    path = config_tree.profile_path("starter")
+    bundle_path = config_tree.bundle_path("starter")
+
+    def racing_bundle_exists(name: str) -> bool:
+        if name == "starter" and path.exists() and not bundle_path.exists():
+            bundle_path.write_text("includes: [racing-bundle]\n")
+        return name == "starter" and bundle_path.exists()
+
+    monkeypatch.setattr(config_tree, "bundle_exists", racing_bundle_exists)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_starter_profile(config_tree)
+    assert "would shadow the existing bundle" in str(excinfo.value)
+    assert excinfo.value.hint == _SHADOW_HINT
+    assert not path.exists()
+    assert bundle_path.exists()
+    assert bundle_path.read_text() == "includes: [racing-bundle]\n"
+
+
+def test_write_profile_reports_failed_withdrawal(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """When withdrawal fails, the error message states so and names the path."""
+    from pathlib import Path
+
+    path = config_tree.profile_path("racy")
+    bundle_path = config_tree.bundle_path("racy")
+    original_unlink = Path.unlink
+
+    def racing_bundle_exists(name: str) -> bool:
+        if name == "racy" and path.exists() and not bundle_path.exists():
+            bundle_path.write_text("includes: [racing-bundle]\n")
+        return name == "racy" and bundle_path.exists()
+
+    def failing_unlink(self, missing_ok=False):
+        if self == path:
+            raise PermissionError("Simulated permission error")
+        return original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(config_tree, "bundle_exists", racing_bundle_exists)
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_profile(config_tree, "racy", ["numpy"])
+    assert "would shadow the existing bundle" in str(excinfo.value)
+    assert "could not be removed" in str(excinfo.value)
+    assert str(path) in str(excinfo.value.hint)
+    assert "Delete" in excinfo.value.hint
+    assert path.exists()
+    assert bundle_path.exists()
