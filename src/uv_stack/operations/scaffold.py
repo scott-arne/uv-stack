@@ -268,11 +268,13 @@ def write_env_sources(
 
     ``stack.txt`` is what makes an environment exist, so it is published LAST.
     A hard crash between the two writes therefore leaves only an orphan
-    ``python.txt``: the env still reads as absent, and the retry adopts that
-    orphan when its bytes match what this call would have written. Ordering,
-    not rollback, is what makes the crash case retryable — a best-effort
-    rollback cannot run at all when the process is killed, which is the case
-    it was there for. Publication is all-or-nothing where ``atomic_write_new``
+    ``python.txt``, plus possibly a ``.tmp`` leftover from the interrupted
+    atomic write that nothing ever collects (harmless: the retry's temporary
+    file always takes a fresh name). The env still reads as absent, and the
+    retry adopts that orphan when its bytes match what this call would have
+    written. Ordering, not rollback, is what makes the crash case retryable —
+    a best-effort rollback cannot run at all when the process is killed, which
+    is the case it was there for. Publication is all-or-nothing where ``atomic_write_new``
     publishes by hard link, but on a filesystem without hard-link support
     (FAT/exFAT, some network mounts) its exclusive-create fallback can leave
     a partial file that this function's adoption cannot recognize as ours.
@@ -282,10 +284,11 @@ def write_env_sources(
     winning that race, which would leave our ``python.txt`` attached to their
     environment. So that path withdraws the ``python.txt`` this call
     published, matched on the inode identity ``_publish`` returned so a third
-    party's replacement is left alone. A concurrent writer that *adopted* this
-    ``python.txt`` and won the ``stack.txt`` race loses its interpreter pin
-    when we withdraw; nothing on disk distinguishes that writer from one that
-    never asked for an interpreter.
+    party's replacement is left alone (modulo ``_withdraw``'s two residuals).
+    A concurrent writer that *adopted* this ``python.txt`` and won the
+    ``stack.txt`` race loses its interpreter pin when we withdraw; nothing on
+    disk distinguishes that writer from one that never asked for an
+    interpreter.
 
     Adoption is deliberately narrow: it requires a regular file (not a
     symlink, directory, FIFO, socket, or device node — reading any non-regular
@@ -297,9 +300,11 @@ def write_env_sources(
     one that appears after the preflight, which the exclusive create rejects
     even when its content matches. A retry with no ``--python`` skips the
     adoption preflight entirely, so it inherits the crashed run's orphan
-    ``python.txt`` with no byte comparison. The lstat-then-open check does not
-    close the window where the file is replaced between the check and the
-    read: a file swapped in that window is read as whatever it became.
+    ``python.txt`` with no byte comparison. The descriptor-bound probe binds
+    the read to a file opened with ``O_NOFOLLOW | O_NONBLOCK``, so no swap can
+    turn it into a blocking open or produce bytes other than those compared;
+    a swap that lands *after* adoption, however, leaves a ``python.txt`` this
+    call neither wrote nor verified.
 
     When the ``stack.txt`` publish fails for a reason other than ``ConfigError``
     (ENOSPC, EACCES, KeyboardInterrupt), the original exception propagates
@@ -337,17 +342,30 @@ def write_env_sources(
         # refusing it does not. Anything other than a regular file falls through to
         # the existing "already has a python.txt" refusal — the pre-change behavior.
         try:
-            st = python_path.lstat()
-            if stat.S_ISREG(st.st_mode):
-                adopt_python = python_path.read_text(encoding="utf-8") == python_text
+            # O_NOFOLLOW/O_NONBLOCK degrade to 0 when absent; they keep the open
+            # itself from following a symlink or blocking on a FIFO, and binding
+            # the check to the descriptor means the bytes compared are the ones
+            # fstat approved.
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            fd = os.open(python_path, flags)
+            try:
+                st_fd = os.fstat(fd)
+                if stat.S_ISREG(st_fd.st_mode):
+                    with os.fdopen(fd, "rb") as handle:
+                        fd = -1  # ownership transferred to file object
+                        current_bytes = handle.read()
+                    adopt_python = current_bytes.decode("utf-8") == python_text
+            finally:
+                if fd != -1:
+                    os.close(fd)
         except (OSError, UnicodeDecodeError):
-            # A python.txt we cannot lstat or read is not one we can prove is our
-            # own debris, so it is refused like any other foreign file.
+            # A python.txt we cannot open, read, or decode as UTF-8 is not one we
+            # can prove is our own debris, so it is refused like any other foreign file.
             pass
         if not adopt_python:
             raise ConfigError(
                 f"Environment '{name}' already has a python.txt.",
-                hint="Edit it directly, or omit --python.",
+                hint="Edit or delete it, or omit --python to inherit it.",
             )
 
     written: list[Path] = []
@@ -357,7 +375,7 @@ def write_env_sources(
             python_path,
             python_text,
             f"Environment '{name}' already has a python.txt.",
-            "Edit it directly, or omit --python.",
+            "Edit or delete it, or omit --python to inherit it.",
         )
         written.append(python_path)
     try:

@@ -315,19 +315,32 @@ def test_write_env_sources_refuses_unreadable_python_txt(config_tree: ConfigRoot
 def test_write_env_sources_refuses_fifo_python_txt(config_tree: ConfigRoot):
     """A FIFO at python.txt is refused without blocking on a read.
 
-    A FIFO is not a regular file, so the adoption guard refuses it before
-    attempting any read. This test confirms the refusal happens without
-    blocking — a regression would hang the suite.
+    The descriptor-bound adoption guard refuses a FIFO before any blocking
+    read attempt. The SIGALRM timeout ensures a regression to path-based
+    reading fails loudly rather than hanging the suite.
     """
     import os
+    import signal
+
     python_path = config_tree.env_python_path("fifo")
     python_path.parent.mkdir(parents=True, exist_ok=True)
     os.mkfifo(python_path)
 
-    with pytest.raises(ConfigError) as excinfo:
-        write_env_sources(config_tree, "fifo", ["ds"], python="3.13")
-    assert "already has a python.txt" in str(excinfo.value)
-    assert not config_tree.env_stack_path("fifo").exists()
+    def timeout_handler(signum, frame):
+        raise TimeoutError("write_env_sources blocked on FIFO read")
+
+    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 2)
+        try:
+            with pytest.raises(ConfigError) as excinfo:
+                write_env_sources(config_tree, "fifo", ["ds"], python="3.13")
+            assert "already has a python.txt" in str(excinfo.value)
+            assert not config_tree.env_stack_path("fifo").exists()
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    finally:
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def test_write_env_sources_refuses_directory_python_txt(config_tree: ConfigRoot):
@@ -423,6 +436,25 @@ def test_write_env_sources_spares_adopted_python_from_withdrawal(
     assert python_path not in unlinked_paths
     assert python_path.exists()
     assert python_path.read_text() == "3.13\n"
+
+
+def test_write_env_sources_inherits_orphan_python_with_no_python_arg(
+    config_tree: ConfigRoot,
+):
+    """A retry with no --python inherits the orphan python.txt with no comparison.
+
+    The orphan's content deliberately would NOT match any request, proving
+    the call skips the adoption preflight entirely when python= is omitted.
+    """
+    python_path = config_tree.env_python_path("no-python-arg")
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("3.13-orphaned-pin\n")
+
+    written = write_env_sources(config_tree, "no-python-arg", ["ds"])
+
+    assert written == [config_tree.env_stack_path("no-python-arg")]
+    assert config_tree.env_stack_path("no-python-arg").exists()
+    assert python_path.read_text() == "3.13-orphaned-pin\n"
 
 
 @pytest.mark.parametrize("bad", ["pkg:x", "@x", "a b", "-x", "a\tb"])
