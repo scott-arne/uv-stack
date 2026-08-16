@@ -103,7 +103,9 @@ def _withdraw_and_raise(
 
     :param path: The file this process published and is now retracting.
     :param published: The stat of the inode published at ``path``.
-    :param message: ConfigError message when the retraction succeeded.
+    :param message: Base ConfigError message — used verbatim when the
+        retraction succeeded, and as the prefix of the residual message when
+        it did not, so it must not itself assert what happened on disk.
     :param hint: ConfigError hint when the retraction succeeded.
     :raises ConfigError: Always — with the residual named when ``path`` could
         not be removed.
@@ -142,15 +144,14 @@ def _publish_unshadowed(
     :raises ConfigError: If the target already exists, or the name became
         shadowed during the publish, or the post-publish probe could not
         answer (the successfully-withdrawn case leaves nothing behind; the
-        failed-withdrawal case states so in its message).
+        failed-withdrawal case states that the file could not be removed).
     """
     published = _publish(path, text, exists_message, _OVERWRITE_HINT)
     try:
         collided = shadowed()
     except OSError as exc:
         # The post-publish probe is the only thing between a successful write
-        # and an undetected cross-kind collision, so a probe that cannot answer
-        # is treated as a collision rather than trusted.
+        # and an undetected cross-kind collision.
         _withdraw_and_raise(
             path,
             published,
