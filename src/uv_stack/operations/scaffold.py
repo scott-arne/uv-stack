@@ -283,10 +283,13 @@ def write_env_sources(
     when we withdraw; nothing on disk distinguishes that writer from one that
     never asked for an interpreter.
 
-    An orphan ``python.txt`` whose content differs is refused: that is a user
-    edit, not our debris. A retry with no ``--python`` skips the adoption
-    preflight entirely, so it inherits the crashed run's orphan ``python.txt``
-    with no byte comparison.
+    An orphan ``python.txt`` is refused when it is a symlink (adoption is
+    deliberate; the rest of the codebase requires real files), when its
+    content differs from the requested version (that is a user edit, not our
+    debris), or when it cannot be read as UTF-8 (a file we cannot prove is
+    our own debris is refused like any other foreign file). A retry with no
+    ``--python`` skips the adoption preflight entirely, so it inherits the
+    crashed run's orphan ``python.txt`` with no byte comparison.
 
     When the ``stack.txt`` publish fails for a reason other than ``ConfigError``
     (ENOSPC, EACCES, KeyboardInterrupt), the original exception propagates
@@ -300,9 +303,10 @@ def write_env_sources(
     :returns: The paths written by THIS call, ``stack.txt`` first. An adopted
         ``python.txt`` is absent from the list.
     :raises ConfigError: If the environment already has a ``stack.txt``, or a
-        ``python.txt`` whose content differs from the requested version, or the
-        ``stack.txt`` publish was itself refused and the ``python.txt`` this call
-        published could not then be withdrawn.
+        ``python.txt`` that is a symlink, or whose content differs from or
+        cannot be read as the requested version, or the ``stack.txt`` publish
+        was itself refused and the ``python.txt`` this call published could
+        not then be withdrawn.
     """
     _validate_name("environment", name)
     stack_path = config.env_stack_path(name)
@@ -324,6 +328,8 @@ def write_env_sources(
             try:
                 adopt_python = python_path.read_text(encoding="utf-8") == python_text
             except (OSError, UnicodeDecodeError):
+                # A python.txt we cannot read is not one we can prove is our own
+                # debris, so it is refused like any other foreign file.
                 pass
         if not adopt_python:
             raise ConfigError(
@@ -355,7 +361,7 @@ def write_env_sources(
         # skips this handler, which is exactly the orphan adoption handles.
         if published_python is not None and not _withdraw(python_path, published_python):
             if isinstance(exc, ConfigError):
-                # Wording matches _withdraw_and_raise (scaffold.py:115-118); keep in sync.
+                # Residual clause matches _withdraw_and_raise; hints differ intentionally.
                 raise ConfigError(
                     f"{exc.message.rstrip('.')}; {python_path} was just written and could "
                     "not be removed",

@@ -295,6 +295,21 @@ def test_write_env_sources_refuses_symlinked_python_txt(config_tree: ConfigRoot)
         write_env_sources(config_tree, "symlinked", ["ds"], python="3.13")
     assert "already has a python.txt" in str(excinfo.value)
     assert not config_tree.env_stack_path("symlinked").exists()
+    # The symlink and its target survived untouched.
+    assert python_path.is_symlink()
+    assert target.read_text() == "3.13\n"
+
+
+def test_write_env_sources_refuses_unreadable_python_txt(config_tree: ConfigRoot):
+    """A python.txt that cannot be read as UTF-8 is refused."""
+    python_path = config_tree.env_python_path("unreadable")
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_bytes(b"\xff\xfe")
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_sources(config_tree, "unreadable", ["ds"], python="3.13")
+    assert "already has a python.txt" in str(excinfo.value)
+    assert not config_tree.env_stack_path("unreadable").exists()
 
 
 def test_write_env_sources_reports_failed_python_withdrawal(
@@ -315,7 +330,7 @@ def test_write_env_sources_reports_failed_python_withdrawal(
             return atomic_write_new(path, text)
         # A concurrent writer creates stack.txt before we can.
         stack_path.parent.mkdir(parents=True, exist_ok=True)
-        stack_path.write_text("concurrent\n")
+        stack_path.write_text("concurrent\n", encoding="utf-8")
         raise FileExistsError("Stack file exists")
 
     def failing_unlink(self, missing_ok=False):
@@ -336,6 +351,49 @@ def test_write_env_sources_reports_failed_python_withdrawal(
     assert str(python_path) in str(excinfo.value.hint)
     # The python.txt is left on disk.
     assert python_path.exists()
+    # The concurrent writer's stack.txt survived untouched.
+    assert stack_path.read_text(encoding="utf-8") == "concurrent\n"
+
+
+def test_write_env_sources_spares_adopted_python_from_withdrawal(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """An adopted python.txt survives when stack.txt publish fails.
+
+    write_env_sources short-circuits withdrawal when published_python is
+    None, which is the adopted case. A regression would delete the
+    python.txt this call never wrote.
+    """
+    from pathlib import Path
+
+    from uv_stack.fsutil import atomic_write_new
+
+    python_path = config_tree.env_python_path("adopted-orphan")
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("3.13\n")
+
+    unlinked_paths: list[Path] = []
+    original_unlink = Path.unlink
+
+    def failing_write_new(path, text):
+        if path.name == "stack.txt":
+            raise RuntimeError("Simulated stack.txt publish failure")
+        return atomic_write_new(path, text)
+
+    def tracking_unlink(self, missing_ok=False):
+        unlinked_paths.append(self)
+        return original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr("uv_stack.operations.scaffold.atomic_write_new", failing_write_new)
+    monkeypatch.setattr(Path, "unlink", tracking_unlink)
+
+    with pytest.raises(RuntimeError):
+        write_env_sources(config_tree, "adopted-orphan", ["ds"], python="3.13")
+
+    # The adopted python.txt was never unlinked and still exists.
+    assert python_path not in unlinked_paths
+    assert python_path.exists()
+    assert python_path.read_text() == "3.13\n"
 
 
 @pytest.mark.parametrize("bad", ["pkg:x", "@x", "a b", "-x", "a\tb"])
