@@ -311,8 +311,9 @@ def test_write_profile_withdrawal_spares_a_concurrent_replacement(
 
     monkeypatch.setattr(config_tree, "bundle_exists", racing_bundle_exists)
 
-    with pytest.raises(ConfigError):
+    with pytest.raises(ConfigError) as excinfo:
         write_profile(config_tree, "racy", ["numpy"])
+    assert excinfo.value.hint == _SHADOW_HINT
     assert path.read_text() == "includes: [someone-else]\n"
 
 
@@ -390,7 +391,8 @@ def test_write_profile_reports_failed_withdrawal(
     with pytest.raises(ConfigError) as excinfo:
         write_profile(config_tree, "racy", ["numpy"])
     assert "would shadow the existing bundle" in str(excinfo.value)
-    assert "could not be removed" in str(excinfo.value)
+    assert "was just written and could not be removed" in str(excinfo.value)
+    assert str(path) in str(excinfo.value)
     assert str(path) in str(excinfo.value.hint)
     assert "Delete" in excinfo.value.hint
     assert path.exists()

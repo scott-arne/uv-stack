@@ -69,10 +69,10 @@ def _withdraw(path: Path, published: os.stat_result) -> bool:
 
     POSIX has no unlink-by-inode, so the identity check and the unlink cannot
     be one atomic step; the check narrows the window to the point where a
-    concurrent replacement is no longer plausibly ours. Inode numbers are
-    reusable, so on a filesystem that recycles them promptly a replacement
-    created inside that window could still match — the caller reports a
-    failed withdrawal rather than assuming either outcome.
+    concurrent replacement is no longer plausibly ours. Two residuals survive
+    it: a replacement made between the check and the unlink is removed as if
+    it were ours, and so is one that lands on a recycled inode number. Neither
+    can be closed without unlink-by-inode.
 
     :param path: Path to withdraw.
     :param published: The stat of the inode this process published at ``path``.
@@ -127,7 +127,7 @@ def _publish_unshadowed(
     if _withdraw(path, published):
         raise ConfigError(shadow_message, hint=_SHADOW_HINT)
     raise ConfigError(
-        f"{shadow_message}; the file just written could not be removed",
+        f"{shadow_message}; {path} was just written and could not be removed",
         hint=f"Delete {path} by hand, then choose another name.",
     )
 
