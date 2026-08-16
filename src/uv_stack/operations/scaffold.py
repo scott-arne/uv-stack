@@ -8,6 +8,7 @@ overwrite existing files — editing belongs to the user — and write atomicall
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Callable
 from pathlib import Path
 from typing import NoReturn
@@ -271,7 +272,10 @@ def write_env_sources(
     orphan when its bytes match what this call would have written. Ordering,
     not rollback, is what makes the crash case retryable — a best-effort
     rollback cannot run at all when the process is killed, which is the case
-    it was there for.
+    it was there for. Publication is all-or-nothing where ``atomic_write_new``
+    publishes by hard link, but on a filesystem without hard-link support
+    (FAT/exFAT, some network mounts) its exclusive-create fallback can leave
+    a partial file that this function's adoption cannot recognize as ours.
 
     An *ordinary* failure of the ``stack.txt`` publish is different: the
     process is still alive, and most often the cause is a concurrent writer
@@ -283,15 +287,19 @@ def write_env_sources(
     when we withdraw; nothing on disk distinguishes that writer from one that
     never asked for an interpreter.
 
-    Adoption is deliberately narrow: it requires a real file (not a symlink —
-    the rest of the codebase requires real files), readable as UTF-8 (a file
-    we cannot prove is our own debris is refused like any other foreign file),
-    whose content matches the requested version (anything else is a user edit,
-    not our debris), and present before the preflight. Every other existing
-    ``python.txt`` is refused — including one that appears after the preflight,
-    which the exclusive create rejects even when its content matches. A retry
-    with no ``--python`` skips the adoption preflight entirely, so it inherits
-    the crashed run's orphan ``python.txt`` with no byte comparison.
+    Adoption is deliberately narrow: it requires a regular file (not a
+    symlink, directory, FIFO, socket, or device node — reading any non-regular
+    file can block or fail, and none is something this code could have
+    written), readable as UTF-8 (a file we cannot prove is our own debris is
+    refused like any other foreign file), whose content matches the requested
+    version (anything else is a user edit, not our debris), and present before
+    the preflight. Every other existing ``python.txt`` is refused — including
+    one that appears after the preflight, which the exclusive create rejects
+    even when its content matches. A retry with no ``--python`` skips the
+    adoption preflight entirely, so it inherits the crashed run's orphan
+    ``python.txt`` with no byte comparison. The lstat-then-open check does not
+    close the window where the file is replaced between the check and the
+    read: a file swapped in that window is read as whatever it became.
 
     When the ``stack.txt`` publish fails for a reason other than ``ConfigError``
     (ENOSPC, EACCES, KeyboardInterrupt), the original exception propagates
@@ -323,16 +331,19 @@ def write_env_sources(
         )
     adopt_python = False
     if python_text is not None and python_path.exists():
-        # Refuse symlinks: the rest of the codebase is deliberate (lstat, O_NOFOLLOW),
-        # and adoption is what opened this. A symlink falls through to the existing
-        # "already has a python.txt" refusal — the pre-change behavior.
-        if not python_path.is_symlink():
-            try:
+        # Adoption may only take a regular file: a non-regular python.txt (symlink,
+        # FIFO, directory, socket, device node) is not something this code could
+        # have written, and reading one can block indefinitely or fail in ways
+        # refusing it does not. Anything other than a regular file falls through to
+        # the existing "already has a python.txt" refusal — the pre-change behavior.
+        try:
+            st = python_path.lstat()
+            if stat.S_ISREG(st.st_mode):
                 adopt_python = python_path.read_text(encoding="utf-8") == python_text
-            except (OSError, UnicodeDecodeError):
-                # A python.txt we cannot read is not one we can prove is our own
-                # debris, so it is refused like any other foreign file.
-                pass
+        except (OSError, UnicodeDecodeError):
+            # A python.txt we cannot lstat or read is not one we can prove is our
+            # own debris, so it is refused like any other foreign file.
+            pass
         if not adopt_python:
             raise ConfigError(
                 f"Environment '{name}' already has a python.txt.",

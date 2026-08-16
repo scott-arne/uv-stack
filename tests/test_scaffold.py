@@ -312,6 +312,35 @@ def test_write_env_sources_refuses_unreadable_python_txt(config_tree: ConfigRoot
     assert not config_tree.env_stack_path("unreadable").exists()
 
 
+def test_write_env_sources_refuses_fifo_python_txt(config_tree: ConfigRoot):
+    """A FIFO at python.txt is refused without blocking on a read.
+
+    A FIFO is not a regular file, so the adoption guard refuses it before
+    attempting any read. This test confirms the refusal happens without
+    blocking — a regression would hang the suite.
+    """
+    import os
+    python_path = config_tree.env_python_path("fifo")
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(python_path)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_sources(config_tree, "fifo", ["ds"], python="3.13")
+    assert "already has a python.txt" in str(excinfo.value)
+    assert not config_tree.env_stack_path("fifo").exists()
+
+
+def test_write_env_sources_refuses_directory_python_txt(config_tree: ConfigRoot):
+    """A directory at python.txt is refused."""
+    python_path = config_tree.env_python_path("directory")
+    python_path.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_sources(config_tree, "directory", ["ds"], python="3.13")
+    assert "already has a python.txt" in str(excinfo.value)
+    assert not config_tree.env_stack_path("directory").exists()
+
+
 def test_write_env_sources_reports_failed_python_withdrawal(
     config_tree: ConfigRoot, monkeypatch
 ):
