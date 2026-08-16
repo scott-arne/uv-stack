@@ -262,3 +262,46 @@ def test_validate_name_rejects_token_shaped_names(config_tree: ConfigRoot, bad):
         write_bundle(config_tree, bad, ["ds"])
     with pytest.raises(ConfigError):
         write_env_sources(config_tree, bad, ["ds"])
+
+
+def test_write_profile_withdraws_when_bundle_appears_during_publish(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """A bundle created in the pre-check/publish window is caught after the fact.
+
+    `bundle_exists` is made to answer False before our file lands and True
+    afterwards, which is exactly what a concurrent `stack create bundle`
+    produces. The published profile must be withdrawn, not left shadowing.
+    """
+    path = config_tree.profile_path("racy")
+
+    def racing_bundle_exists(name: str) -> bool:
+        return name == "racy" and path.exists()
+
+    monkeypatch.setattr(config_tree, "bundle_exists", racing_bundle_exists)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_profile(config_tree, "racy", ["numpy"])
+    assert "would shadow the existing bundle" in str(excinfo.value)
+    assert not path.exists()
+
+
+def test_write_profile_withdrawal_spares_a_concurrent_replacement(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """Withdrawal is inode-matched: a third writer's file is never unlinked."""
+    path = config_tree.profile_path("racy")
+
+    def racing_bundle_exists(name: str) -> bool:
+        if name != "racy" or not path.exists():
+            return False
+        # Simulate the third writer replacing our file before we withdraw.
+        path.unlink()
+        path.write_text("includes: [someone-else]\n")
+        return True
+
+    monkeypatch.setattr(config_tree, "bundle_exists", racing_bundle_exists)
+
+    with pytest.raises(ConfigError):
+        write_profile(config_tree, "racy", ["numpy"])
+    assert path.read_text() == "includes: [someone-else]\n"

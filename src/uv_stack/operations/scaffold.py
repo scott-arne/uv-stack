@@ -8,6 +8,7 @@ overwrite existing files — editing belongs to the user — and write atomicall
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 
 import yaml
@@ -18,6 +19,7 @@ from uv_stack.fsutil import atomic_write_new
 from uv_stack.resolver import bundle_self_references
 
 _OVERWRITE_HINT = "Edit the file directly or choose another name."
+_SHADOW_HINT = "Unqualified tokens prefer profiles over bundles; choose another name."
 
 
 def _validate_name(kind: str, name: str) -> None:
@@ -62,6 +64,56 @@ def _publish(path: Path, text: str, message: str, hint: str) -> os.stat_result:
         raise ConfigError(message, hint=hint) from exc
 
 
+def _withdraw(path: Path, published: os.stat_result) -> None:
+    """Unlink ``path`` only while it is still the inode we published there.
+
+    POSIX has no unlink-by-inode, so the identity check and the unlink cannot
+    be one atomic step; the check narrows the window to the point where a
+    concurrent replacement is no longer plausibly ours.
+
+    :param path: Path to withdraw.
+    :param published: The stat of the inode this process published at ``path``.
+    """
+    try:
+        current = path.lstat()
+    except OSError:
+        return
+    if (current.st_dev, current.st_ino) == (published.st_dev, published.st_ino):
+        path.unlink(missing_ok=True)
+
+
+def _publish_unshadowed(
+    path: Path,
+    text: str,
+    exists_message: str,
+    *,
+    shadowed: Callable[[], bool],
+    shadow_message: str,
+) -> None:
+    """Publish a profile/bundle, withdrawing it if the opposite kind appeared.
+
+    The shadow pre-check and the exclusive create cannot be a single atomic
+    step, so the check is repeated AFTER publishing: a concurrent writer that
+    created the other kind inside that window is caught, and our file is
+    withdrawn. The withdrawal is matched by inode, so a third writer that
+    replaced the path in the meantime keeps its file.
+
+    :param path: Destination file.
+    :param text: Content to write.
+    :param exists_message: ConfigError message if the target already exists.
+    :param shadowed: Predicate re-evaluated after publishing; true means the
+        opposite kind now exists under this name.
+    :param shadow_message: ConfigError message when ``shadowed`` answers true.
+    :raises ConfigError: If the target already exists, or the name became
+        shadowed during the publish (nothing of ours is left behind).
+    """
+    published = _publish(path, text, exists_message, _OVERWRITE_HINT)
+    if not shadowed():
+        return
+    _withdraw(path, published)
+    raise ConfigError(shadow_message, hint=_SHADOW_HINT)
+
+
 def _render_yaml(
     description: str | None, tags: list[str], includes: list[str]
 ) -> str:
@@ -94,22 +146,18 @@ def write_profile(
     :raises ConfigError: If the profile already exists or would shadow an existing bundle.
     """
     _validate_name("profile", name)
+    shadow_message = (
+        f"Profile '{name}' would shadow the existing bundle: {config.bundle_path(name)}"
+    )
     if config.bundle_exists(name):
-        bundle_path = config.bundle_path(name)
-        raise ConfigError(
-            f"Profile '{name}' would shadow the existing bundle: {bundle_path}",
-            hint="Unqualified tokens prefer profiles over bundles; choose another name.",
-        )
+        raise ConfigError(shadow_message, hint=_SHADOW_HINT)
     path = config.profile_path(name)
-    if path.exists():
-        raise ConfigError(
-            f"Profile '{name}' already exists: {path}", hint=_OVERWRITE_HINT
-        )
-    _publish(
+    _publish_unshadowed(
         path,
         _render_yaml(description, list(tags or []), packages),
         f"Profile '{name}' already exists: {path}",
-        _OVERWRITE_HINT,
+        shadowed=lambda: config.bundle_exists(name),
+        shadow_message=shadow_message,
     )
     return path
 
@@ -143,22 +191,19 @@ def write_bundle(
                 "literal package, or choose another bundle name."
             ),
         )
+    shadow_message = (
+        f"Bundle '{name}' would be shadowed by the existing profile: "
+        f"{config.profile_path(name)}"
+    )
     if config.profile_exists(name):
-        profile_path = config.profile_path(name)
-        raise ConfigError(
-            f"Bundle '{name}' would be shadowed by the existing profile: {profile_path}",
-            hint="Unqualified tokens prefer profiles over bundles; choose another name.",
-        )
+        raise ConfigError(shadow_message, hint=_SHADOW_HINT)
     path = config.bundle_path(name)
-    if path.exists():
-        raise ConfigError(
-            f"Bundle '{name}' already exists: {path}", hint=_OVERWRITE_HINT
-        )
-    _publish(
+    _publish_unshadowed(
         path,
         _render_yaml(description, list(tags or []), tokens),
         f"Bundle '{name}' already exists: {path}",
-        _OVERWRITE_HINT,
+        shadowed=lambda: config.profile_exists(name),
+        shadow_message=shadow_message,
     )
     return path
 
@@ -250,21 +295,18 @@ def write_starter_profile(config: ConfigRoot) -> Path:
     :returns: The path written.
     :raises ConfigError: If a starter profile already exists or would shadow an existing bundle.
     """
+    shadow_message = (
+        "Profile 'starter' would shadow the existing bundle: "
+        f"{config.bundle_path('starter')}"
+    )
     if config.bundle_exists("starter"):
-        starter_bundle_path = config.bundle_path("starter")
-        raise ConfigError(
-            f"Profile 'starter' would shadow the existing bundle: {starter_bundle_path}",
-            hint="Unqualified tokens prefer profiles over bundles; choose another name.",
-        )
+        raise ConfigError(shadow_message, hint=_SHADOW_HINT)
     path = config.profile_path("starter")
-    if path.exists():
-        raise ConfigError(
-            f"Profile 'starter' already exists: {path}", hint=_OVERWRITE_HINT
-        )
-    _publish(
+    _publish_unshadowed(
         path,
         _STARTER_PROFILE,
         f"Profile 'starter' already exists: {path}",
-        _OVERWRITE_HINT,
+        shadowed=lambda: config.bundle_exists("starter"),
+        shadow_message=shadow_message,
     )
     return path
