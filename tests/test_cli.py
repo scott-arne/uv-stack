@@ -1590,13 +1590,13 @@ def test_create_bundle_does_not_warn_about_itself(tmp_path: Path):
     root = _seeded_root(tmp_path)
     runner = CliRunner()
     # Create bundle 'daily' that includes its own name as a bare token.
-    # Self-exclusion logic must prevent a warning about bundles/daily.yaml.
+    # Self-references are now refused at create time (0.4.3+).
     result = runner.invoke(
         cli, ["--root", str(root), "create", "bundle", "daily", "pkg:numpy", "daily"]
     )
-    assert result.exit_code == 0
-    combined = _combined_output(result)
-    assert "used as a bare token in bundles/daily.yaml" not in combined
+    assert result.exit_code == 1
+    assert "cannot include itself" in _flat_panel(result)
+    assert not (root / "bundles" / "daily.yaml").exists()
 
 
 def test_create_profile_no_warning_without_bare_usage(tmp_path: Path):
@@ -2209,3 +2209,14 @@ def test_enumerated_kind_help_qualifies_shared_environment():
     assert "shared environment" in (create_mod.__doc__ or "")
     assert "shared environment" in (show_mod.__doc__ or "")
     assert "shared environment" in (cli.commands["create"].help or "")
+
+
+def test_create_bundle_refuses_bare_self_reference(tmp_path: Path):
+    """The bug this fix exists for: `stack create bundle app app` wrote a dead bundle."""
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "create", "bundle", "app", "app"]
+    )
+    assert result.exit_code == 1
+    assert "cannot include itself" in _flat_panel(result)
+    assert not (root / "bundles" / "app.yaml").exists()

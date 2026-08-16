@@ -15,6 +15,7 @@ import yaml
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
 from uv_stack.fsutil import atomic_write_new
+from uv_stack.resolver import bundle_self_references
 
 _OVERWRITE_HINT = "Edit the file directly or choose another name."
 
@@ -129,9 +130,19 @@ def write_bundle(
     :param description: Optional one-line description.
     :param tags: Optional tags.
     :returns: The path written.
-    :raises ConfigError: If the bundle already exists or would be shadowed by an existing profile.
+    :raises ConfigError: If the bundle already exists, references itself, or
+        would be shadowed by an existing profile.
     """
     _validate_name("bundle", name)
+    self_refs = bundle_self_references(name, tokens)
+    if self_refs:
+        raise ConfigError(
+            f"Bundle '{name}' cannot include itself: {self_refs[0]}",
+            hint=(
+                f"A self-reference resolves to nothing. Use pkg:{name} for the "
+                "literal package, or choose another bundle name."
+            ),
+        )
     if config.profile_exists(name):
         profile_path = config.profile_path(name)
         raise ConfigError(

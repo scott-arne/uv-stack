@@ -70,6 +70,21 @@ def test_write_bundle_refuses_collision_with_profile(config_tree: ConfigRoot):
     assert not config_tree.bundle_path("ds").exists()
 
 
+@pytest.mark.parametrize("token", ["daily", "@daily", "bundle:daily"])
+def test_write_bundle_refuses_self_reference(config_tree: ConfigRoot, token: str):
+    """A bundle naming itself resolves to nothing; refuse it where intent is recoverable."""
+    with pytest.raises(ConfigError) as excinfo:
+        write_bundle(config_tree, "daily", ["ds", token])
+    assert "cannot include itself" in str(excinfo.value)
+    assert not config_tree.bundle_path("daily").exists()
+
+
+def test_write_bundle_allows_qualified_package_of_same_name(config_tree: ConfigRoot):
+    """pkg: is the documented escape hatch — it is a package, not a self-reference."""
+    write_bundle(config_tree, "httpx", ["pkg:httpx"])
+    assert config_tree.load_bundle("httpx").includes == ["pkg:httpx"]
+
+
 def test_write_env_sources_creates_stack_and_python(config_tree: ConfigRoot):
     written = write_env_sources(
         config_tree, "fresh", ["@standard", "httpx"], python="3.13"

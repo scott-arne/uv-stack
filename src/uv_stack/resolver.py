@@ -15,8 +15,9 @@ unqualified ``x``
     Literal inline requirement.
 
 Profiles are recorded by name (expanded inline at render time). First
-occurrence wins for ordering; bundles already on the resolution path are
-skipped, so mutually-referential bundles cannot recurse forever.
+occurrence wins for ordering; a bundle already on the active resolution path
+is skipped with a warning, so mutually-referential bundles cannot recurse
+forever and cannot fail silently either.
 """
 
 from __future__ import annotations
@@ -34,6 +35,35 @@ from uv_stack.models import ClassifiedTokens, ResolvedStack
 #: requirement, so strict mode and near-miss checks leave it alone. Leading '-'
 #: (flags) and leading '.' (dot paths) are excluded.
 _PLAIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def bundle_self_references(name: str, tokens: Iterable[str]) -> list[str]:
+    """Tokens that reference bundle ``name`` itself.
+
+    A bundle whose includes name the bundle contributes nothing: the recursion
+    guard skips the repeat visit, so the token silently expands to an empty
+    list. A bare token is the dangerous form — at create time the bundle does
+    not exist yet, so it classifies as a literal package and passes every
+    existence check; the moment the file lands it becomes a self-reference.
+
+    :param name: The bundle being created.
+    :param tokens: The tokens destined for its ``includes``.
+    :returns: The offending tokens, in input order.
+    """
+    hits: list[str] = []
+    for raw in tokens:
+        token = raw.strip()
+        if token.startswith("@"):
+            referenced = token[1:]
+        elif token.startswith("bundle:"):
+            referenced = token[len("bundle:") :]
+        elif _PLAIN_NAME_RE.match(token):
+            referenced = token
+        else:
+            continue
+        if referenced == name:
+            hits.append(raw)
+    return hits
 
 
 class Resolver:
@@ -63,6 +93,7 @@ class Resolver:
         self._seen_profiles: set[str] = set()
         self._seen_inline: set[str] = set()
         self._seen_bundles: set[str] = set()
+        self._bundle_stack: list[str] = []
         for token in tokens:
             self._resolve_token(token)
         return ResolvedStack(
@@ -227,9 +258,25 @@ class Resolver:
                 f"Missing bundle: {self._config.bundle_path(name)}",
                 hint="Check the bundle name or create the .yaml file.",
             )
+        # A bundle already on the ACTIVE path is a cycle: the reference cannot
+        # contribute anything, and staying silent is how a self-referencing
+        # bundle came to look like it worked. A bundle merely already SEEN is a
+        # diamond — legitimate, common, and deliberately silent.
+        if name in self._bundle_stack:
+            cycle = " -> ".join([*self._bundle_stack, name])
+            self._warnings.append(
+                f"Bundle cycle skipped: {cycle}. The repeated reference "
+                f"contributes nothing; use pkg:{name} if you meant the "
+                "literal package."
+            )
+            return
         if name in self._seen_bundles:
             return
         self._seen_bundles.add(name)
-        bundle = self._config.load_bundle(name)
-        for token in bundle.includes:
-            self._resolve_token(token)
+        self._bundle_stack.append(name)
+        try:
+            bundle = self._config.load_bundle(name)
+            for token in bundle.includes:
+                self._resolve_token(token)
+        finally:
+            self._bundle_stack.pop()

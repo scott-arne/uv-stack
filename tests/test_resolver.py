@@ -194,3 +194,29 @@ def test_flatten_matches_resolve_packages(config_tree: ConfigRoot):
     assert resolver.flatten(stack) == resolver.resolve_packages(
         ["standard", "umap-learn"]
     )
+
+
+def test_resolve_warns_on_bundle_self_reference(config_tree: ConfigRoot):
+    """A bundle already on disk that names itself warns instead of expanding silently."""
+    config_tree.bundle_path("loop").write_text("includes:\n  - '@loop'\n  - pkg:rich\n")
+    stack = Resolver(config_tree).resolve(["@loop"])
+    assert stack.inline == ["rich"]
+    assert any("Bundle cycle skipped: loop -> loop" in w for w in stack.warnings)
+
+
+def test_resolve_warns_on_mutual_bundle_cycle(config_tree: ConfigRoot):
+    config_tree.bundle_path("left").write_text("includes:\n  - '@right'\n")
+    config_tree.bundle_path("right").write_text("includes:\n  - '@left'\n  - pkg:rich\n")
+    stack = Resolver(config_tree).resolve(["@left"])
+    assert stack.inline == ["rich"]
+    assert any("left -> right -> left" in w for w in stack.warnings)
+
+
+def test_resolve_diamond_bundle_reference_is_silent(config_tree: ConfigRoot):
+    """Two paths to the same bundle are a diamond, not a cycle — no warning."""
+    config_tree.bundle_path("shared").write_text("includes:\n  - pkg:rich\n")
+    config_tree.bundle_path("mid").write_text("includes:\n  - '@shared'\n")
+    config_tree.bundle_path("top").write_text("includes:\n  - '@shared'\n  - '@mid'\n")
+    stack = Resolver(config_tree).resolve(["@top"])
+    assert stack.inline == ["rich"]
+    assert stack.warnings == []
