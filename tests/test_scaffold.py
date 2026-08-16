@@ -397,3 +397,63 @@ def test_write_profile_reports_failed_withdrawal(
     assert "Delete" in excinfo.value.hint
     assert path.exists()
     assert bundle_path.exists()
+
+
+def test_write_bundle_probe_failure_after_publish(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """Post-publish probe raising is treated as a collision and triggers withdrawal.
+
+    The probe is the only thing between a successful write and an undetected
+    cross-kind collision. If it cannot answer, the safe behavior is to withdraw
+    the file and raise, not to trust the write.
+    """
+    path = config_tree.bundle_path("probe-failure")
+
+    def probe_raises(name: str) -> bool:
+        if name == "probe-failure":
+            if path.exists():
+                raise PermissionError("Simulated config dir probe failure")
+        return False
+
+    monkeypatch.setattr(config_tree, "profile_exists", probe_raises)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_bundle(config_tree, "probe-failure", ["ds"])
+    assert "Could not check for a conflicting file after writing" in str(excinfo.value)
+    assert str(path) in str(excinfo.value)
+    assert "config directory is readable" in excinfo.value.hint
+    assert not path.exists()
+
+
+def test_write_bundle_probe_failure_with_failed_withdrawal(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """When both probe and withdrawal fail, the error names the residual."""
+    from pathlib import Path
+
+    path = config_tree.bundle_path("probe-failure-residual")
+    original_unlink = Path.unlink
+
+    def probe_raises(name: str) -> bool:
+        if name == "probe-failure-residual":
+            if path.exists():
+                raise PermissionError("Simulated config dir probe failure")
+        return False
+
+    def failing_unlink(self, missing_ok=False):
+        if self == path:
+            raise PermissionError("Simulated permission error")
+        return original_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(config_tree, "profile_exists", probe_raises)
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_bundle(config_tree, "probe-failure-residual", ["ds"])
+    assert "Could not check for a conflicting file after writing" in str(excinfo.value)
+    assert "was just written and could not be removed" in str(excinfo.value)
+    assert str(path) in str(excinfo.value)
+    assert str(path) in str(excinfo.value.hint)
+    assert "Delete" in excinfo.value.hint
+    assert path.exists()

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from pathlib import Path
+from typing import NoReturn
 
 import yaml
 
@@ -95,6 +96,26 @@ def _withdraw(path: Path, published: os.stat_result) -> bool:
     return True
 
 
+def _withdraw_and_raise(
+    path: Path, published: os.stat_result, message: str, hint: str
+) -> NoReturn:
+    """Retract ``path`` and raise, reporting whether the file is really gone.
+
+    :param path: The file this process published and is now retracting.
+    :param published: The stat of the inode published at ``path``.
+    :param message: ConfigError message when the retraction succeeded.
+    :param hint: ConfigError hint when the retraction succeeded.
+    :raises ConfigError: Always — with the residual named when ``path`` could
+        not be removed.
+    """
+    if _withdraw(path, published):
+        raise ConfigError(message, hint=hint)
+    raise ConfigError(
+        f"{message}; {path} was just written and could not be removed",
+        hint=f"Delete {path} by hand, then choose another name.",
+    )
+
+
 def _publish_unshadowed(
     path: Path,
     text: str,
@@ -109,7 +130,8 @@ def _publish_unshadowed(
     step, so the check is repeated AFTER publishing: a concurrent writer that
     created the other kind inside that window is caught, and our file is
     withdrawn. The withdrawal is matched by inode, so a third writer that
-    replaced the path in the meantime keeps its file.
+    replaced the path in the meantime keeps its file. A post-publish probe
+    that cannot answer is treated as a collision rather than trusted.
 
     :param path: Destination file.
     :param text: Content to write.
@@ -118,18 +140,25 @@ def _publish_unshadowed(
         opposite kind now exists under this name.
     :param shadow_message: ConfigError message when ``shadowed`` answers true.
     :raises ConfigError: If the target already exists, or the name became
-        shadowed during the publish (the successfully-withdrawn case leaves
-        nothing behind; the failed-withdrawal case states so in its message).
+        shadowed during the publish, or the post-publish probe could not
+        answer (the successfully-withdrawn case leaves nothing behind; the
+        failed-withdrawal case states so in its message).
     """
     published = _publish(path, text, exists_message, _OVERWRITE_HINT)
-    if not shadowed():
-        return
-    if _withdraw(path, published):
-        raise ConfigError(shadow_message, hint=_SHADOW_HINT)
-    raise ConfigError(
-        f"{shadow_message}; {path} was just written and could not be removed",
-        hint=f"Delete {path} by hand, then choose another name.",
-    )
+    try:
+        collided = shadowed()
+    except OSError as exc:
+        # The post-publish probe is the only thing between a successful write
+        # and an undetected cross-kind collision, so a probe that cannot answer
+        # is treated as a collision rather than trusted.
+        _withdraw_and_raise(
+            path,
+            published,
+            f"Could not check for a conflicting file after writing {path}: {exc}",
+            "Check that the config directory is readable, then try again.",
+        )
+    if collided:
+        _withdraw_and_raise(path, published, shadow_message, _SHADOW_HINT)
 
 
 def _render_yaml(
