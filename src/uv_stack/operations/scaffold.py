@@ -344,11 +344,13 @@ def write_env_sources(
         )
     adopt_python = False
     if python_text is not None and python_path.exists():
-        # Adoption may only take a regular file: a non-regular python.txt (symlink,
-        # FIFO, directory, socket, device node) is not something this code could
-        # have written, and reading one can block indefinitely or fail in ways
-        # refusing it does not. Anything other than a regular file falls through to
-        # the existing "already has a python.txt" refusal — the pre-change behavior.
+        # Adoption may only take a regular file: a non-regular python.txt (FIFO,
+        # directory, socket, device node) is not something this code could have
+        # written, and reading one can block indefinitely or fail in ways refusing
+        # it does not. Anything other than a regular file falls through to the
+        # existing "already has a python.txt" refusal — the pre-change behavior.
+        # A symlink is refused by the open itself where O_NOFOLLOW exists, and by
+        # the identity recheck below where it does not.
         try:
             # O_NOFOLLOW/O_NONBLOCK degrade to 0 when absent; they keep the open
             # itself from following a symlink or blocking on a FIFO, and binding

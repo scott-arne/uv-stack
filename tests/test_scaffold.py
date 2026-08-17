@@ -388,14 +388,16 @@ def test_write_env_sources_refuses_fifo_python_txt(config_tree: ConfigRoot):
 
     The descriptor-bound adoption guard refuses a FIFO before any blocking
     read attempt. The SIGALRM timeout ensures a regression to path-based
-    reading fails loudly rather than hanging the suite. The timeout raises a
-    BaseException subclass rather than an ordinary Exception so it cannot be
-    swallowed by the adoption probe's own `except (OSError, UnicodeDecodeError)`
-    handler — a regression to path-based reading that lets control enter that
-    handler and stay there until the alarm fires would see the alarm exception
-    caught, the probe return false, and the call refuse with exactly the
-    ConfigError this test asserts. Only a BaseException propagates past that
-    handler.
+    reading fails loudly rather than hanging the suite.
+
+    The handler raises a subclass of BaseException rather than of Exception so
+    that the adoption probe cannot swallow it. With an ordinary TimeoutError —
+    an OSError subclass — a regression to path-based reading would block inside
+    the probe's try, the alarm exception would be caught by its
+    `except (OSError, UnicodeDecodeError)`, and the call would refuse with
+    exactly the ConfigError this test asserts, so the test would pass against
+    the bug. A BaseException that is not an Exception cannot be caught by that
+    handler, nor by any broader `except Exception` a future edit introduces.
     """
     import os
     import signal
