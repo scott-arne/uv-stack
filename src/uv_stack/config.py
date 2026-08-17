@@ -9,6 +9,7 @@ in the pure layer.
 from __future__ import annotations
 
 import os
+import shlex
 from pathlib import Path
 from typing import TypeVar
 
@@ -194,8 +195,10 @@ class ConfigRoot:
             raise ConfigError(
                 f"Missing stack file for env '{name}': expected {self.env_stack_path(name)}",
                 hint=(
+                    # The hint is a command the user is meant to paste; an env
+                    # name is a directory name and may contain shell syntax.
                     "Create stack.txt in the env config directory, or pass "
-                    f"TOKENS: stack create env {name} TOKENS..."
+                    f"TOKENS: stack create env {shlex.quote(name)} TOKENS..."
                 ),
             )
         return EnvConfig(

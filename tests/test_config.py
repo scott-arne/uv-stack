@@ -162,3 +162,19 @@ def test_load_env_missing_hint_mentions_create_env_tokens(tmp_path):
         assert "pass TOKENS: stack create env ghost TOKENS..." in error.hint
     else:
         raise AssertionError("expected ConfigError")
+
+
+def test_load_env_hint_shell_quotes_the_name(tmp_path: Path):
+    """The hint is a runnable command, so the name must survive a paste intact."""
+    root = ConfigRoot(tmp_path / "python-envs")
+    hostile = "a b; rm -rf /"
+    with pytest.raises(ConfigError) as excinfo:
+        root.load_env(hostile)
+    assert "stack create env 'a b; rm -rf /' TOKENS..." in excinfo.value.hint
+
+
+def test_load_env_hint_leaves_a_plain_name_unquoted(tmp_path: Path):
+    root = ConfigRoot(tmp_path / "python-envs")
+    with pytest.raises(ConfigError) as excinfo:
+        root.load_env("ghost")
+    assert "stack create env ghost TOKENS..." in excinfo.value.hint
