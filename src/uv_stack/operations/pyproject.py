@@ -29,10 +29,34 @@ NEWER_SCHEMA_HINT = "Upgrade uv-stack, or edit [tool.uv-stack] manually."
 
 
 def _read_exact(pyproject: Path) -> str:
-    """Read without newline translation so CRLF content outside the owned
-    span survives a splice byte-for-byte."""
+    """Read a mutation source without newline translation, refusing malformed text.
+
+    Reading with ``newline=""`` keeps CRLF content outside the owned span
+    byte-for-byte across a splice. It also means this read is stricter than
+    :func:`read_tracking`'s universal-newline read: a stray carriage return
+    mid-line reaches tomllib here and is rejected, where the earlier read
+    silently translated it away.
+
+    Both callers locate the owned table by line span, and a span can only be
+    reasoned about in a document that parses. Guessing at one in malformed
+    text deletes whatever the guess covers — and the deletion can re-pair the
+    delimiters it broke, leaving a result that parses and so slips past
+    :func:`_validate_result`. Refusing here is the only point that catches it.
+
+    :param pyproject: Path to an existing ``pyproject.toml``.
+    :returns: The file's exact text.
+    :raises ConfigError: If the file does not parse as TOML.
+    """
     with pyproject.open(encoding="utf-8", newline="") as handle:
-        return handle.read()
+        text = handle.read()
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(
+            f"Refusing to modify {pyproject}: the file is not valid TOML: {exc}",
+            hint="Fix the TOML syntax and retry.",
+        ) from exc
+    return text
 
 
 def _header_path(line: str) -> tuple[str, ...] | None:
@@ -61,38 +85,38 @@ def _table_header_lines(text: str) -> dict[int, tuple[str, ...] | None]:
     """Line indexes of genuine top-level table headers, mapped to their paths.
 
     A header-shaped line inside a multi-line string is string content, not a
-    header. Everything preceding a real header is itself a complete TOML
-    document, so re-parsing the prefix confirms the line starts at top level:
-    the prefix parses only when the document is between statements there. The
-    trailing newline is re-added because a prefix cut mid-CRLF would otherwise
+    header. Re-parsing the text that precedes such a line settles which it is:
+    the text parses only when the document is between statements at that point,
+    which is exactly where a real header can start. Anchoring each re-parse at
+    the last confirmed header rather than at the start of the file keeps the
+    scan linear in the file size — a chunk that begins at a confirmed top-level
+    header is itself a complete document, so it carries the same verdict. The
+    trailing newline is re-added because a chunk cut mid-CRLF would otherwise
     end in a bare carriage return, which tomllib rejects.
 
     ``None`` marks a confirmed header line whose path we do not model —
     ``[[array.of.tables]]``, which must still terminate a span even though it
     can never BE the owned table.
 
-    Text that does not parse at all falls back to the line-shape scan, so a
-    malformed pyproject.toml keeps reaching the write path's result validation
-    (a loud refusal) instead of silently reporting "no table here".
+    :param text: A document that already parses as TOML. Every caller reaches
+        here through :func:`read_tracking` or :func:`_read_exact`, both of
+        which parse first. The anchored scan needs that guarantee: a whole
+        document that parses is what rules out a duplicate key or table making
+        an individual chunk fail on its own and hiding a real header.
+    :returns: Confirmed header line indexes mapped to their dotted-key paths.
     """
     lines = text.split("\n")
-    try:
-        tomllib.loads(text)
-    except tomllib.TOMLDecodeError:
-        return {
-            index: _header_path(line)
-            for index, line in enumerate(lines)
-            if line.strip().startswith("[")
-        }
     headers: dict[int, tuple[str, ...] | None] = {}
+    anchor = 0
     for index, line in enumerate(lines):
         if not line.strip().startswith("["):
             continue
         try:
-            tomllib.loads("\n".join(lines[:index]) + "\n")
+            tomllib.loads("\n".join(lines[anchor:index]) + "\n")
         except tomllib.TOMLDecodeError:
             continue
         headers[index] = _header_path(line)
+        anchor = index
     return headers
 
 
@@ -274,7 +298,8 @@ def _spliced_result(pyproject: Path, tracking: ProjectTracking) -> str:
     and :func:`write_tracking` (result published) so the two can never
     drift.
 
-    :raises ConfigError: If the spliced result would not parse.
+    :raises ConfigError: If the existing file does not parse, or if the
+        spliced result would not parse.
     """
     text = _read_exact(pyproject) if pyproject.is_file() else ""
     new_text = _splice(text, render_tracking(tracking))
@@ -292,7 +317,8 @@ def validate_tracking_write(pyproject: Path, tracking: ProjectTracking) -> None:
 
     :param pyproject: Path to pyproject.toml.
     :param tracking: The tracking table to validate.
-    :raises ConfigError: If the spliced result would not parse.
+    :raises ConfigError: If the existing file does not parse, or if the
+        spliced result would not parse.
     """
     _spliced_result(pyproject, tracking)
 
@@ -300,14 +326,22 @@ def validate_tracking_write(pyproject: Path, tracking: ProjectTracking) -> None:
 def write_tracking(pyproject: Path, tracking: ProjectTracking) -> None:
     """Publish the tracking table, preserving everything outside its span.
 
-    :raises ConfigError: If the spliced result would not parse (nothing is
-        written in that case).
+    :param pyproject: Path to ``pyproject.toml``; created when absent.
+    :param tracking: The tracking table to publish.
+    :raises ConfigError: If the existing file does not parse, or if the
+        spliced result would not parse. Nothing is written in either case.
     """
     atomic_write(pyproject, _spliced_result(pyproject, tracking))
 
 
 def remove_tracking(pyproject: Path) -> bool:
-    """Delete the owned table; ``False`` when no table (or file) existed."""
+    """Delete the owned table; ``False`` when no table (or file) existed.
+
+    :param pyproject: Path to ``pyproject.toml``.
+    :returns: Whether a table was removed.
+    :raises ConfigError: If the existing file does not parse, or if the
+        result would not parse. Nothing is written in either case.
+    """
     if not pyproject.is_file():
         return False
     text = _read_exact(pyproject)

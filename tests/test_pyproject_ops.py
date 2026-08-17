@@ -477,8 +477,9 @@ def test_header_inside_multiline_string_is_not_the_owned_table(tmp_path: Path):
 
     write_tracking(pyproject, _tracking())
 
-    text = pyproject.read_text()
-    assert 'stack = ["evil"]' in text  # the docstring survived byte-for-byte
+    # startswith, not 'in': a span start off by even one line still leaves the
+    # decoy's inner text present, so containment would not detect the miss.
+    assert pyproject.read_text().startswith(_TRAP)
     assert read_tracking(pyproject) == _tracking()
 
 
@@ -489,8 +490,7 @@ def test_owned_table_is_written_below_a_trap_docstring(tmp_path: Path):
 
     write_tracking(pyproject, _tracking())
 
-    text = pyproject.read_text()
-    assert 'stack = ["evil"]' in text
+    assert pyproject.read_text().startswith(_TRAP)
     assert read_tracking(pyproject) == _tracking()
 
 
@@ -500,9 +500,8 @@ def test_remove_tracking_ignores_a_trap_docstring(tmp_path: Path):
 
     assert remove_tracking(pyproject) is True
 
-    text = pyproject.read_text()
-    assert 'stack = ["evil"]' in text
-    assert "\n[tool.uv-stack]\nversion" not in text
+    # Removing the real table restores the decoy file exactly.
+    assert pyproject.read_text() == _TRAP
 
 
 def test_subtable_keys_ignores_headers_inside_strings(tmp_path: Path):
@@ -514,6 +513,99 @@ def test_subtable_keys_ignores_headers_inside_strings(tmp_path: Path):
         "\n[tool.uv-stack.extra]\ncustom = true\n"
     )
     assert _subtable_keys(text) == {"extra"}
+
+
+def test_array_of_tables_terminates_the_owned_span(tmp_path: Path):
+    """An [[array of tables]] immediately after the owned table ends its span.
+
+    _table_header_lines maps [[...]] to None specifically so it terminates a
+    span without ever matching the owned path. Drop those entries and the span
+    runs on through this table, deleting it — and the result still parses, so
+    _validate_result cannot catch the loss. test_replace_preserves_following_
+    tables does not cover this: its [[tool.arr]] sits behind a [tool.ruff]
+    header that had already ended the span.
+    """
+    pyproject = tmp_path / "pyproject.toml"
+    following = '[[tool.mypy.overrides]]\nmodule = "demo.*"\nignore_missing_imports = true\n'
+    pyproject.write_text("[tool.uv-stack]\nversion = 1\nstack = []\napplied = []\n\n" + following)
+
+    write_tracking(pyproject, _tracking())
+
+    text = pyproject.read_text()
+    assert text.endswith(following)
+    assert read_tracking(pyproject) == _tracking()
+
+
+_MALFORMED = '[project]\nname = "demo"\n\n[tool.uv-stack\nversion = 1\n'
+
+
+def test_write_tracking_refuses_a_malformed_file(tmp_path: Path):
+    """A pyproject.toml that does not parse is refused, not spliced."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_MALFORMED)
+
+    with pytest.raises(ConfigError) as excinfo:
+        validate_tracking_write(pyproject, _tracking())
+    assert "not valid TOML" in str(excinfo.value)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_tracking(pyproject, _tracking())
+    assert "not valid TOML" in str(excinfo.value)
+    assert pyproject.read_text() == _MALFORMED  # untouched
+
+
+def test_remove_tracking_refuses_a_malformed_file(tmp_path: Path):
+    """Removal refuses a malformed file rather than reporting 'no table'."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_MALFORMED)
+
+    with pytest.raises(ConfigError) as excinfo:
+        remove_tracking(pyproject)
+    assert "not valid TOML" in str(excinfo.value)
+    assert pyproject.read_text() == _MALFORMED  # untouched
+
+
+# Parses under universal newlines (read_tracking) but not raw (the write path):
+# the stray carriage return mid-line is what tomllib rejects.
+_STRAY_CR = (
+    b'[project]\n'
+    b'name = "demo"\n'
+    b'description = """\n'
+    b'Add this to pyproject.toml:\n'
+    b'\n'
+    b'[tool.uv-stack]\n'
+    b'stack = ["ds"]\n'
+    b'"""\n'
+    b'keep_a = "one"\rkeep_b = "two"\n'
+    b'keep_c = """\n'
+    b'[tool.ruff]\n'
+    b'line-length = 100\n'
+    b'"""\n'
+)
+
+
+def test_stray_carriage_return_refuses_instead_of_deleting_content(tmp_path: Path):
+    """Regression: the write path must not guess a span in unparseable text.
+
+    read_tracking translates the stray \\r away and reports "untracked", so the
+    command happily proceeds to a write path where tomllib rejects the same
+    bytes. Guessing the span there deleted keep_a/keep_b/keep_c and both
+    docstring interiors, and because the deletion re-paired the \"\"\"
+    delimiters the wreckage parsed — _validate_result never fired.
+    """
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_bytes(_STRAY_CR)
+    assert read_tracking(pyproject) is None  # the \r is invisible to this read
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_tracking(pyproject, _tracking())
+    assert "not valid TOML" in str(excinfo.value)
+    with pytest.raises(ConfigError):
+        remove_tracking(pyproject)
+
+    assert pyproject.read_bytes() == _STRAY_CR
+    text = pyproject.read_text()
+    assert "keep_a" in text and "keep_b" in text and "keep_c" in text
 
 
 def test_find_span_survives_crlf(tmp_path: Path):
