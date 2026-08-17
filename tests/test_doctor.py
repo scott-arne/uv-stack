@@ -607,17 +607,28 @@ def test_move_no_replace_completes_when_the_source_vanishes_before_the_unlink(
     dst = tmp_path / "dest.txt"
     src.write_text("precious\n")
     real_lstat = Path.lstat
+    src_checks = 0
+    removed = False
 
-    def lstat_then_src_vanishes(self, *args, **kwargs):
+    def remove_src_right_after_its_identity_check(self, *args, **kwargs):
+        # Anchored on src's own check, not on dst's — which merely happens to
+        # sit between it and the unlink today. Reordering the two stats must
+        # not quietly turn this into a test of the early-return path.
+        nonlocal src_checks, removed
         result = real_lstat(self, *args, **kwargs)
-        # dst's identity check sits between src's check and src.unlink().
-        if self == dst:
-            src.unlink()
+        if self == src:
+            src_checks += 1
+            # The first check is _move_no_replace's; the second is the one
+            # _finish_move's unlink relies on.
+            if src_checks == 2:
+                src.unlink()
+                removed = True
         return result
 
-    monkeypatch.setattr(Path, "lstat", lstat_then_src_vanishes)
+    monkeypatch.setattr(Path, "lstat", remove_src_right_after_its_identity_check)
 
     doctor._move_no_replace(src, dst)
 
+    assert removed, "the race never fired; this no longer tests the window"
     assert not src.exists()
     assert dst.read_text() == "precious\n"
