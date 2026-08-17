@@ -282,13 +282,22 @@ def write_env_sources(
     An *ordinary* failure of the ``stack.txt`` publish is different: the
     process is still alive, and most often the cause is a concurrent writer
     winning that race, which would leave our ``python.txt`` attached to their
-    environment. So that path withdraws the ``python.txt`` this call
-    published, matched on the inode identity ``_publish`` returned so a third
-    party's replacement is left alone (modulo ``_withdraw``'s two residuals).
-    A concurrent writer that *adopted* this ``python.txt`` and won the
-    ``stack.txt`` race loses its interpreter pin when we withdraw; nothing on
-    disk distinguishes that writer from one that never asked for an
-    interpreter.
+    environment. So when the publish fails AND this call's ``stack.txt``
+    provably did not land — either a ``ConfigError`` (meaning the
+    ``stack.txt`` on disk belongs to somebody else), or ``stack_path`` does
+    not exist (nothing of ours landed) — the ``python.txt`` this call
+    published is withdrawn, matched on the inode identity ``_publish``
+    returned so a third party's replacement is left alone (modulo
+    ``_withdraw``'s two residuals). A concurrent writer that *adopted* this
+    ``python.txt`` and won the ``stack.txt`` race loses its interpreter pin
+    when we withdraw; nothing on disk distinguishes that writer from one that
+    never asked for an interpreter. When neither condition holds — the
+    publish raised but ``stack.txt`` exists and is not a ``ConfigError`` — no
+    withdrawal happens: ``python.txt`` then either sits beside a ``stack.txt``
+    that did land (a complete environment), or in the rare case where a third
+    party created ``stack.txt`` in the gap, remains as an adopter-residual
+    orphan (strictly less harmful than the unretryable state the withdrawal
+    would have created).
 
     Adoption is deliberately narrow: it requires a regular file (not a
     directory, FIFO, socket, or device node — reading any non-regular file can
@@ -314,10 +323,13 @@ def write_env_sources(
     recheck"; a swap after the recheck still leaves a ``python.txt`` this call
     neither wrote nor verified.
 
-    When the ``stack.txt`` publish fails for a reason other than ``ConfigError``
-    (ENOSPC, EACCES, KeyboardInterrupt), the original exception propagates
-    unchanged and a ``python.txt`` that could not be withdrawn is left as an
-    orphan.
+    When the ``stack.txt`` publish fails and ``stack.txt`` does not exist, a
+    non-``ConfigError`` exception (ENOSPC, EACCES, KeyboardInterrupt)
+    propagates unchanged and a ``python.txt`` that could not be withdrawn is
+    left as an orphan. When ``stack.txt`` exists or the exception is a
+    ``ConfigError``, withdrawal is skipped (for the reasons above), and the
+    exception propagates unchanged except when withdrawal was attempted and
+    failed (the ``ConfigError`` residual clause).
 
     :param config: Configuration root.
     :param name: Environment name.
@@ -403,21 +415,27 @@ def write_env_sources(
             "Edit it directly, or omit TOKENS to rebuild the env.",
         )
     except BaseException as exc:
-        # Reached only while the process is alive, so most often a concurrent
-        # writer won the stack.txt race: withdraw our python.txt rather than
-        # leave this run's interpreter attached to their environment. A kill
-        # skips this handler, which is exactly the orphan adoption handles.
-        if published_python is not None and not _withdraw(python_path, published_python):
-            if isinstance(exc, ConfigError):
-                # Residual clause matches _withdraw_and_raise; hints differ intentionally.
-                raise ConfigError(
-                    f"{exc.message.rstrip('.')}; {python_path} was just written and could "
-                    "not be removed",
-                    hint=f"Delete {python_path} by hand, then try again.",
-                ) from exc
-            # Replacing a KeyboardInterrupt or an unexpected error with a
-            # ConfigError would hide the real failure. The residual python.txt
-            # is then an orphan, which adoption already handles.
+        # Withdraw only when this call's stack.txt provably did not land.
+        # ConfigError means _publish raised from FileExistsError: the stack.txt
+        # on disk belongs to somebody else, not us. A missing stack_path means
+        # nothing of ours landed. When neither holds, skip the withdrawal and
+        # re-raise: python.txt then either sits beside a stack.txt that did land
+        # (correct), or in the rare case where a third party created stack.txt
+        # after the publish raised, remains as an adopter-residual orphan
+        # (strictly less harmful than the unretryable state).
+        should_withdraw = isinstance(exc, ConfigError) or not stack_path.exists()
+        if published_python is not None and should_withdraw:
+            if not _withdraw(python_path, published_python):
+                if isinstance(exc, ConfigError):
+                    # Residual clause matches _withdraw_and_raise; hints differ intentionally.
+                    raise ConfigError(
+                        f"{exc.message.rstrip('.')}; {python_path} was just written and could "
+                        "not be removed",
+                        hint=f"Delete {python_path} by hand, then try again.",
+                    ) from exc
+                # Replacing a KeyboardInterrupt or an unexpected error with a
+                # ConfigError would hide the real failure. The residual python.txt
+                # is then an orphan, which adoption already handles.
         raise
     return [stack_path, *written]
 

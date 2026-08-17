@@ -257,6 +257,42 @@ def test_write_env_sources_withdrawal_spares_a_concurrent_replacement(
     assert python_path.read_text(encoding="utf-8") == "3.99\n"
 
 
+def test_write_env_sources_does_not_withdraw_python_when_stack_lands_before_interrupt(
+    config_tree: ConfigRoot,
+):
+    """A stack.txt that lands before the publish raises must NOT have its python.txt withdrawn.
+
+    The unfixed code treated any BaseException from the stack.txt publish as
+    proof that stack.txt did not land, and withdrew python.txt. That assumption
+    is false: atomic_write_new publishes with os.link and then still has work
+    to do (returning identity, unlinking the temp). An interrupt arriving after
+    the link but before the return propagates with stack.txt already on disk.
+    Withdrawing python.txt then creates an environment with no interpreter pin,
+    and the retry hits the "already has a stack.txt" refusal — exactly the
+    unretryable state the publish-order inversion was meant to prevent.
+    """
+    from uv_stack.fsutil import atomic_write_new
+
+    def interrupt_after_stack_link(path, text):
+        result = atomic_write_new(path, text)
+        if path.name == "stack.txt":
+            raise KeyboardInterrupt("Simulated interrupt after stack.txt link")
+        return result
+
+    with mock.patch(
+        "uv_stack.operations.scaffold.atomic_write_new", side_effect=interrupt_after_stack_link
+    ):
+        with pytest.raises(KeyboardInterrupt):
+            write_env_sources(config_tree, "interrupted", ["ds"], python="3.13")
+
+    # stack.txt landed before the interrupt.
+    assert config_tree.env_stack_path("interrupted").exists()
+    assert config_tree.env_stack_path("interrupted").read_text() == "ds\n"
+    # python.txt must NOT be withdrawn — it sits beside the stack.txt that did land.
+    assert config_tree.env_python_path("interrupted").exists()
+    assert config_tree.env_python_path("interrupted").read_text() == "3.13\n"
+
+
 def test_write_env_sources_adopts_matching_orphan_python(config_tree: ConfigRoot):
     """A hard crash leaves this orphan; the retry adopts it and completes.
 
