@@ -438,6 +438,53 @@ def test_reserved_name_subtable_refused_on_read(tmp_path: Path, field: str):
     assert f"[tool.uv-stack.{field}] shadows the '{field}' field" in str(excinfo.value)
 
 
+def test_reserved_name_subtable_refused_stack_and_applied(tmp_path: Path):
+    """stack and applied subtables refused when scalar is absent.
+
+    tomllib itself preempts with "Cannot declare ... twice" when the scalar
+    is present (stack = [], applied = []), so the only shape our guard reaches
+    is the one where the subtable exists alone. Pin both to detect the mutation
+    that narrows _RESERVED_KEYS to only the three fields the parametrized test
+    covers.
+    """
+    pyproject = tmp_path / "pyproject.toml"
+    # stack present, applied absent -> stack subtable would collide, omit stack scalar
+    pyproject.write_text(
+        _BASE + "\n[tool.uv-stack]\napplied = []\n\n[tool.uv-stack.stack]\nx = 1\n"
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert "[tool.uv-stack.stack] shadows the 'stack' field" in str(excinfo.value)
+
+    # applied present, stack absent -> applied subtable would collide, omit applied scalar
+    pyproject.write_text(
+        _BASE + "\n[tool.uv-stack]\nstack = []\n\n[tool.uv-stack.applied]\nx = 1\n"
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert "[tool.uv-stack.applied] shadows the 'applied' field" in str(excinfo.value)
+
+
+def test_subtable_only_document_reserved_name_refused(tmp_path: Path):
+    """Reserved-name subtable alone (implicit parent) is refused; non-reserved reads None.
+
+    Before this task, both read as None. The reserved-name refusal is correct:
+    returning None would let stack init write an owned table that read_tracking
+    then refuses. The paired negative case pins that the guard does not refuse
+    ALL subtable-only documents — only reserved names.
+    """
+    pyproject = tmp_path / "pyproject.toml"
+    # Reserved-name subtable alone -> refused
+    pyproject.write_text(_BASE + "\n[tool.uv-stack.python]\nx = 1\n")
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert "[tool.uv-stack.python] shadows the 'python' field" in str(excinfo.value)
+
+    # Non-reserved subtable alone -> None (not tracked)
+    pyproject.write_text(_BASE + "\n[tool.uv-stack.extra]\nx = 1\n")
+    assert read_tracking(pyproject) is None
+
+
 def test_non_reserved_subtable_still_tolerated_on_read(tmp_path: Path):
     """The refusal is scoped to our own field names; foreign subtables are ours to keep."""
     pyproject = tmp_path / "pyproject.toml"

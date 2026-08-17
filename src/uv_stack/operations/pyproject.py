@@ -23,10 +23,12 @@ _HEADER = "[tool.uv-stack]"
 _UV_STACK_PATH = ("tool", "uv-stack")
 
 #: Field names the owned table renders itself. A [tool.uv-stack.<field>]
-#: subtable shadows one of them: tomllib rejects the file outright when the
-#: field is also present as a scalar, and when it is not, the NEXT write fails
-#: with an opaque "result would not parse" because render_tracking emits the
-#: scalar beside the subtable. Refusing on read names it where it is fixable.
+#: subtable shadows one of them. When the field is set, tomllib refuses (for
+#: required fields) or the next write fails with an opaque "result would not
+#: parse" (for fields rendered when set). When unset, the subtable silently
+#: shadows it indefinitely. Refusing on read names the collision where it is
+#: diagnosable, regardless of whether the current harm is a write failure or a
+#: masked field.
 _RESERVED_KEYS = frozenset(ProjectTracking.model_fields)
 
 #: Shared newer-schema refusal text — read_tracking raises it centrally and
@@ -147,8 +149,9 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     Foreign subtables (``[tool.uv-stack.*]`` — dict values under our table) are
     filtered out before validation: tolerated on read exactly as
     :func:`write_tracking` preserves them on write. A subtable named after one
-    of our own fields is refused instead — it cannot be preserved, and
-    tolerating it only defers the failure to the next write.
+    of our own fields is refused instead: when the field is set, the next write
+    would fail with an opaque message; when unset, the subtable silently masks
+    it indefinitely.
 
     :param pyproject: Path to ``pyproject.toml``.
     :raises ConfigError: On TOML syntax errors or schema-invalid tables.
@@ -203,7 +206,10 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
                 raise ConfigError(
                     f"Invalid [tool.uv-stack] table in {pyproject}: "
                     f"'{key}' must not be an inline table.",
-                    hint="Check the fields against the schema (version, stack, python, applied).",
+                    hint=(
+                        "Check the fields against the schema "
+                        "(version, stack, python, applied, pending)."
+                    ),
                 )
         scalars[key] = value
     if not scalars:
