@@ -303,9 +303,12 @@ def write_env_sources(
     adoption preflight entirely, so it inherits the crashed run's orphan
     ``python.txt`` with no byte comparison. The descriptor-bound probe binds
     the read to a file opened with ``O_NOFOLLOW | O_NONBLOCK``, so no swap can
-    turn it into a blocking open or produce bytes other than those compared;
-    a swap that lands *after* adoption, however, leaves a ``python.txt`` this
-    call neither wrote nor verified.
+    turn it into a blocking open or produce bytes other than those compared.
+    The identity recheck after the read verifies that ``python.txt`` still
+    names the inode whose bytes matched, narrowing the window from "any time
+    after the open" to "after the recheck"; a swap that lands after the
+    recheck, or between the recheck and the ``stack.txt`` publish, still
+    leaves a ``python.txt`` this call neither wrote nor verified.
 
     When the ``stack.txt`` publish fails for a reason other than ``ConfigError``
     (ENOSPC, EACCES, KeyboardInterrupt), the original exception propagates
@@ -355,7 +358,14 @@ def write_env_sources(
                     with os.fdopen(fd, "rb") as handle:
                         fd = -1  # ownership transferred to file object
                         current_bytes = handle.read()
-                    adopt_python = current_bytes.decode("utf-8") == python_text
+                    if current_bytes.decode("utf-8") == python_text:
+                        # The read proves only what the descriptor's inode held,
+                        # while adoption is a claim about the pathname: re-verify
+                        # the path still names that inode before skipping the write.
+                        st_path = os.lstat(python_path)
+                        adopt_python = (
+                            (st_fd.st_dev, st_fd.st_ino) == (st_path.st_dev, st_path.st_ino)
+                        )
             finally:
                 if fd != -1:
                     os.close(fd)

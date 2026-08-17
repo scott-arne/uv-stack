@@ -298,6 +298,46 @@ def test_write_env_sources_adopts_multiply_linked_orphan_python(
     assert python_path.read_text() == "3.13\n"
 
 
+def test_write_env_sources_refuses_python_txt_swapped_after_descriptor_opened(
+    config_tree: ConfigRoot,
+):
+    """A python.txt replaced after opening yields matching bytes but a wrong inode.
+
+    The descriptor-bound read proves only that the *opened* inode held matching
+    bytes, while adoption is a claim about the *pathname*: skipping the publish
+    asserts that the file now at python.txt is correct. Swapping the file after
+    the descriptor is open makes those two diverge, so the identity recheck must
+    fail and the call must refuse rather than publish an environment around an
+    interpreter pin it never wrote or verified.
+    """
+    import os
+
+    python_path = config_tree.env_python_path("swapped")
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("3.13\n")
+
+    real_fdopen = os.fdopen
+    swap_done = False
+
+    def swapping_fdopen(fd, mode="r", *args, **kwargs):
+        nonlocal swap_done
+        handle = real_fdopen(fd, mode, *args, **kwargs)
+        if not swap_done and python_path.exists():
+            swap_done = True
+            replacement = python_path.parent / "replacement.txt"
+            replacement.write_text("3.99\n")
+            os.replace(replacement, python_path)
+        return handle
+
+    with mock.patch("os.fdopen", side_effect=swapping_fdopen):
+        with pytest.raises(ConfigError) as excinfo:
+            write_env_sources(config_tree, "swapped", ["ds"], python="3.13")
+
+    assert "already has a python.txt" in str(excinfo.value)
+    assert not config_tree.env_stack_path("swapped").exists()
+    assert python_path.read_text() == "3.99\n"
+
+
 def test_write_env_sources_refuses_orphan_python_with_other_content(
     config_tree: ConfigRoot,
 ):
