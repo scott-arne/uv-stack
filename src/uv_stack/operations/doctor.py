@@ -182,8 +182,9 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
     These residual windows stay open, none of them closable with the POSIX
     file API:
 
-    - A ``src`` replaced after the link. Withdrawing ``dst`` then removes what
-      may be the moved inode's last name, and its content is lost. The
+    - A ``src`` replaced after the link, with ``dst`` still naming the moved
+      inode. Withdrawing ``dst`` then removes what may be that inode's last
+      name, and its content is lost. The
       withdrawal is deliberate — ``dst`` is a name only we created, and leaving
       it would block every later move to that destination — but "rolled back"
       here means the destination is left clean, not that the moved file
@@ -234,7 +235,11 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
             raise OSError(f"{dst} vanished during move; nothing deleted") from None
         if (published.st_dev, published.st_ino) != moved_ident:
             raise OSError(f"{dst} changed during move; nothing deleted")
-        src.unlink()
+        # missing_ok: a third party can remove src between the check above and
+        # this line, and dst already holds the moved inode by then. Raising
+        # would report a completed move as failed, and _fix_convert_yaml
+        # answers a failed move by withdrawing the YAML it just published.
+        src.unlink(missing_ok=True)
         return
     # src no longer names the inode we measured — either it was replaced after
     # we linked that inode, or it was replaced BEFORE the link and os.link
@@ -268,6 +273,7 @@ def _move_no_replace(src: Path, dst: Path) -> None:
     so it would publish a link to the TARGET while ``src.lstat()`` describes the
     symlink, and the unlink would silently relocate a third party's file.
 
+    :raises FileNotFoundError: If ``src`` does not exist when the move begins.
     :raises FileExistsError: If ``dst`` already exists.
     :raises OSError: If ``src`` is not a regular file, or ``src`` or ``dst``
         changed identity during the move. ``src`` is left in place on those

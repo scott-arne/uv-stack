@@ -483,7 +483,7 @@ def test_move_no_replace_never_adopts_a_foreign_destination(tmp_path: Path, monk
 
     monkeypatch.setattr(doctor.os, "link", racing_link)
 
-    with pytest.raises(OSError, match="changed during move"):
+    with pytest.raises(OSError, match="source.txt changed during move"):
         doctor._move_no_replace(src, dst)
 
     assert dst.read_text() == "foreign\n"
@@ -514,7 +514,7 @@ def test_move_no_replace_withdraws_a_link_to_a_replaced_source(
 
     monkeypatch.setattr(doctor.os, "link", racing_link)
 
-    with pytest.raises(OSError, match="changed during move"):
+    with pytest.raises(OSError, match="source.txt changed during move"):
         doctor._move_no_replace(src, dst)
 
     assert not dst.exists()
@@ -590,3 +590,34 @@ def test_move_no_replace_refuses_when_the_destination_is_replaced(
 
     assert src.read_text() == "precious\n"
     assert dst.read_text() == "foreign\n"
+
+
+def test_move_no_replace_completes_when_the_source_vanishes_before_the_unlink(
+    tmp_path: Path, monkeypatch
+):
+    """A src removed after its check has already been moved; do not report failure.
+
+    dst holds the moved inode by then, so the move is complete. Raising here
+    would make _fix_convert_yaml withdraw a YAML file it had already published,
+    leaving the tree with neither the source nor its conversion.
+    """
+    from uv_stack.operations import doctor
+
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("precious\n")
+    real_lstat = Path.lstat
+
+    def lstat_then_src_vanishes(self, *args, **kwargs):
+        result = real_lstat(self, *args, **kwargs)
+        # dst's identity check sits between src's check and src.unlink().
+        if self == dst:
+            src.unlink()
+        return result
+
+    monkeypatch.setattr(Path, "lstat", lstat_then_src_vanishes)
+
+    doctor._move_no_replace(src, dst)
+
+    assert not src.exists()
+    assert dst.read_text() == "precious\n"
