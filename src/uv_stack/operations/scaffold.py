@@ -17,7 +17,7 @@ import yaml
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
-from uv_stack.fsutil import atomic_write_new
+from uv_stack.fsutil import _FASTPATH_AVAILABLE, _O_NOFOLLOW, _O_NONBLOCK, atomic_write_new
 from uv_stack.resolver import bundle_self_references
 
 _OVERWRITE_HINT = "Edit the file directly or choose another name."
@@ -305,11 +305,10 @@ def write_env_sources(
     Adoption is deliberately narrow: it requires a regular file (not a
     directory, FIFO, socket, or device node — reading any non-regular file can
     block or fail, and none is something this code could have written; symlinks
-    are refused unconditionally, since ``os.lstat`` never follows them and the
-    recheck would therefore fail even where ``O_NOFOLLOW`` is absent — what
-    degrades without the flag is promptness, not the refusal), readable as
-    UTF-8 (a file we cannot prove is our own debris is refused like any other
-    foreign file), whose content matches the requested version (anything else
+    are refused unconditionally — the ``O_NOFOLLOW`` open fails on one where
+    the preflight runs, and where it does not run nothing is adopted at all),
+    readable as UTF-8 (a file we cannot prove is our own debris is refused like
+    any other foreign file), whose content matches the requested version (anything else
     is a user edit, not our debris), present before the preflight, and still
     the same inode after the read. Every other existing ``python.txt`` is
     refused — including one that appears after the preflight, which the
@@ -317,10 +316,14 @@ def write_env_sources(
     ``--python`` skips the adoption preflight entirely, so it inherits the
     crashed run's orphan ``python.txt`` with no byte comparison. Reading
     through the descriptor itself is what makes the bytes compared the ones
-    ``fstat`` approved; no swap can change that, with or without the flags.
-    ``O_NOFOLLOW | O_NONBLOCK`` (degrading to 0 where either is absent) keeps
-    the open itself from following a symlink or blocking on a FIFO — where
-    ``O_NONBLOCK`` is absent, the open can block. The recheck after the read
+    ``fstat`` approved; no swap can change that. ``O_NOFOLLOW | O_NONBLOCK``
+    keeps the open itself from following a symlink or blocking on a FIFO, and
+    both constants must exist for the preflight to run at all: where either is
+    missing there is no safe way to open a file whose type is not known in
+    advance, so nothing is opened, nothing is adopted, and an existing
+    ``python.txt`` is refused instead. That costs the user a refusal they must
+    clear by hand — edit or delete the file, or omit ``--python`` — which a
+    blocked open would not let them do. The recheck after the read
     verifies that ``python.txt`` still names the inode whose bytes matched,
     narrowing the window from "any time after the open" to "after the
     recheck"; a swap after the recheck still leaves a ``python.txt`` this call
@@ -370,36 +373,41 @@ def write_env_sources(
         # written, and reading one can block indefinitely or fail in ways refusing
         # it does not. Anything other than a regular file falls through to the
         # existing "already has a python.txt" refusal — the pre-change behavior.
-        # A symlink is refused by the open itself where O_NOFOLLOW exists, and by
-        # the identity recheck below where it does not.
-        try:
-            # O_NOFOLLOW/O_NONBLOCK degrade to 0 when absent; they keep the open
-            # itself from following a symlink or blocking on a FIFO, and binding
-            # the check to the descriptor means the bytes compared are the ones
-            # fstat approved.
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-            fd = os.open(python_path, flags)
+        # A symlink is refused by the open itself, which carries O_NOFOLLOW.
+        # Where either open flag does not exist on the platform, the preflight is
+        # not attempted: adoption is impossible and every existing python.txt
+        # reaches that same refusal, which costs the user a manual edit or delete
+        # but is recoverable, unlike an open that blocks on a FIFO.
+        if _FASTPATH_AVAILABLE:
             try:
-                st_fd = os.fstat(fd)
-                if stat.S_ISREG(st_fd.st_mode):
-                    with os.fdopen(fd, "rb") as handle:
-                        fd = -1  # ownership transferred to file object
-                        current_bytes = handle.read()
-                    if current_bytes.decode("utf-8") == python_text:
-                        # The read proves only what the descriptor's inode held,
-                        # while adoption is a claim about the pathname: re-verify
-                        # the path still names that inode before skipping the write.
-                        st_path = os.lstat(python_path)
-                        adopt_python = (
-                            (st_fd.st_dev, st_fd.st_ino) == (st_path.st_dev, st_path.st_ino)
-                        )
-            finally:
-                if fd != -1:
-                    os.close(fd)
-        except (OSError, UnicodeDecodeError):
-            # A python.txt we cannot open, read, or decode as UTF-8 is not one we
-            # can prove is our own debris, so it is refused like any other foreign file.
-            pass
+                # O_NOFOLLOW and O_NONBLOCK keep the open itself from following a
+                # symlink or blocking on a FIFO, and binding the check to the
+                # descriptor means the bytes compared are the ones fstat approved.
+                # Both flags and the gate above come from fsutil, so one place
+                # decides whether this open is safe to make.
+                flags = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
+                fd = os.open(python_path, flags)
+                try:
+                    st_fd = os.fstat(fd)
+                    if stat.S_ISREG(st_fd.st_mode):
+                        with os.fdopen(fd, "rb") as handle:
+                            fd = -1  # ownership transferred to file object
+                            current_bytes = handle.read()
+                        if current_bytes.decode("utf-8") == python_text:
+                            # The read proves only what the descriptor's inode held,
+                            # while adoption is a claim about the pathname: re-verify
+                            # the path still names that inode before skipping the write.
+                            st_path = os.lstat(python_path)
+                            adopt_python = (
+                                (st_fd.st_dev, st_fd.st_ino) == (st_path.st_dev, st_path.st_ino)
+                            )
+                finally:
+                    if fd != -1:
+                        os.close(fd)
+            except (OSError, UnicodeDecodeError):
+                # A python.txt we cannot open, read, or decode as UTF-8 is not one we
+                # can prove is our own debris, so it is refused like any other foreign file.
+                pass
         if not adopt_python:
             raise ConfigError(
                 f"Environment '{name}' already has a python.txt.",

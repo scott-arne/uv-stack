@@ -419,6 +419,33 @@ def test_write_env_sources_refuses_python_txt_swapped_after_descriptor_opened(
     assert python_path.read_text() == "3.99\n"
 
 
+def test_write_env_sources_refuses_orphan_python_without_the_open_flags(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    """Without both open flags the adoption preflight does not run, so nothing is adopted.
+
+    The preflight opens a file whose type is not known in advance, which needs
+    O_NOFOLLOW and O_NONBLOCK; where either constant is absent it is skipped
+    entirely rather than run unguarded. The orphan here is byte-for-byte the one
+    test_write_env_sources_adopts_matching_orphan_python adopts, so the only
+    difference is the gate: it must now meet the "already has a python.txt"
+    refusal — the behavior that predates adoption — with the file left untouched
+    for the user to clear.
+    """
+    from uv_stack.operations import scaffold
+
+    monkeypatch.setattr(scaffold, "_FASTPATH_AVAILABLE", False)
+    python_path = config_tree.env_python_path("noflags")
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("3.13\n")
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_sources(config_tree, "noflags", ["ds"], python="3.13")
+    assert "already has a python.txt" in str(excinfo.value)
+    assert not config_tree.env_stack_path("noflags").exists()
+    assert python_path.read_text() == "3.13\n"
+
+
 def test_write_env_sources_refuses_orphan_python_with_other_content(
     config_tree: ConfigRoot,
 ):
