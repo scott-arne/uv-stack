@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import rich_click as click
@@ -76,7 +77,7 @@ def _show_env(config: ConfigRoot, name: str, as_json: bool) -> None:
     if interpreter:
         echo(f"Interpreter: {interpreter}")
     else:
-        echo(f"Interpreter: not created (run 'stack create env {name}')")
+        echo(f"Interpreter: not created (run 'stack create env {shlex.quote(name)}')")
     echo("Stack:")
     for token in cfg.stack:
         echo(f"  {token}")

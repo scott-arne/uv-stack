@@ -87,6 +87,13 @@ def test_ensure_env_existing_no_flags_is_noop(config_tree: ConfigRoot):
     assert micromamba_remove("main") not in rec.commands
 
 
+def test_ensure_env_shell_quotes_name_in_hint(config_tree: ConfigRoot):
+    rec = RecordingRunner(responder=_missing_env_responder)
+    with pytest.raises(EnvError) as exc_info:
+        ensure_env(config_tree, rec, "bad;touch", create=False, recreate=False)
+    assert "stack create env 'bad;touch'" in str(exc_info.value.hint)
+
+
 # ============================================================================
 # update operation tests
 # ============================================================================
@@ -228,6 +235,16 @@ def test_init_project_unresolvable_env_fails_fast(
     argv = [" ".join(c.args) for c in rec.commands]
     assert not any(a.startswith("uv ") for a in argv)
     assert not (project_dir / "pyproject.toml").exists()
+
+
+def test_resolve_project_python_shell_quotes_env_name_in_hint(
+    config_tree: ConfigRoot, monkeypatch
+):
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    rec = RecordingRunner(responder=_missing_env_responder)
+    with pytest.raises(EnvError) as exc_info:
+        resolve_project_python(config_tree, rec, "bad;touch")
+    assert "stack create env 'bad;touch'" in str(exc_info.value.hint)
 
 
 @pytest.mark.parametrize(

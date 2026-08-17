@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -359,7 +360,7 @@ def resolve_project_python(
         raise EnvError(
             f"Could not resolve micromamba environment '{spec}' to an interpreter.",
             hint=(
-                f"Ensure the env exists ('stack create env {spec}') and that "
+                f"Ensure the env exists ('stack create env {shlex.quote(spec)}') and that "
                 "MAMBA_ROOT_PREFIX is set, or pass --python <version>."
             ),
         )

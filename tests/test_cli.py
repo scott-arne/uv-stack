@@ -952,6 +952,25 @@ def test_show_env_interpreter_not_created(tmp_path: Path, monkeypatch):
     assert "Interpreter: not created (run 'stack create env main')" in result.output
 
 
+def test_show_env_shell_quotes_name_in_hint(tmp_path: Path, monkeypatch):
+    from uv_stack.config import ConfigRoot
+
+    root = _env_root(tmp_path)
+    cfg = ConfigRoot(root)
+    env_dir = cfg.env_dir("bad;touch")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    (env_dir / "stack.txt").write_text("ds\n")
+    monkeypatch.setattr(
+        "uv_stack.cli.show.SubprocessRunner",
+        lambda: _FakeProbeRunner(stdout="", returncode=1),
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "show", "env", "bad;touch"])
+    assert result.exit_code == 0
+    assert "stack create env 'bad;touch'" in result.output
+
+
 def test_status_table(tmp_path: Path, monkeypatch):
     root = _env_root(tmp_path)
     monkeypatch.setattr(
@@ -1314,6 +1333,24 @@ def test_init_decline_build_still_surfaces_warnings(tmp_path: Path, monkeypatch)
     assert result.exit_code == 0
     assert result.output.count("did you mean 'starter'") == 1
     assert "Build it with: stack create env main" in result.output
+
+
+def test_init_shell_quotes_env_name_in_build_hint(tmp_path: Path, monkeypatch):
+    root = tmp_path / "python-envs"
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    runner = CliRunner()
+    # Prompts: seed starter? y | create env? y | name: bad;touch | tokens: ds |
+    # python [3.12] | build now? n
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "init"],
+        input="y\ny\nbad;touch\nds\n\nn\n",
+    )
+    assert result.exit_code == 0
+    assert "Build it with: stack create env 'bad;touch'" in result.output
 
 
 # ---------------------------------------------------------------------------
