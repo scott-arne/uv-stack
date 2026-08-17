@@ -2373,7 +2373,7 @@ def test_refresh_spawn_failure_past_pending_write_prints_adoption_warning(
     The adoption warning contains `[tool.uv-stack].applied`. Rich would parse
     those brackets as a style tag and render the phrase as nothing, but
     `render_warnings` assembles a `rich.text.Text`, which does not parse markup.
-    So this test also happens to pin that mitigation on this path.
+    The assertion on that phrase below pins the mitigation on this path.
     """
     root = _seeded_root(tmp_path)
     # Build the project fixture inline: chemprop present in dependencies and in
@@ -2403,6 +2403,9 @@ def test_refresh_spawn_failure_past_pending_write_prints_adoption_warning(
     # The adoption warning reached stderr.
     assert "was applied by an interrupted run" in flat
     assert "chemprop" in flat
+    # Rendered through Text.assemble, so the brackets survive verbatim; a markup
+    # string would swallow the phrase and leave the sentence nonsensical.
+    assert "[tool.uv-stack].applied" in flat
     # The panel names the binary that could not be started, proving a rendered
     # ToolError rather than a traceback. ('uv' alone would match the panel's
     # own 'uv-stack error' title.)
