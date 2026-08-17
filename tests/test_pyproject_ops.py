@@ -456,7 +456,7 @@ def test_reserved_name_subtable_refused_stack_and_applied(tmp_path: Path):
         read_tracking(pyproject)
     assert "[tool.uv-stack.stack] shadows the 'stack' field" in str(excinfo.value)
 
-    # Likewise for applied; stack stays, since only the shadowed field may be omitted.
+    # Likewise for applied; the other scalar stays so the table is otherwise valid.
     pyproject.write_text(
         _BASE + "\n[tool.uv-stack]\nstack = []\n\n[tool.uv-stack.applied]\nx = 1\n"
     )

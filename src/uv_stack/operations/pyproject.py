@@ -24,12 +24,13 @@ _UV_STACK_PATH = ("tool", "uv-stack")
 
 #: Field names the owned table renders itself. A [tool.uv-stack.<field>]
 #: subtable shadows one of them. With the scalar also present tomllib refuses
-#: the file outright, so only the scalar-absent shape reaches us — and there
-#: the harm depends on the field: render_tracking always emits version, stack
-#: and applied, so the next write fails with an opaque "result would not
-#: parse", while python and pending are emitted only when set, so an unset one
-#: writes cleanly and goes on masking the subtable indefinitely. Refusing on
-#: read names the collision where it is fixable.
+#: the file outright, so only the scalar-absent shape reaches us, and there
+#: every field surfaces somewhere that does not name the subtable: version and
+#: applied are always rendered, so the next write dies on an opaque "result
+#: would not parse"; python and pending are rendered only when set, so an
+#: unset one writes cleanly while the subtable goes on masking the field; and
+#: stack, being required, fails validation on this very read with a "Field
+#: required". Refusing here names the collision itself.
 _RESERVED_KEYS = frozenset(ProjectTracking.model_fields)
 
 #: Shared newer-schema refusal text — read_tracking raises it centrally and
@@ -150,9 +151,9 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     Foreign subtables (``[tool.uv-stack.*]`` — dict values under our table) are
     filtered out before validation: tolerated on read exactly as
     :func:`write_tracking` preserves them on write. A subtable named after one
-    of our own fields is refused instead: depending on the field it either
-    breaks the next write with an opaque message or masks the field
-    indefinitely, and neither is diagnosable where it surfaces.
+    of our own fields is refused instead: left alone it surfaces somewhere that
+    does not name it — an opaque write refusal, a silently masked field, or a
+    "Field required" for the very key the subtable spells out.
 
     :param pyproject: Path to ``pyproject.toml``.
     :raises ConfigError: On TOML syntax errors or schema-invalid tables.
