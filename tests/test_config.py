@@ -178,3 +178,11 @@ def test_load_env_hint_leaves_a_plain_name_unquoted(tmp_path: Path):
     with pytest.raises(ConfigError) as excinfo:
         root.load_env("ghost")
     assert "stack create env ghost TOKENS..." in excinfo.value.hint
+
+
+def test_load_env_hint_prefixes_leading_dash_name(tmp_path: Path):
+    """A name starting with - must be prefixed with -- to remain positional."""
+    root = ConfigRoot(tmp_path / "python-envs")
+    with pytest.raises(ConfigError) as excinfo:
+        root.load_env("--recreate")
+    assert "stack create env -- --recreate TOKENS..." in excinfo.value.hint

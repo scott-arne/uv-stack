@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import shlex
-
 from uv_stack.commands import (
     micromamba_create,
     micromamba_python_path,
@@ -11,6 +9,7 @@ from uv_stack.commands import (
 )
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import EnvError
+from uv_stack.hints import render_positional_arg
 from uv_stack.runner import Runner
 
 
@@ -63,7 +62,7 @@ def ensure_env(
             return
         raise EnvError(
             f"Micromamba environment '{env_name}' does not exist.",
-            hint=f"Run 'stack create env {shlex.quote(env_name)}' to create it.",
+            hint=f"Run 'stack create env {render_positional_arg(env_name)}' to create it.",
         )
 
 

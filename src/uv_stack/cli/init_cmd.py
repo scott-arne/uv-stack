@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import shlex
-
 import rich_click as click
 
 from uv_stack.cli._render import echo, print_activation_hint, render_warnings
 from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
+from uv_stack.hints import render_positional_arg
 from uv_stack.operations.init import init_config_root
 from uv_stack.operations.scaffold import write_env_sources, write_starter_profile
 from uv_stack.operations.upgrade import UpgradeOptions
@@ -76,6 +75,6 @@ def init(config: ConfigRoot, yes: bool) -> None:
     if built_env:
         print_activation_hint(built_env)
     elif scaffolded_env:
-        echo(f"Build it with: stack create env {shlex.quote(scaffolded_env)}")
+        echo(f"Build it with: stack create env {render_positional_arg(scaffolded_env)}")
     echo(f"Config lives in {config.root}")
     echo("See 'stack status' and 'stack list env' for an overview.")

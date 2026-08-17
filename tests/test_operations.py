@@ -94,6 +94,13 @@ def test_ensure_env_shell_quotes_name_in_hint(config_tree: ConfigRoot):
     assert "stack create env 'bad;touch'" in str(exc_info.value.hint)
 
 
+def test_ensure_env_prefixes_leading_dash_name_in_hint(config_tree: ConfigRoot):
+    rec = RecordingRunner(responder=_missing_env_responder)
+    with pytest.raises(EnvError) as exc_info:
+        ensure_env(config_tree, rec, "--recreate", create=False, recreate=False)
+    assert "stack create env -- --recreate" in str(exc_info.value.hint)
+
+
 # ============================================================================
 # update operation tests
 # ============================================================================
@@ -245,6 +252,16 @@ def test_resolve_project_python_shell_quotes_env_name_in_hint(
     with pytest.raises(EnvError) as exc_info:
         resolve_project_python(config_tree, rec, "bad;touch")
     assert "stack create env 'bad;touch'" in str(exc_info.value.hint)
+
+
+def test_resolve_project_python_prefixes_leading_dash_name_in_hint(
+    config_tree: ConfigRoot, monkeypatch
+):
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    rec = RecordingRunner(responder=_missing_env_responder)
+    with pytest.raises(EnvError) as exc_info:
+        resolve_project_python(config_tree, rec, "--recreate")
+    assert "stack create env -- --recreate" in str(exc_info.value.hint)
 
 
 @pytest.mark.parametrize(

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 from pathlib import Path
 
 import rich_click as click
@@ -12,6 +11,7 @@ from uv_stack.cli._complete import complete_show_names
 from uv_stack.cli._render import echo, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
+from uv_stack.hints import render_positional_arg
 from uv_stack.operations.create import env_interpreter
 from uv_stack.operations.pyproject import read_tracking
 from uv_stack.render import render_requirements_in
@@ -77,7 +77,7 @@ def _show_env(config: ConfigRoot, name: str, as_json: bool) -> None:
     if interpreter:
         echo(f"Interpreter: {interpreter}")
     else:
-        echo(f"Interpreter: not created (run 'stack create env {shlex.quote(name)}')")
+        echo(f"Interpreter: not created (run 'stack create env {render_positional_arg(name)}')")
     echo("Stack:")
     for token in cfg.stack:
         echo(f"  {token}")

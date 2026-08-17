@@ -971,6 +971,25 @@ def test_show_env_shell_quotes_name_in_hint(tmp_path: Path, monkeypatch):
     assert "stack create env 'bad;touch'" in result.output
 
 
+def test_show_env_prefixes_leading_dash_name_in_hint(tmp_path: Path, monkeypatch):
+    from uv_stack.config import ConfigRoot
+
+    root = _env_root(tmp_path)
+    cfg = ConfigRoot(root)
+    env_dir = cfg.env_dir("--recreate")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    (env_dir / "stack.txt").write_text("ds\n")
+    monkeypatch.setattr(
+        "uv_stack.cli.show.SubprocessRunner",
+        lambda: _FakeProbeRunner(stdout="", returncode=1),
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "show", "env", "--", "--recreate"])
+    assert result.exit_code == 0
+    assert "stack create env -- --recreate" in result.output
+
+
 def test_status_table(tmp_path: Path, monkeypatch):
     root = _env_root(tmp_path)
     monkeypatch.setattr(
@@ -1335,6 +1354,8 @@ def test_init_decline_build_still_surfaces_warnings(tmp_path: Path, monkeypatch)
     assert "Build it with: stack create env main" in result.output
 
 
+# No leading-dash counterpart: init's name reaches write_env_sources, whose
+# _validate_name refuses a leading '-', so this site cannot render that case.
 def test_init_shell_quotes_env_name_in_build_hint(tmp_path: Path, monkeypatch):
     root = tmp_path / "python-envs"
     monkeypatch.setattr(

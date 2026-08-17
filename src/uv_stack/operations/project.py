@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +16,7 @@ from pathlib import Path
 from uv_stack.commands import micromamba_python_path, uv_add, uv_init, uv_remove, uv_sync
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError, NewerSchemaError
+from uv_stack.hints import render_positional_arg
 from uv_stack.models import ProjectTracking
 from uv_stack.operations.pyproject import (
     NEWER_SCHEMA_HINT,
@@ -360,8 +360,8 @@ def resolve_project_python(
         raise EnvError(
             f"Could not resolve micromamba environment '{spec}' to an interpreter.",
             hint=(
-                f"Ensure the env exists ('stack create env {shlex.quote(spec)}') and that "
-                "MAMBA_ROOT_PREFIX is set, or pass --python <version>."
+                f"Ensure the env exists ('stack create env {render_positional_arg(spec)}') "
+                "and that MAMBA_ROOT_PREFIX is set, or pass --python <version>."
             ),
         )
     return path

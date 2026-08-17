@@ -9,7 +9,6 @@ in the pure layer.
 from __future__ import annotations
 
 import os
-import shlex
 from pathlib import Path
 from typing import TypeVar
 
@@ -17,6 +16,7 @@ import yaml
 from pydantic import ValidationError
 
 from uv_stack.errors import ConfigError
+from uv_stack.hints import render_positional_arg
 from uv_stack.models import Bundle, EnvConfig, Profile
 from uv_stack.parse import first_clean_line, read_clean_lines
 
@@ -198,7 +198,7 @@ class ConfigRoot:
                     # The hint is a command the user is meant to paste; an env
                     # name is a directory name and may contain shell syntax.
                     "Create stack.txt in the env config directory, or pass "
-                    f"TOKENS: stack create env {shlex.quote(name)} TOKENS..."
+                    f"TOKENS: stack create env {render_positional_arg(name)} TOKENS..."
                 ),
             )
         return EnvConfig(
