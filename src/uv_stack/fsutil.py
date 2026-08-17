@@ -57,8 +57,8 @@ def atomic_write(path: Path, text: str) -> None:
     # real write. The whole path runs only when _FASTPATH_AVAILABLE: without
     # both open flags the open can block on a FIFO or land on a symlink's
     # target, and the recheck comes too late to prevent either. Declining the
-    # skip rewrites unchanged content — a new inode and a fresh mtime — which
-    # is the whole cost here.
+    # skip costs a rewrite of unchanged content — a new inode and a fresh
+    # mtime, which is exactly the phantom drift described above.
     if _FASTPATH_AVAILABLE:
         try:
             flags = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
