@@ -752,9 +752,10 @@ def test_init_project_no_track_rejects_malformed_toml_before_scaffolding(
     skipped, so the refusal lands at the remove_tracking call instead — but it
     must still happen before any uv command runs. This is the one path where
     the malformed-input error surfaces at remove_tracking rather than at the
-    validate_tracking_write pre-flight. Moving remove_tracking below uv init,
-    or wrapping it in try/except to restore the old behavior, would leave all
-    other tests green while a malformed pyproject.toml got scaffolded over.
+    validate_tracking_write pre-flight. Wrapping that call in try/except to
+    restore the old "returned False" behavior would leave every other test
+    green. Dropping _read_exact's parse guard also fails this test, which is
+    the only place that refusal is pinned from the operations layer.
     """
     monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
     project_dir = tmp_path / "proj_notrack_malformed"
