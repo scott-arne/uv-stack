@@ -291,13 +291,14 @@ def write_env_sources(
     interpreter.
 
     Adoption is deliberately narrow: it requires a regular file (not a
-    symlink, directory, FIFO, socket, or device node — reading any non-regular
-    file can block or fail, and none is something this code could have
-    written), readable as UTF-8 (a file we cannot prove is our own debris is
+    directory, FIFO, socket, or device node — reading any non-regular file can
+    block or fail, and none is something this code could have written; symlinks
+    are also refused where ``O_NOFOLLOW`` exists, degrading to following when
+    absent), readable as UTF-8 (a file we cannot prove is our own debris is
     refused like any other foreign file), whose content matches the requested
     version (anything else is a user edit, not our debris), and present before
     the preflight. Every other existing ``python.txt`` is refused — including
-    one that appears after the preflight, which the exclusive create rejects
+    one that appears after the preflight, which the no-clobber publish rejects
     even when its content matches. A retry with no ``--python`` skips the
     adoption preflight entirely, so it inherits the crashed run's orphan
     ``python.txt`` with no byte comparison. The descriptor-bound probe binds

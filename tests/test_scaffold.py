@@ -270,6 +270,34 @@ def test_write_env_sources_adopts_matching_orphan_python(config_tree: ConfigRoot
     assert config_tree.env_python_path("crashy").read_text() == "3.13\n"
 
 
+def test_write_env_sources_adopts_multiply_linked_orphan_python(
+    config_tree: ConfigRoot,
+):
+    """A crash between link and unlink leaves python.txt with st_nlink == 2.
+
+    The genuine crash artifact has two links: one at python.txt and one at the
+    .tmp name that was never unlinked. The adoption probe deliberately does
+    NOT check st_nlink == 1 for exactly this reason — copying that condition
+    from atomic_write would break the retry this task enables.
+    """
+    import os
+
+    python_path = config_tree.env_python_path("multi-link")
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("3.13\n")
+
+    # Simulate the .tmp leftover by creating a second hard link.
+    tmp_link = python_path.parent / "python.txt.tmp"
+    os.link(python_path, tmp_link)
+    assert python_path.stat().st_nlink == 2
+
+    written = write_env_sources(config_tree, "multi-link", ["ds"], python="3.13")
+
+    assert written == [config_tree.env_stack_path("multi-link")]
+    assert config_tree.env_stack_path("multi-link").read_text() == "ds\n"
+    assert python_path.read_text() == "3.13\n"
+
+
 def test_write_env_sources_refuses_orphan_python_with_other_content(
     config_tree: ConfigRoot,
 ):
@@ -352,6 +380,44 @@ def test_write_env_sources_refuses_directory_python_txt(config_tree: ConfigRoot)
         write_env_sources(config_tree, "directory", ["ds"], python="3.13")
     assert "already has a python.txt" in str(excinfo.value)
     assert not config_tree.env_stack_path("directory").exists()
+
+
+def test_write_env_sources_refuses_python_txt_appearing_after_preflight(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """The publish-site refusal matches the preflight message and hint.
+
+    A python.txt that appears between the preflight and the publish is refused
+    by the atomic_write_new call with the same message and hint the preflight
+    uses. The two sites must stay synchronized — this test pins both.
+    """
+    from uv_stack.fsutil import atomic_write_new
+
+    # Capture the preflight refusal hint first, without monkeypatching.
+    python_path = config_tree.env_python_path("preflight")
+    python_path.parent.mkdir(parents=True, exist_ok=True)
+    python_path.write_text("3.12\n")
+    with pytest.raises(ConfigError) as preflight_exc:
+        write_env_sources(config_tree, "preflight", ["ds"], python="3.13")
+    preflight_hint = preflight_exc.value.hint
+
+    # Now test the publish-site refusal — the preflight passes (no python.txt
+    # yet), but the publish raises FileExistsError.
+    def racing_write_new(path, text):
+        if path.name == "python.txt":
+            # A concurrent writer creates python.txt before we can.
+            raise FileExistsError("Python file exists")
+        return atomic_write_new(path, text)
+
+    monkeypatch.setattr("uv_stack.operations.scaffold.atomic_write_new", racing_write_new)
+
+    with pytest.raises(ConfigError) as publish_exc:
+        write_env_sources(config_tree, "race-case", ["ds"], python="3.13")
+
+    # The publish-site refusal must match the preflight refusal in both the
+    # message pattern and the hint — the hint is the part that drifted.
+    assert "already has a python.txt" in publish_exc.value.message
+    assert publish_exc.value.hint == preflight_hint
 
 
 def test_write_env_sources_reports_failed_python_withdrawal(
