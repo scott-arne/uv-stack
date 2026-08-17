@@ -22,6 +22,13 @@ from uv_stack.parse import ownership_name
 _HEADER = "[tool.uv-stack]"
 _UV_STACK_PATH = ("tool", "uv-stack")
 
+#: Field names the owned table renders itself. A [tool.uv-stack.<field>]
+#: subtable shadows one of them: tomllib rejects the file outright when the
+#: field is also present as a scalar, and when it is not, the NEXT write fails
+#: with an opaque "result would not parse" because render_tracking emits the
+#: scalar beside the subtable. Refusing on read names it where it is fixable.
+_RESERVED_KEYS = frozenset(ProjectTracking.model_fields)
+
 #: Shared newer-schema refusal text — read_tracking raises it centrally and
 #: the init/refresh guards reuse it (defense in depth).
 NEWER_SCHEMA_MESSAGE = "This project was tracked by a newer uv-stack (schema {version})."
@@ -137,9 +144,11 @@ def _subtable_keys(text: str) -> set[str]:
 def read_tracking(pyproject: Path) -> ProjectTracking | None:
     """Load the tracking table, or ``None`` when file or table is absent.
 
-    Foreign subtables (``[tool.uv-stack.*]`` — dict values under our table)
-    are filtered out before validation: tolerated on read exactly as
-    :func:`write_tracking` preserves them on write.
+    Foreign subtables (``[tool.uv-stack.*]`` — dict values under our table) are
+    filtered out before validation: tolerated on read exactly as
+    :func:`write_tracking` preserves them on write. A subtable named after one
+    of our own fields is refused instead — it cannot be preserved, and
+    tolerating it only defers the failure to the next write.
 
     :param pyproject: Path to ``pyproject.toml``.
     :raises ConfigError: On TOML syntax errors or schema-invalid tables.
@@ -164,8 +173,8 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     # PRE-loop: raise the newer-schema error immediately when 'version' is a
     # genuine scalar int > 1, preempting any shape errors the loop would hit
     # on future fields (inline tables, etc.). Acting only on strict scalar ints
-    # preserves foreign [tool.uv-stack.version] subtable tolerance (dict values
-    # fall through to the loop).
+    # keeps a dict-valued 'version' on the loop's path, where the reserved-name
+    # guard reports it against the subtable that caused it.
     raw_version = table.get("version")
     if isinstance(raw_version, int) and not isinstance(raw_version, bool):
         if raw_version > 1:
@@ -178,6 +187,15 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     for key, value in table.items():
         if isinstance(value, dict):
             if key in subtable_keys:
+                if key in _RESERVED_KEYS:
+                    raise ConfigError(
+                        f"Invalid [tool.uv-stack] table in {pyproject}: "
+                        f"[tool.uv-stack.{key}] shadows the '{key}' field.",
+                        hint=(
+                            f"Rename or remove the [tool.uv-stack.{key}] subtable; "
+                            "uv-stack owns that name."
+                        ),
+                    )
                 # Foreign subtable: tolerated and preserved on write.
                 continue
             else:
