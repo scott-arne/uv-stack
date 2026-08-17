@@ -423,9 +423,12 @@ def test_reserved_name_subtable_refused_on_read(tmp_path: Path, field: str):
     """A subtable named after one of our fields is refused where it is diagnosable.
 
     Supersedes the former `test_foreign_version_subtable_tolerated_on_read`.
-    Tolerating it only deferred the failure to the next write, which reports
-    `Refusing to write ...: result would not parse` and names neither the
-    subtable nor the field.
+    Tolerating it deferred the failure past the point of diagnosis, and where
+    it landed depended on the field. `version` is always rendered, so the next
+    write died on `Refusing to write ...: result would not parse`. `python` and
+    `pending` are rendered only when set, so with them unset — as they are in
+    this document — the write succeeded and the subtable went on masking the
+    field indefinitely. Neither outcome names the subtable.
     """
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
