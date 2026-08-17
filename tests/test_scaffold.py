@@ -233,6 +233,8 @@ def test_write_env_sources_withdrawal_spares_a_concurrent_replacement(
     config_tree: ConfigRoot,
 ):
     """The withdrawal is inode-matched, so a third party's python.txt survives."""
+    import os
+
     from uv_stack.fsutil import atomic_write_new
 
     python_path = config_tree.env_python_path("racy2")
@@ -241,8 +243,9 @@ def test_write_env_sources_withdrawal_spares_a_concurrent_replacement(
         if path.name == "python.txt":
             return atomic_write_new(path, text)
         # A third writer replaces python.txt before our stack.txt publish fails.
-        python_path.unlink()
-        python_path.write_text("3.99\n", encoding="utf-8")
+        replacement = python_path.parent / "replacement.txt"
+        replacement.write_text("3.99\n", encoding="utf-8")
+        os.replace(replacement, python_path)
         raise RuntimeError("Simulated stack.txt publish failure")
 
     with mock.patch(
@@ -385,7 +388,14 @@ def test_write_env_sources_refuses_fifo_python_txt(config_tree: ConfigRoot):
 
     The descriptor-bound adoption guard refuses a FIFO before any blocking
     read attempt. The SIGALRM timeout ensures a regression to path-based
-    reading fails loudly rather than hanging the suite.
+    reading fails loudly rather than hanging the suite. The timeout raises a
+    BaseException subclass rather than an ordinary Exception so it cannot be
+    swallowed by the adoption probe's own `except (OSError, UnicodeDecodeError)`
+    handler — a regression to path-based reading that lets control enter that
+    handler and stay there until the alarm fires would see the alarm exception
+    caught, the probe return false, and the call refuse with exactly the
+    ConfigError this test asserts. Only a BaseException propagates past that
+    handler.
     """
     import os
     import signal
@@ -394,8 +404,11 @@ def test_write_env_sources_refuses_fifo_python_txt(config_tree: ConfigRoot):
     python_path.parent.mkdir(parents=True, exist_ok=True)
     os.mkfifo(python_path)
 
+    class _Blocked(BaseException):
+        pass
+
     def timeout_handler(signum, frame):
-        raise TimeoutError("write_env_sources blocked on FIFO read")
+        raise _Blocked("write_env_sources blocked on FIFO read")
 
     old_handler = signal.signal(signal.SIGALRM, timeout_handler)
     try:

@@ -293,22 +293,26 @@ def write_env_sources(
     Adoption is deliberately narrow: it requires a regular file (not a
     directory, FIFO, socket, or device node — reading any non-regular file can
     block or fail, and none is something this code could have written; symlinks
-    are also refused where ``O_NOFOLLOW`` exists, degrading to following when
-    absent), readable as UTF-8 (a file we cannot prove is our own debris is
-    refused like any other foreign file), whose content matches the requested
-    version (anything else is a user edit, not our debris), and present before
-    the preflight. Every other existing ``python.txt`` is refused — including
-    one that appears after the preflight, which the no-clobber publish rejects
-    even when its content matches. A retry with no ``--python`` skips the
-    adoption preflight entirely, so it inherits the crashed run's orphan
-    ``python.txt`` with no byte comparison. The descriptor-bound probe binds
-    the read to a file opened with ``O_NOFOLLOW | O_NONBLOCK``, so no swap can
-    turn it into a blocking open or produce bytes other than those compared.
-    The identity recheck after the read verifies that ``python.txt`` still
-    names the inode whose bytes matched, narrowing the window from "any time
-    after the open" to "after the recheck"; a swap that lands after the
-    recheck, or between the recheck and the ``stack.txt`` publish, still
-    leaves a ``python.txt`` this call neither wrote nor verified.
+    are refused unconditionally, since ``os.lstat`` never follows them and the
+    recheck would therefore fail even where ``O_NOFOLLOW`` is absent — what
+    degrades without the flag is promptness, not the refusal), readable as
+    UTF-8 (a file we cannot prove is our own debris is refused like any other
+    foreign file), whose content matches the requested version (anything else
+    is a user edit, not our debris), present before the preflight, and still
+    the same inode after the read. Every other existing ``python.txt`` is
+    refused — including one that appears after the preflight, which the
+    no-clobber publish rejects even when its content matches. A retry with no
+    ``--python`` skips the adoption preflight entirely, so it inherits the
+    crashed run's orphan ``python.txt`` with no byte comparison. Reading
+    through the descriptor itself is what makes the bytes compared the ones
+    ``fstat`` approved; no swap can change that, with or without the flags.
+    ``O_NOFOLLOW | O_NONBLOCK`` (degrading to 0 where either is absent) keeps
+    the open itself from following a symlink or blocking on a FIFO — where
+    ``O_NONBLOCK`` is absent, the open can block. The recheck after the read
+    verifies that ``python.txt`` still names the inode whose bytes matched,
+    narrowing the window from "any time after the open" to "after the
+    recheck"; a swap after the recheck still leaves a ``python.txt`` this call
+    neither wrote nor verified.
 
     When the ``stack.txt`` publish fails for a reason other than ``ConfigError``
     (ENOSPC, EACCES, KeyboardInterrupt), the original exception propagates
