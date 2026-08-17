@@ -89,10 +89,14 @@ def _table_header_lines(text: str) -> dict[int, tuple[str, ...] | None]:
     the text parses only when the document is between statements at that point,
     which is exactly where a real header can start. Anchoring each re-parse at
     the last confirmed header rather than at the start of the file keeps the
-    scan linear in the file size — a chunk that begins at a confirmed top-level
-    header is itself a complete document, so it carries the same verdict. The
-    trailing newline is re-added because a chunk cut mid-CRLF would otherwise
-    end in a bare carriage return, which tomllib rejects.
+    ordinary case to one parse of the file in total — a chunk that begins at a
+    confirmed top-level header is itself a complete document, so it carries the
+    same verdict. Rejected candidates do not advance the anchor, so a long run
+    of header-shaped lines inside one multi-line string re-parses the same
+    growing chunk once per line; that case is quadratic in the run's length,
+    and real pyproject.toml files carry a handful of such lines. The trailing
+    newline is re-added because a chunk cut mid-CRLF would otherwise end in a
+    bare carriage return, which tomllib rejects.
 
     ``None`` marks a confirmed header line whose path we do not model —
     ``[[array.of.tables]]``, which must still terminate a span even though it
@@ -100,9 +104,10 @@ def _table_header_lines(text: str) -> dict[int, tuple[str, ...] | None]:
 
     :param text: A document that already parses as TOML. Every caller reaches
         here through :func:`read_tracking` or :func:`_read_exact`, both of
-        which parse first. The anchored scan needs that guarantee: a whole
-        document that parses is what rules out a duplicate key or table making
-        an individual chunk fail on its own and hiding a real header.
+        which parse first, or is the empty string :func:`_spliced_result`
+        substitutes for an absent file. The anchored scan needs that guarantee:
+        a whole document that parses is what rules out a duplicate key or table
+        making an individual chunk fail on its own and hiding a real header.
     :returns: Confirmed header line indexes mapped to their dotted-key paths.
     """
     lines = text.split("\n")

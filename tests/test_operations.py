@@ -742,6 +742,47 @@ def test_init_project_no_track_probe_failure_preserves_ledger(
     assert tracking.applied == []
 
 
+def test_init_project_no_track_rejects_malformed_toml_before_scaffolding(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """Malformed TOML must abort before any scaffolding, even with --no-track.
+
+    Adjudicated boundary. With --track, validate_tracking_write rejects the
+    malformed input before anything runs. With --no-track that pre-flight is
+    skipped, so the refusal lands at the remove_tracking call instead — but it
+    must still happen before any uv command runs. This is the one path where
+    the malformed-input error surfaces at remove_tracking rather than at the
+    validate_tracking_write pre-flight. Moving remove_tracking below uv init,
+    or wrapping it in try/except to restore the old behavior, would leave all
+    other tests green while a malformed pyproject.toml got scaffolded over.
+    """
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_notrack_malformed"
+    project_dir.mkdir()
+    # A lone \r mid-line: read_tracking uses universal newlines and accepts it,
+    # but _read_exact uses newline="" and rejects it. That asymmetry is why
+    # the failure lands at remove_tracking instead of an earlier pre-flight.
+    (project_dir / "pyproject.toml").write_bytes(
+        b'[project]\nname = "demo"\n\n[tool.uv-stack]\n'
+        b'version = 1\nstack = ["a"]\rapplied = []\n'
+    )
+    original_bytes = (project_dir / "pyproject.toml").read_bytes()
+
+    rec = RecordingRunner()
+    with pytest.raises(ConfigError):
+        init_project(
+            config_tree,
+            rec,
+            ["a"],
+            ProjectOptions(python="3.12", force=True, track=False),
+            cwd=project_dir,
+        )
+    # No uv command ran.
+    assert rec.commands == []
+    # The malformed file is unchanged.
+    assert (project_dir / "pyproject.toml").read_bytes() == original_bytes
+
+
 def test_init_project_force_does_not_adopt_user_dependencies(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):
