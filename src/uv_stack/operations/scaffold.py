@@ -326,15 +326,16 @@ def write_env_sources(
     recheck"; a swap after the recheck still leaves a ``python.txt`` this call
     neither wrote nor verified.
 
-    Withdrawal is skipped in exactly one case: the exception is not a
-    ``ConfigError`` and a ``stack.txt`` is present (for the reasons above).
-    Every other failure of the ``stack.txt`` publish withdraws the
-    ``python.txt`` this call published, if it published one — a
-    ``ConfigError``, or a non-``ConfigError`` (ENOSPC, EACCES,
-    KeyboardInterrupt) with no ``stack.txt`` on disk. Whichever branch runs,
-    the original exception propagates unchanged, with one substitution: a
-    ``ConfigError`` whose withdrawal was attempted and failed is re-raised as
-    the residual ``ConfigError`` naming the ``python.txt`` left behind. A
+    Withdrawal reaches only a ``python.txt`` this call published — never one
+    that was adopted, and never a run without ``--python`` — and for that file
+    it is skipped in exactly one case: the exception is not a ``ConfigError``
+    and a ``stack.txt`` is present (for the reasons above). Every other failure
+    of the ``stack.txt`` publish withdraws it: a ``ConfigError``, or a
+    non-``ConfigError`` (ENOSPC, EACCES, KeyboardInterrupt) with no
+    ``stack.txt`` on disk. Whichever branch runs, the original exception
+    propagates unchanged, with one substitution: a ``ConfigError`` whose
+    withdrawal was attempted and failed is re-raised as the residual
+    ``ConfigError`` naming the ``python.txt`` left behind. A
     failed withdrawal under any other exception is not reported that way —
     replacing it would hide the real failure, so it propagates as itself and
     the ``python.txt`` remains an orphan.
@@ -423,16 +424,12 @@ def write_env_sources(
             "Edit it directly, or omit TOKENS to rebuild the env.",
         )
     except BaseException as exc:
-        # Withdraw unless a stack.txt that may be this call's own is sitting there.
-        # ConfigError means _publish raised from FileExistsError: the stack.txt
-        # on disk belongs to somebody else, not us. A missing stack_path is not
-        # proof that ours never landed, only that no stack.txt is there to be
-        # left without its interpreter pin. When neither holds, skip the
-        # withdrawal and re-raise: python.txt then either sits beside a stack.txt
-        # that did land (correct), or, where that stack.txt is a third party's —
-        # created at any point before this check, not necessarily after the
-        # publish raised — remains as an adopter-residual orphan (strictly less
-        # harmful than the unretryable state).
+        # Withdraw unless a stack.txt that may be this call's own is sitting
+        # there. The two disjuncts are not equally strong: ConfigError comes
+        # only from _publish mapping FileExistsError, so it proves the
+        # no-clobber publish lost the name and the file is somebody else's,
+        # while the exists() check proves nothing about history — only that no
+        # stack.txt is there now to be left without its interpreter pin.
         should_withdraw = isinstance(exc, ConfigError) or not stack_path.exists()
         if published_python is not None and should_withdraw:
             if not _withdraw(python_path, published_python):

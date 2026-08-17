@@ -505,7 +505,13 @@ def test_write_env_sources_refuses_fifo_python_txt(config_tree: ConfigRoot):
 
 
 def test_write_env_sources_refuses_directory_python_txt(config_tree: ConfigRoot):
-    """A directory at python.txt is refused."""
+    """A directory at python.txt is refused.
+
+    This pins the outcome, not the mechanism: with the ``S_ISREG`` guard removed
+    the refusal still arrives, because reading a directory descriptor raises
+    ``IsADirectoryError`` into the probe's own ``except OSError``. Do not read
+    this as a regression test for that guard.
+    """
     python_path = config_tree.env_python_path("directory")
     python_path.mkdir(parents=True, exist_ok=True)
 
