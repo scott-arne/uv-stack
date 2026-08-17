@@ -461,3 +461,69 @@ def test_version_2_with_inline_table_gives_newer_schema_error(tmp_path: Path):
     assert "newer uv-stack (schema 2)" in str(excinfo.value)
     # Ensure we got the newer-schema error, not the inline-table error
     assert "inline table" not in str(excinfo.value)
+
+
+_TRAP = (
+    '[project]\nname = "demo"\nversion = "0.1.0"\n'
+    'dependencies = ["numpy>=2", "httpx"]\n'
+    'description = """\n[tool.uv-stack]\nstack = ["evil"]\n"""\n'
+)
+
+
+def test_header_inside_multiline_string_is_not_the_owned_table(tmp_path: Path):
+    """A header-shaped line inside a string is string content, not our table."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_TRAP + '\n[tool.uv-stack]\nversion = 1\nstack = []\napplied = []\n')
+
+    write_tracking(pyproject, _tracking())
+
+    text = pyproject.read_text()
+    assert 'stack = ["evil"]' in text  # the docstring survived byte-for-byte
+    assert read_tracking(pyproject) == _tracking()
+
+
+def test_owned_table_is_written_below_a_trap_docstring(tmp_path: Path):
+    """With no real table present, the decoy must not be mistaken for one."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_TRAP)
+
+    write_tracking(pyproject, _tracking())
+
+    text = pyproject.read_text()
+    assert 'stack = ["evil"]' in text
+    assert read_tracking(pyproject) == _tracking()
+
+
+def test_remove_tracking_ignores_a_trap_docstring(tmp_path: Path):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(_TRAP + '\n[tool.uv-stack]\nversion = 1\nstack = []\napplied = []\n')
+
+    assert remove_tracking(pyproject) is True
+
+    text = pyproject.read_text()
+    assert 'stack = ["evil"]' in text
+    assert "\n[tool.uv-stack]\nversion" not in text
+
+
+def test_subtable_keys_ignores_headers_inside_strings(tmp_path: Path):
+    from uv_stack.operations.pyproject import _subtable_keys
+
+    text = (
+        '[project]\nnotes = """\n[tool.uv-stack.decoy]\n"""\n'
+        "\n[tool.uv-stack]\nstack = []\napplied = []\n"
+        "\n[tool.uv-stack.extra]\ncustom = true\n"
+    )
+    assert _subtable_keys(text) == {"extra"}
+
+
+def test_find_span_survives_crlf(tmp_path: Path):
+    """CRLF content outside the owned span is preserved byte-for-byte."""
+    pyproject = tmp_path / "pyproject.toml"
+    body = _BASE + "\n[tool.uv-stack]\nversion = 1\nstack = []\napplied = []\n"
+    pyproject.write_bytes(body.replace("\n", "\r\n").encode("utf-8"))
+
+    write_tracking(pyproject, _tracking())
+
+    raw = pyproject.read_bytes()
+    assert b'name = "demo"\r\n' in raw
+    assert read_tracking(pyproject) == _tracking()

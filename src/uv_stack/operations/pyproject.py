@@ -57,14 +57,52 @@ def _header_path(line: str) -> tuple[str, ...] | None:
     return tuple(path)
 
 
+def _table_header_lines(text: str) -> dict[int, tuple[str, ...] | None]:
+    """Line indexes of genuine top-level table headers, mapped to their paths.
+
+    A header-shaped line inside a multi-line string is string content, not a
+    header. Everything preceding a real header is itself a complete TOML
+    document, so re-parsing the prefix confirms the line starts at top level:
+    the prefix parses only when the document is between statements there. The
+    trailing newline is re-added because a prefix cut mid-CRLF would otherwise
+    end in a bare carriage return, which tomllib rejects.
+
+    ``None`` marks a confirmed header line whose path we do not model —
+    ``[[array.of.tables]]``, which must still terminate a span even though it
+    can never BE the owned table.
+
+    Text that does not parse at all falls back to the line-shape scan, so a
+    malformed pyproject.toml keeps reaching the write path's result validation
+    (a loud refusal) instead of silently reporting "no table here".
+    """
+    lines = text.split("\n")
+    try:
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return {
+            index: _header_path(line)
+            for index, line in enumerate(lines)
+            if line.strip().startswith("[")
+        }
+    headers: dict[int, tuple[str, ...] | None] = {}
+    for index, line in enumerate(lines):
+        if not line.strip().startswith("["):
+            continue
+        try:
+            tomllib.loads("\n".join(lines[:index]) + "\n")
+        except tomllib.TOMLDecodeError:
+            continue
+        headers[index] = _header_path(line)
+    return headers
+
+
 def _subtable_keys(text: str) -> set[str]:
     """Collect first-segment keys of actual [tool.uv-stack.<key>...] headers."""
-    keys: set[str] = set()
-    for line in text.split("\n"):
-        path = _header_path(line)
-        if path is not None and len(path) > 2 and path[:2] == _UV_STACK_PATH:
-            keys.add(path[2])
-    return keys
+    return {
+        path[2]
+        for path in _table_header_lines(text).values()
+        if path is not None and len(path) > 2 and path[:2] == _UV_STACK_PATH
+    }
 
 
 def read_tracking(pyproject: Path) -> ProjectTracking | None:
@@ -170,33 +208,32 @@ def render_tracking(tracking: ProjectTracking) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _find_span(lines: list[str]) -> tuple[int, int] | None:
-    """Locate the owned table: header line to the next header-shaped line.
+def _find_span(text: str) -> tuple[int, int] | None:
+    """Locate the owned table: its header line to the next genuine header.
 
-    ANY line whose stripped text starts with ``[`` terminates the span —
-    ``[x]``, ``[[x]]``, and ``[tool.uv-stack.sub]`` alike; our table never
-    contains header-shaped lines, so anything that looks like one belongs
-    to someone else and must be preserved.
+    ANY confirmed header terminates the span — ``[x]``, ``[[x]]``, and
+    ``[tool.uv-stack.sub]`` alike; our table never contains header lines, so
+    anything that is one belongs to someone else and must be preserved.
+
+    :param text: The full file text.
+    :returns: ``(start, end)`` as 0-based line indexes into ``text.split("\\n")``,
+        ``end`` exclusive; ``None`` when the owned table is absent.
     """
-    start = None
-    for index, line in enumerate(lines):
-        if _header_path(line) == _UV_STACK_PATH:
-            start = index
-            break
+    headers = _table_header_lines(text)
+    start = min(
+        (index for index, path in headers.items() if path == _UV_STACK_PATH),
+        default=None,
+    )
     if start is None:
         return None
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        if lines[index].strip().startswith("["):
-            end = index
-            break
-    return start, end
+    later = [index for index in headers if index > start]
+    return start, min(later) if later else len(text.split("\n"))
 
 
 def _splice(text: str, table_text: str | None) -> str:
     """Replace, insert, or (with ``None``) delete the owned table's span."""
     lines = text.split("\n")
-    span = _find_span(lines)
+    span = _find_span(text)
     table_lines = table_text.rstrip("\n").split("\n") if table_text is not None else []
     if span is None:
         if table_text is None:
@@ -274,7 +311,7 @@ def remove_tracking(pyproject: Path) -> bool:
     if not pyproject.is_file():
         return False
     text = _read_exact(pyproject)
-    if _find_span(text.split("\n")) is None:
+    if _find_span(text) is None:
         return False
     new_text = _splice(text, None)
     _validate_result(new_text, pyproject)
