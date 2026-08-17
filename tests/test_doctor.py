@@ -364,7 +364,7 @@ def test_finish_move_src_vanished_after_link(tmp_path: Path):
 
 
 def test_finish_move_dst_replaced_after_link(tmp_path: Path):
-    """Destination replaced → link withdrawn, OSError for src change."""
+    """Both src and dst replaced → the stranger's dst survives, OSError raised."""
     import os
 
     from uv_stack.operations.doctor import _finish_move
@@ -585,7 +585,7 @@ def test_move_no_replace_refuses_when_the_destination_is_replaced(
 
     monkeypatch.setattr(doctor.os, "link", link_then_dst_replaced)
 
-    with pytest.raises(OSError, match="changed during move"):
+    with pytest.raises(OSError, match="dest.txt changed during move"):
         doctor._move_no_replace(src, dst)
 
     assert src.read_text() == "precious\n"

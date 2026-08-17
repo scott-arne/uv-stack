@@ -182,15 +182,26 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
     These residual windows stay open, none of them closable with the POSIX
     file API:
 
+    - A ``src`` replaced after the link. Withdrawing ``dst`` then removes what
+      may be the moved inode's last name, and its content is lost. The
+      withdrawal is deliberate — ``dst`` is a name only we created, and leaving
+      it would block every later move to that destination — but "rolled back"
+      here means the destination is left clean, not that the moved file
+      survives.
     - Any replacement of ``src`` that leaves ``dst`` naming an inode we cannot
-      attribute to our own link — a second replacement after the link, or a
-      pre-link replacement by a symlink, whose target ``os.link`` publishes.
-      That link is left in place: a leak, never a deletion.
+      attribute to our own link — a pre-link replacement followed by another
+      after the link, or a pre-link replacement by a symlink, whose target
+      ``os.link`` publishes. That link is left in place: a leak, never a
+      deletion.
     - ``dst`` swapped between an identity check and the unlink that check
       guards. On the rollback path that withdraws a stranger's file; on the
       success path it costs the moved inode its last name.
     - ``src`` swapped between its check and its unlink on the success path,
       which removes the replacement rather than the file we moved.
+    - ``src`` already gone when we look, with ``dst`` unlinked or replaced in
+      the same interval. No name of ours is left to remove, so the function
+      returns and the caller records the move as applied — a report that can
+      outrun the facts, though nothing here destroyed anything.
 
     :param src: The source path that was linked.
     :param dst: The destination path where the link was created.
@@ -199,9 +210,11 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
         records whatever ``dst`` names at that moment, which is our own link
         only if nobody intervened — the very thing this check must not assume.
     :raises OSError: If ``src`` or ``dst`` changed identity during the move.
-        Nothing of anyone else's is removed on those paths: the published link
-        is withdrawn only when it can be shown to be ours, and ``src`` is left
-        holding the moved inode.
+        Nothing of anyone else's is removed on any of them: the published link
+        is withdrawn only while it can be attributed to our own ``os.link``.
+        On the two ``dst`` paths ``src`` is left holding the moved inode; on
+        the rollback path it is not, and the withdrawal there can take that
+        inode's last name — see the first residual window above.
     """
     moved_ident = (moved_stat.st_dev, moved_stat.st_ino)
     try:
@@ -257,10 +270,12 @@ def _move_no_replace(src: Path, dst: Path) -> None:
 
     :raises FileExistsError: If ``dst`` already exists.
     :raises OSError: If ``src`` is not a regular file, or ``src`` or ``dst``
-        changed identity during the move. ``src`` is not removed on those
+        changed identity during the move. ``src`` is left in place on those
         paths, and any link published at ``dst`` is withdrawn only under
-        :func:`_finish_move`'s identity rules — see its docstring for the
-        residual windows those rules narrow but cannot close.
+        :func:`_finish_move`'s identity rules — which, when ``src`` was
+        replaced after the link, can withdraw the moved inode's last name. See
+        that function's docstring for the residual windows those rules narrow
+        but cannot close.
     """
     moved = src.lstat()
     if not stat.S_ISREG(moved.st_mode):
