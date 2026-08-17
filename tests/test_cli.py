@@ -1491,15 +1491,22 @@ def test_create_project_no_track_flag(tmp_path: Path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _tracked_project_dir(tmp_path: Path) -> Path:
+def _tracked_project_dir(tmp_path: Path, *, extra_entry: str | None = None) -> Path:
+    """Write a project tracked against the seeded ``standard`` bundle.
+
+    :param extra_entry: A requirement placed in both ``[project.dependencies]``
+        and the applied ledger, for scenarios needing an entry the stack does
+        not provide (which refresh then reports as a dropped entry).
+    """
+    extra = f', "{extra_entry}"' if extra_entry else ""
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
     (project_dir / "pyproject.toml").write_text(
         '[project]\nname = "x"\nversion = "0.1.0"\n'
-        'dependencies = ["numpy", "pandas", "rdkit", "rich"]\n'
+        f'dependencies = ["numpy", "pandas", "rdkit", "rich"{extra}]\n'
         "\n[tool.uv-stack]\nversion = 1\n"
         'stack = ["standard"]\n'
-        'applied = ["numpy", "pandas", "rdkit", "rich"]\n'
+        f'applied = ["numpy", "pandas", "rdkit", "rich"{extra}]\n'
     )
     return project_dir
 
@@ -1533,6 +1540,32 @@ def test_refresh_happy_path_prints_summary(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     assert "Removed (1): rdkit" in result.output
     assert "chemprop" in result.output  # listed under Added
+    assert "Project refreshed." in result.output
+
+
+def test_refresh_success_prints_the_skipped_removal_notice(tmp_path: Path, monkeypatch):
+    """A successful refresh reports entries it will not remove itself.
+
+    Asserted against ``SKIPPED_REMOVAL_NOTICE`` rather than a copy of its text,
+    so this pins the wording parity with the failure path (which attaches the
+    same constant to the raised error) and not merely that some line was
+    printed.
+    """
+    from uv_stack.operations.project import SKIPPED_REMOVAL_NOTICE
+
+    root = _seeded_root(tmp_path)
+    # A direct reference the stack no longer provides: dropped from the ledger,
+    # never auto-removed from [project.dependencies].
+    direct_ref = "torch @ https://example.invalid/torch-2.0-py3-none-any.whl"
+    project_dir = _tracked_project_dir(tmp_path, extra_entry=direct_ref)
+    monkeypatch.chdir(project_dir)
+    monkeypatch.setattr(
+        "uv_stack.cli.refresh_cmd.SubprocessRunner", lambda: _FakeProbeRunner()
+    )
+    result = CliRunner().invoke(cli, ["--root", str(root), "refresh", "--python", "3.12"])
+    assert result.exit_code == 0
+    # echo() is plain click output, so the line is unwrapped on stdout.
+    assert SKIPPED_REMOVAL_NOTICE.format(entry=direct_ref) in result.output
     assert "Project refreshed." in result.output
 
 
@@ -1577,6 +1610,40 @@ def test_refresh_flags_pass_through_to_refresh_project(tmp_path: Path, monkeypat
     assert result2.exit_code == 0
     opts2: RefreshOptions = captured["options"]
     assert opts2.dry_run is True
+
+
+def test_refresh_renders_advisories_from_a_failed_run(tmp_path: Path, monkeypatch):
+    """A failed refresh must still print the advisories the run computed.
+
+    They reach the CLI only on the raised error — the RefreshResult that
+    normally carries them is never produced — so the command renders
+    error.resolution_warnings and re-raises into the group-level handler that
+    prints the panel.
+    """
+    from uv_stack.errors import ToolError
+
+    root = _seeded_root(tmp_path)
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    # Keep the advisory off the fold so it can be matched whole.
+    monkeypatch.setenv("COLUMNS", "1000")
+    notice = (
+        "Not auto-removed (edit pyproject.toml manually): "
+        "torch @ https://example.invalid/torch-2.0-py3-none-any.whl"
+    )
+
+    def fail_refresh(config, runner, options, *, cwd):
+        error = ToolError("uv sync failed", command=["uv", "sync"], returncode=1)
+        error.resolution_warnings = [notice]
+        raise error
+
+    monkeypatch.setattr("uv_stack.cli.refresh_cmd.refresh_project", fail_refresh)
+    result = CliRunner().invoke(cli, ["--root", str(root), "refresh"])
+    assert result.exit_code == 1
+    flat = _flat_panel(result)
+    assert f"warning: {notice}" in flat
+    # Re-raised, so the group-level handler still rendered the error panel.
+    assert "uv sync failed" in flat
 
 
 def test_command_panels_separate_create_env_and_project_work():

@@ -8,7 +8,12 @@ import rich_click as click
 
 from uv_stack.cli._render import console, echo, render_warnings
 from uv_stack.config import ConfigRoot
-from uv_stack.operations.project import RefreshOptions, refresh_project
+from uv_stack.errors import UvStackError
+from uv_stack.operations.project import (
+    SKIPPED_REMOVAL_NOTICE,
+    RefreshOptions,
+    refresh_project,
+)
 from uv_stack.runner import SubprocessRunner
 
 
@@ -42,7 +47,14 @@ def refresh(
     profiles and bundles.
     """
     options = RefreshOptions(python=python, strict=strict, no_sync=no_sync, dry_run=dry_run)
-    result = refresh_project(config, SubprocessRunner(), options, cwd=Path.cwd())
+    try:
+        result = refresh_project(config, SubprocessRunner(), options, cwd=Path.cwd())
+    except UvStackError as error:
+        # A failure suppresses the result these would have arrived on, so print
+        # them off the error; re-raise so the group-level handler still renders
+        # the error panel.
+        render_warnings(error.resolution_warnings)
+        raise
     render_warnings(result.warnings)
     if result.removed:
         echo(f"Removed ({len(result.removed)}): {', '.join(result.removed)}")
@@ -51,7 +63,7 @@ def refresh(
     if not result.removed and not result.added:
         echo("Dependencies already match the current stack.")
     for entry in result.skipped_removals:
-        echo(f"Not auto-removed (edit pyproject.toml manually): {entry}")
+        echo(SKIPPED_REMOVAL_NOTICE.format(entry=entry))
     if dry_run:
         echo("Planned commands:")
         for command in result.planned:

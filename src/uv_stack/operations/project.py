@@ -15,7 +15,7 @@ from pathlib import Path
 
 from uv_stack.commands import micromamba_python_path, uv_add, uv_init, uv_remove, uv_sync
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError, EnvError, NewerSchemaError
+from uv_stack.errors import ConfigError, EnvError, NewerSchemaError, UvStackError
 from uv_stack.hints import render_positional_arg
 from uv_stack.models import ProjectTracking
 from uv_stack.operations.pyproject import (
@@ -37,6 +37,13 @@ PROJECT_PYTHON_ENV = "UV_STACK_PROJECT_PYTHON"
 
 #: Fallback interpreter spec when nothing else is configured.
 DEFAULT_PROJECT_PYTHON = "3.12"
+
+#: Wording for a ledger entry uv-stack drops but will not remove from
+#: [project.dependencies] itself. The success path prints it from the CLI and
+#: the failure path attaches it to the raised error, so the user reads the same
+#: sentence either way; operations may not import from ``cli``, so the single
+#: source lives here and ``cli/refresh_cmd.py`` imports it.
+SKIPPED_REMOVAL_NOTICE = "Not auto-removed (edit pyproject.toml manually): {entry}"
 
 _VERSION_RE = re.compile(r"^\d+(\.\d+)*$")
 _IMPLEMENTATION_RE = re.compile(r"^(cpython|pypy|graalpy)[-@]")
@@ -440,12 +447,19 @@ def refresh_project(
     warning, which gives the user a full refresh cycle to intervene before
     anything is removed.
 
-    Accepted loss: entries reported under ``skipped_removals`` are dropped from
-    ``applied`` by the final ledger write, which lands BEFORE ``uv sync``. A
-    sync failure therefore suppresses the RefreshResult carrying the notice AND
-    erases the entry the retry would recompute it from, so the user is never
-    told. Holding the ledger open across sync to preserve the notice is the
-    failure mode ``pending`` exists to prevent; the notice loses.
+    Advisories on failure: ``warnings`` and the ``skipped_removals`` notice are
+    computed before any mutation but would otherwise reach the caller only on
+    the ``RefreshResult``, which a raised error never produces, so both are
+    attached as ``resolution_warnings`` to any :class:`UvStackError` raised from
+    :func:`resolve_project_python` onward, for the CLI to print. What a later
+    run recomputes turns on the write the failure got past: resolver and
+    ownership warnings survive every write; adoption warnings die at the pending
+    write, which folds ``adopted`` into ``applied``; an unverifiable-name
+    warning dies there too if the stack has dropped the entry, and otherwise at
+    the final ledger write, which clears ``pending``; the notice dies at that
+    same write, which lands BEFORE ``uv sync`` already stripped of the skipped
+    entries. The earliest boundary is inside the guarded region, so the handler
+    cannot tell which are still recoverable; it attaches the whole set.
 
     :param config: Configuration root.
     :param runner: Command runner.
@@ -568,25 +582,35 @@ def refresh_project(
             planned=planned,
         )
 
-    python = resolve_project_python(config, runner, spec_flag)
-    write_tracking(pyproject, pending_tracking)
-    fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-refresh.", suffix=".txt")
-    tmp_req = Path(tmp_name)
     try:
-        # Render only stack-owned dependencies to the temp requirements file.
-        with open(fd, "w", encoding="utf-8") as handle:
-            for entry in stack_adds:
-                handle.write(entry)
-                handle.write("\n")
-        if names:
-            runner.run(_with_cwd(uv_remove(names), cwd))
-        runner.run(_with_cwd(uv_add(tmp_req), cwd))
-        write_tracking(pyproject, final_tracking)
-        if not options.no_sync:
-            runner.run(_with_cwd(uv_sync(python), cwd))
-    finally:
-        if tmp_req.exists():
-            tmp_req.unlink()
+        python = resolve_project_python(config, runner, spec_flag)
+        write_tracking(pyproject, pending_tracking)
+        fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-refresh.", suffix=".txt")
+        tmp_req = Path(tmp_name)
+        try:
+            # Render only stack-owned dependencies to the temp requirements file.
+            with open(fd, "w", encoding="utf-8") as handle:
+                for entry in stack_adds:
+                    handle.write(entry)
+                    handle.write("\n")
+            if names:
+                runner.run(_with_cwd(uv_remove(names), cwd))
+            runner.run(_with_cwd(uv_add(tmp_req), cwd))
+            write_tracking(pyproject, final_tracking)
+            if not options.no_sync:
+                runner.run(_with_cwd(uv_sync(python), cwd))
+        finally:
+            if tmp_req.exists():
+                tmp_req.unlink()
+    except UvStackError as error:
+        # These advisories ride on the RefreshResult, which a raised error never
+        # produces. Hand them to the error instead: past the pending write some
+        # are gone for good, and this handler cannot tell which (see docstring).
+        error.resolution_warnings = [
+            *warnings,
+            *(SKIPPED_REMOVAL_NOTICE.format(entry=entry) for entry in skipped),
+        ]
+        raise
     return RefreshResult(
         warnings=warnings,
         added=added,

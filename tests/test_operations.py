@@ -942,13 +942,25 @@ def test_init_project_force_schema_version_guard_track_false(
 # ============================================================================
 
 
-def _tracked_project(tmp_path, tracking_text: str) -> Path:
+def _tracked_project(
+    tmp_path, tracking_text: str, *, extra_dependencies: tuple[str, ...] = ()
+) -> Path:
+    """Write a tracked project whose deps cover the stack plus a user-owned one.
+
+    :param tracking_text: The ``[tool.uv-stack]`` table to append verbatim.
+    :param extra_dependencies: Further ``[project.dependencies]`` entries, for
+        scenarios whose tracking table claims something the default list does
+        not carry (a direct reference, say).
+    """
     project_dir = tmp_path / "proj_refresh"
     project_dir.mkdir()
+    deps = ", ".join(
+        f'"{dep}"'
+        for dep in ("numpy", "pandas", "rdkit", "rich", "user-extra", *extra_dependencies)
+    )
     (project_dir / "pyproject.toml").write_text(
         '[project]\nname = "x"\nversion = "0.1.0"\n'
-        'dependencies = ["numpy", "pandas", "rdkit", "rich", "user-extra"]\n'
-        + tracking_text
+        f"dependencies = [{deps}]\n" + tracking_text
     )
     return project_dir
 
@@ -2264,23 +2276,32 @@ _TRACKING_WITH_DIRECT_REF = (
 )
 
 
-def test_refresh_skipped_removal_notice_is_lost_when_sync_fails(
+def test_refresh_attaches_advisories_to_a_failed_sync(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):
-    """Documents an accepted loss, not a bug — see refresh_project's docstring.
+    """A sync failure must still deliver the advisories the run computed.
 
-    The final ledger is written BEFORE uv sync and drops skipped entries from
-    `applied`. A sync failure therefore both suppresses the RefreshResult that
-    carries the notice and erases the entry the retry would recompute it from.
-    Fixing it would mean holding the ledger open across a fallible step, which
-    is the failure mode `pending` exists to prevent.
+    The skipped-removals notice and the ownership warnings would otherwise only
+    reach the caller on the RefreshResult, which a raised error never produces,
+    so refresh_project attaches both to the error. Nothing else reports the
+    notice once the run has got this far: the final ledger lands before uv sync
+    already stripped of the skipped entry, so the retry re-resolves against a
+    ledger that no longer mentions it. The ownership warning is not in that
+    position — the retry does recompute it — so the two are pinned differently
+    below.
     """
     from uv_stack.errors import ToolError
     from uv_stack.operations.project import RefreshOptions, refresh_project
     from uv_stack.operations.pyproject import read_tracking
 
     monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
-    project_dir = _tracked_project(tmp_path, _TRACKING_WITH_DIRECT_REF)
+    # Put a user-owned dependency in the stack so the failing run drops an
+    # ownership warning too, not just the skipped-removals notice.
+    config_tree.profile_path("utils").write_text("includes:\n  - rich\n  - user-extra\n")
+    # A real project carrying this ledger has the direct reference installed.
+    project_dir = _tracked_project(
+        tmp_path, _TRACKING_WITH_DIRECT_REF, extra_dependencies=(_DIRECT_REF,)
+    )
 
     # The entry IS classified as skipped — the dry run proves the notice exists.
     planned = refresh_project(
@@ -2297,7 +2318,7 @@ def test_refresh_skipped_removal_notice_is_lost_when_sync_fails(
             raise ToolError("sync failed", command=cmd.args, returncode=1)
         return result
 
-    with pytest.raises(ToolError):
+    with pytest.raises(ToolError) as excinfo:
         refresh_project(
             config_tree,
             RecordingRunner(responder=_fail_sync),
@@ -2305,11 +2326,19 @@ def test_refresh_skipped_removal_notice_is_lost_when_sync_fails(
             cwd=project_dir,
         )
 
+    # Both advisory kinds survive on the error, the notice worded as the
+    # success path would have printed it.
+    attached = excinfo.value.resolution_warnings
+    assert f"Not auto-removed (edit pyproject.toml manually): {_DIRECT_REF}" in attached
+    assert any("user-extra" in w and "user-owned" in w for w in attached)
+
     # The final ledger landed before sync, without the skipped entry.
     after = read_tracking(project_dir / "pyproject.toml")
     assert after is not None and _DIRECT_REF not in after.applied
 
-    # The retry has nothing left to report it from.
+    # The retry cannot recompute the notice — hence attaching it at the
+    # failure. The ownership warning it can recompute, so only the notice is
+    # unrecoverable here.
     retried = refresh_project(
         config_tree,
         RecordingRunner(responder=_mutating_responder(project_dir)),
@@ -2317,3 +2346,4 @@ def test_refresh_skipped_removal_notice_is_lost_when_sync_fails(
         cwd=project_dir,
     )
     assert _DIRECT_REF not in retried.skipped_removals
+    assert any("user-extra" in w and "user-owned" in w for w in retried.warnings)
