@@ -310,9 +310,9 @@ def test_finish_move_normal_case(tmp_path: Path):
     src = tmp_path / "source.txt"
     dst = tmp_path / "dest.txt"
     src.write_text("content\n")
+    moved_stat = src.lstat()
     os.link(src, dst)
-    linked_stat = dst.lstat()
-    _finish_move(src, dst, linked_stat)
+    _finish_move(src, dst, moved_stat)
     assert not src.exists()
     assert dst.read_text() == "content\n"
 
@@ -328,13 +328,13 @@ def test_finish_move_src_replaced_after_link(tmp_path: Path):
     src = tmp_path / "source.txt"
     dst = tmp_path / "dest.txt"
     src.write_text("original\n")
+    moved_stat = src.lstat()
     os.link(src, dst)
-    linked_stat = dst.lstat()
     # Replace source with new inode.
     src.unlink()
     src.write_text("replacement\n")
     try:
-        _finish_move(src, dst, linked_stat)
+        _finish_move(src, dst, moved_stat)
         raise AssertionError("Expected OSError")
     except OSError as e:
         assert "changed during move" in str(e)
@@ -354,11 +354,11 @@ def test_finish_move_src_vanished_after_link(tmp_path: Path):
     src = tmp_path / "source.txt"
     dst = tmp_path / "dest.txt"
     src.write_text("content\n")
+    moved_stat = src.lstat()
     os.link(src, dst)
-    linked_stat = dst.lstat()
     src.unlink()
     # Should not raise.
-    _finish_move(src, dst, linked_stat)
+    _finish_move(src, dst, moved_stat)
     assert not src.exists()
     assert dst.read_text() == "content\n"
 
@@ -372,15 +372,15 @@ def test_finish_move_dst_replaced_after_link(tmp_path: Path):
     src = tmp_path / "source.txt"
     dst = tmp_path / "dest.txt"
     src.write_text("original\n")
+    moved_stat = src.lstat()
     os.link(src, dst)
-    linked_stat = dst.lstat()
     # Replace both src and dst.
     src.unlink()
     src.write_text("new-src\n")
     dst.unlink()
     dst.write_text("new-dst\n")
     try:
-        _finish_move(src, dst, linked_stat)
+        _finish_move(src, dst, moved_stat)
         raise AssertionError("Expected OSError")
     except OSError as e:
         assert "changed during move" in str(e)
@@ -407,12 +407,12 @@ def test_move_no_replace_identity_check_in_rename(config_tree: ConfigRoot, monke
 
     original_finish = doctor._finish_move
 
-    def race_finish(src: Path, dst: Path, linked_stat: os.stat_result) -> None:
+    def race_finish(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
         # Replace source with new inode before calling original.
         if src == profiles_txt:
             src.unlink()
             src.write_text("@replaced\n")
-        original_finish(src, dst, linked_stat)
+        original_finish(src, dst, moved_stat)
 
     monkeypatch.setattr(doctor, "_finish_move", race_finish)
 
@@ -462,11 +462,13 @@ def test_repair_conversion_source_replaced_between_read_and_move(
 
 
 def test_move_no_replace_never_adopts_a_foreign_destination(tmp_path: Path, monkeypatch):
-    """A dst published by someone else during the link window is not ours to delete.
+    """A dst holding a stranger's file is not ours to delete.
 
-    os.link is replaced with the race itself: a foreign writer creates dst and
-    replaces src. Taking the identity from dst afterwards would match the
-    foreign file, and the rollback would unlink it.
+    The os.link stub models the reachable end state — our link published and
+    then replaced by a foreign writer, with src replaced too — rather than a
+    literal call sequence, since a real os.link would have raised
+    FileExistsError against an existing dst. The inode relationships driving
+    the code path are the same either way.
     """
     from uv_stack.operations import doctor
 
@@ -535,3 +537,56 @@ def test_move_no_replace_refuses_a_symlinked_source(tmp_path: Path):
     assert src.is_symlink()
     assert target.read_text() == "target\n"
     assert not dst.exists()
+
+
+def test_move_no_replace_refuses_when_the_destination_vanishes(
+    tmp_path: Path, monkeypatch
+):
+    """A dst removed after we publish it must not cost src its last name.
+
+    src still names the moved inode, so checking src alone succeeds; only
+    re-checking dst keeps the unlink from destroying the file outright while
+    reporting the move as done.
+    """
+    from uv_stack.operations import doctor
+
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("precious\n")
+    real_link = doctor.os.link
+
+    def link_then_dst_vanishes(a, b, **kwargs):
+        real_link(a, b, **kwargs)
+        dst.unlink()
+
+    monkeypatch.setattr(doctor.os, "link", link_then_dst_vanishes)
+
+    with pytest.raises(OSError, match="vanished during move"):
+        doctor._move_no_replace(src, dst)
+
+    assert src.read_text() == "precious\n"
+
+
+def test_move_no_replace_refuses_when_the_destination_is_replaced(
+    tmp_path: Path, monkeypatch
+):
+    """A dst swapped for a stranger's file after we link leaves both intact."""
+    from uv_stack.operations import doctor
+
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("precious\n")
+    real_link = doctor.os.link
+
+    def link_then_dst_replaced(a, b, **kwargs):
+        real_link(a, b, **kwargs)
+        dst.unlink()
+        dst.write_text("foreign\n")
+
+    monkeypatch.setattr(doctor.os, "link", link_then_dst_replaced)
+
+    with pytest.raises(OSError, match="changed during move"):
+        doctor._move_no_replace(src, dst)
+
+    assert src.read_text() == "precious\n"
+    assert dst.read_text() == "foreign\n"
