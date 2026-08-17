@@ -53,6 +53,23 @@ def test_env_interpreter_path_and_none(config_tree: ConfigRoot):
     assert env_interpreter(config_tree, missing, "main") is None
 
 
+def test_env_interpreter_spawn_failure_returns_none(config_tree: ConfigRoot):
+    from uv_stack.errors import ToolError
+    from uv_stack.operations.create import env_interpreter
+
+    def _spawn_failure_responder(cmd: Command) -> CommandResult:
+        if "run" in cmd.args:
+            raise ToolError(
+                "Could not run micromamba: No such file or directory.",
+                command=["micromamba"],
+                returncode=127,
+            )
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=_spawn_failure_responder)
+    assert env_interpreter(config_tree, rec, "main") is None
+
+
 def test_ensure_env_missing_without_create_raises(config_tree: ConfigRoot):
     rec = RecordingRunner(responder=_missing_env_responder)
     with pytest.raises(EnvError):

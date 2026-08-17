@@ -2359,3 +2359,52 @@ def test_create_bundle_surfaces_cycle_warnings_from_existing_bundles(tmp_path: P
     )
     assert result.exit_code == 0
     assert "Bundle cycle skipped: loop -> loop" in result.output
+
+
+def test_refresh_spawn_failure_past_pending_write_prints_adoption_warning(
+    tmp_path: Path, monkeypatch
+):
+    """An adopting refresh that fails after the pending write must still print the warning.
+
+    Regression for a spawn failure that escaped UvStackError handlers at the CLI
+    edge, discarding every advisory computed before the crash — including the
+    adoption warning the user is promised will appear before any remove.
+
+    The adoption warning contains `[tool.uv-stack].applied`. Rich would parse
+    those brackets as a style tag and render the phrase as nothing, but
+    `render_warnings` assembles a `rich.text.Text`, which does not parse markup.
+    So this test also happens to pin that mitigation on this path.
+    """
+    root = _seeded_root(tmp_path)
+    # Build the project fixture inline: chemprop present in dependencies and in
+    # pending, absent from applied and from the stack, so _adopt_orphans adopts it.
+    project_dir = tmp_path / "proj_spawn_fail"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pandas", "rdkit", "rich", "chemprop"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["standard"]\n'
+        'applied = ["numpy", "pandas", "rdkit", "rich"]\n'
+        'pending = ["numpy", "pandas", "rdkit", "rich", "chemprop"]\n'
+    )
+    monkeypatch.chdir(project_dir)
+    # --python 3.12 so resolve_project_python short-circuits on the passthrough
+    # version and never spawns micromamba.
+    # PATH=/nowhere so the uv spawn genuinely fails (not a fake runner).
+    nowhere = tmp_path / "nowhere"
+    monkeypatch.setenv("PATH", str(nowhere))
+    monkeypatch.setenv("COLUMNS", "1000")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "refresh", "--python", "3.12"],
+        env={"PATH": str(nowhere), "COLUMNS": "1000"}
+    )
+    assert result.exit_code == 1
+    flat = _flat_panel(result)
+    # The adoption warning reached stderr.
+    assert "was applied by an interrupted run" in flat
+    assert "chemprop" in flat
+    # The error panel names the uv binary, proving a rendered ToolError rather
+    # than a traceback.
+    assert "Could not run" in flat
+    assert "uv" in flat

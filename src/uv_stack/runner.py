@@ -57,6 +57,29 @@ def _tail(text: str) -> str:
     return "\n".join(lines[-_STDERR_TAIL_LINES:])
 
 
+def _spawn_error(command: Command, error: OSError) -> ToolError:
+    """Wrap a failure to *start* ``command`` as a user-facing error.
+
+    ``subprocess`` raises a bare :class:`OSError` when the binary is missing or
+    not executable. No process runs, so there is no exit code — and left
+    unwrapped it escapes every ``except UvStackError`` at the CLI edge, printing
+    a traceback for an ordinary "uv is not installed" condition and discarding
+    any advisories a handler would have attached on the way out.
+
+    :param command: The command that could not be started.
+    :param error: The spawn failure.
+    :returns: A :class:`ToolError` carrying 127, the shell's conventional status
+        for a command that could not be executed.
+    """
+    exe = command.args[0] if command.args else "<empty command>"
+    return ToolError(
+        f"Could not run {exe}: {error.strerror or error}.",
+        command=command.args,
+        returncode=127,
+        hint=f"Is {exe} installed and on PATH?",
+    )
+
+
 @dataclass
 class Command:
     """A single external command to run.
@@ -92,6 +115,9 @@ class Runner(Protocol):
         :param command: The command to run.
         :param capture: Capture and return stdout instead of streaming it.
         :param check: Raise :class:`ToolError` on a non-zero exit.
+        :raises ToolError: If the command cannot be started at all — a missing
+            or non-executable binary. ``check`` does not suppress this: no
+            process ran, so there is no exit code to hand back.
         """
         ...
 
@@ -103,12 +129,15 @@ class SubprocessRunner:
         self, command: Command, *, capture: bool = False, check: bool = True
     ) -> CommandResult:
         if capture:
-            completed = subprocess.run(
-                command.args,
-                cwd=command.cwd,
-                capture_output=True,
-                text=True,
-            )
+            try:
+                completed = subprocess.run(
+                    command.args,
+                    cwd=command.cwd,
+                    capture_output=True,
+                    text=True,
+                )
+            except OSError as error:
+                raise _spawn_error(command, error) from error
             returncode = completed.returncode
             stdout = completed.stdout or ""
             detail = _tail(completed.stderr or "")
@@ -123,12 +152,15 @@ class SubprocessRunner:
             # No TTY (CI, redirected output) or non-Unix: stream stderr through a
             # bounded buffer so a failing command can still report *why* it
             # failed (e.g. uv's "requires X, but Y is installed").
-            proc = subprocess.Popen(
-                command.args,
-                cwd=command.cwd,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
+            try:
+                proc = subprocess.Popen(
+                    command.args,
+                    cwd=command.cwd,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+            except OSError as error:
+                raise _spawn_error(command, error) from error
             assert proc.stderr is not None
             tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
             for line in proc.stderr:
@@ -173,7 +205,14 @@ class SubprocessRunner:
         except OSError:  # pragma: no cover - depends on the host terminal
             pass
 
-        proc = subprocess.Popen(command.args, cwd=command.cwd, stderr=slave)
+        try:
+            proc = subprocess.Popen(command.args, cwd=command.cwd, stderr=slave)
+        except OSError as error:
+            # Both ends are still open on this path; the normal flow closes the
+            # slave below and the master in the read loop's finally.
+            os.close(slave)
+            os.close(master)
+            raise _spawn_error(command, error) from error
         os.close(slave)
         # Retain only the trailing bytes: progress-bar redraws are voluminous but
         # transient, and uv prints the actionable diagnostic last.

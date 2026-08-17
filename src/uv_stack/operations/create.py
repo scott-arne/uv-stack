@@ -8,7 +8,7 @@ from uv_stack.commands import (
     micromamba_remove,
 )
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import EnvError
+from uv_stack.errors import EnvError, ToolError
 from uv_stack.hints import render_positional_arg
 from uv_stack.runner import Runner
 
@@ -83,7 +83,9 @@ def env_interpreter(
         result = runner.run(
             micromamba_python_path(env_name), capture=True, check=False
         )
-    except OSError:
+    except ToolError:
+        # Spawn failures reach callers as ToolError, and check=False means an
+        # exit-code ToolError cannot arrive here.
         return None
     path = result.stdout.strip()
     if result.returncode != 0 or not path:

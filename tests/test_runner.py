@@ -94,3 +94,42 @@ def test_subprocess_runner_check_false_does_not_raise():
         check=False,
     )
     assert result.returncode == 3
+
+
+def test_subprocess_runner_missing_binary_raises_tool_error():
+    runner = SubprocessRunner()
+    with pytest.raises(ToolError) as exc:
+        runner.run(
+            Command(["uv-stack-no-such-binary-xyz", "arg"]), capture=True
+        )
+    assert exc.value.returncode == 127
+    assert "uv-stack-no-such-binary-xyz" in str(exc.value)
+
+
+def test_subprocess_runner_missing_binary_check_false_still_raises():
+    # check=False suppresses exit-code failures, but a spawn failure has no
+    # exit code — the binary never ran — so it still raises.
+    runner = SubprocessRunner()
+    with pytest.raises(ToolError) as exc:
+        runner.run(
+            Command(["uv-stack-no-such-binary-xyz"]), capture=True, check=False
+        )
+    assert exc.value.returncode == 127
+
+
+def test_subprocess_runner_streaming_missing_binary_raises():
+    # The streaming path (capture=False) is branch-agnostic on purpose: under
+    # pytest stderr is not a tty so it takes the Popen branch, but with -s on a
+    # terminal it takes the pty branch. Both must raise.
+    runner = SubprocessRunner()
+    with pytest.raises(ToolError) as exc:
+        runner.run(Command(["uv-stack-no-such-binary-xyz"]), capture=False)
+    assert exc.value.returncode == 127
+
+
+@pytest.mark.skipif(not _PTY_AVAILABLE, reason="pty unavailable on this platform")
+def test_run_with_pty_missing_binary_raises():
+    runner = SubprocessRunner()
+    with pytest.raises(ToolError) as exc:
+        runner._run_with_pty(Command(["uv-stack-no-such-binary-xyz"]))
+    assert exc.value.returncode == 127
