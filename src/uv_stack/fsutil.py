@@ -16,6 +16,19 @@ _LINK_FALLBACK_ERRNOS = frozenset(
     | ({getattr(errno, "ENOTSUP")} if hasattr(errno, "ENOTSUP") else set())  # noqa: B009
 )
 
+#: True only where BOTH guard flags exist. Opening a target whose type is not
+#: known in advance needs both: O_NOFOLLOW so a symlinked target is never
+#: opened, O_NONBLOCK so a FIFO target never blocks the open. Where either is
+#: absent getattr yields 0, which does not weaken the guard — it removes it,
+#: and the identity recheck each caller runs afterwards comes too late to make
+#: up for it: it can reject what the open returned, not stop the open from
+#: following a symlink or hanging on a FIFO. Callers therefore skip the guarded
+#: open entirely rather than take it unguarded; what each gives up by skipping
+#: differs, and is stated at the call site.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_FASTPATH_AVAILABLE = bool(_O_NOFOLLOW) and bool(_O_NONBLOCK)
+
 
 def atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically.
@@ -25,7 +38,9 @@ def atomic_write(path: Path, text: str) -> None:
     a partially-written target.
 
     Identical content is not rewritten (the mtime is preserved) when the target is
-    a regular, un-hardlinked file and the exact bytes match.
+    a regular, un-hardlinked file and the exact bytes match. That check needs
+    ``O_NOFOLLOW`` and ``O_NONBLOCK`` to be safe, so on a platform missing either
+    constant it is not made and every write is a real write.
 
     Writes are byte-exact: UTF-8, no newline translation.
 
@@ -39,27 +54,31 @@ def atomic_write(path: Path, text: str) -> None:
     # be replaced — and the comparison is on exact bytes so newline
     # differences count as changes. The skip is bound to one file descriptor
     # and path identity is rechecked so a concurrent swap falls through to a
-    # real write.
-    try:
-        # O_NOFOLLOW/O_NONBLOCK degrade to 0 when absent; identity recheck covers symlinks.
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        fd = os.open(path, flags)
+    # real write. The whole path runs only when _FASTPATH_AVAILABLE: without
+    # both open flags the open can block on a FIFO or land on a symlink's
+    # target, and the recheck comes too late to prevent either. Declining the
+    # skip rewrites unchanged content — a new inode and a fresh mtime — which
+    # is the whole cost here.
+    if _FASTPATH_AVAILABLE:
         try:
-            st_fd = os.fstat(fd)
-            if stat.S_ISREG(st_fd.st_mode) and st_fd.st_nlink == 1:
-                with os.fdopen(fd, "rb") as handle:
-                    fd = -1  # ownership transferred to file object
-                    current_bytes = handle.read()
-                if current_bytes == text.encode("utf-8"):
-                    # Re-verify path identity: same inode as the fd we read from?
-                    st_path = os.lstat(path)
-                    if (st_fd.st_dev, st_fd.st_ino) == (st_path.st_dev, st_path.st_ino):
-                        return  # identical content, verified no swap
-        finally:
-            if fd != -1:
-                os.close(fd)
-    except OSError:
-        pass
+            flags = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
+            fd = os.open(path, flags)
+            try:
+                st_fd = os.fstat(fd)
+                if stat.S_ISREG(st_fd.st_mode) and st_fd.st_nlink == 1:
+                    with os.fdopen(fd, "rb") as handle:
+                        fd = -1  # ownership transferred to file object
+                        current_bytes = handle.read()
+                    if current_bytes == text.encode("utf-8"):
+                        # Re-verify path identity: same inode as the fd we read from?
+                        st_path = os.lstat(path)
+                        if (st_fd.st_dev, st_fd.st_ino) == (st_path.st_dev, st_path.st_ino):
+                            return  # identical content, verified no swap
+            finally:
+                if fd != -1:
+                    os.close(fd)
+        except OSError:
+            pass
 
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")

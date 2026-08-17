@@ -172,29 +172,32 @@ def test_atomic_write_detects_concurrent_swap(tmp_path: Path, monkeypatch: pytes
     assert target.read_text() == "same\n"
 
 
-def test_atomic_write_degrades_without_nofollow_nonblock(
+def test_atomic_write_forgoes_the_fast_path_without_its_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Verify graceful degradation when O_NOFOLLOW/O_NONBLOCK are unavailable."""
-    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
-    monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
+    """Without both open flags the identical-rewrite skip is not taken.
+
+    Supersedes test_atomic_write_degrades_without_nofollow_nonblock, which
+    deleted os.O_NOFOLLOW/os.O_NONBLOCK and asserted the skip still happened —
+    the behavior this replaces. Deleting the attributes also no longer reaches
+    the decision: availability is now computed once at import time from the
+    real os module, so an os-level patch during the test would leave the test
+    green while exercising nothing. Patch the module constant instead.
+
+    The assertion is on the inode, not the mtime: the slow path publishes via
+    os.replace, so a changed inode is exact evidence that it ran, whereas mtime
+    resolution is a property of the filesystem under tmp_path.
+    """
+    from uv_stack import fsutil
+
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
 
     target = tmp_path / "file.txt"
-    atomic_write(target, "content\n")
+    fsutil.atomic_write(target, "content\n")
+    before = target.stat().st_ino
+    fsutil.atomic_write(target, "content\n")
+    assert target.stat().st_ino != before
     assert target.read_text() == "content\n"
-
-    old_mtime = target.stat().st_mtime
-    os.utime(target, (old_mtime - 100, old_mtime - 100))
-    stamped = target.stat().st_mtime
-
-    # Identical content → mtime preserved
-    atomic_write(target, "content\n")
-    assert target.stat().st_mtime == stamped
-
-    # Changed content → rewritten
-    atomic_write(target, "changed\n")
-    assert target.stat().st_mtime > stamped
-    assert target.read_text() == "changed\n"
 
 
 def test_atomic_write_new_falls_back_without_hardlinks(tmp_path, monkeypatch):
