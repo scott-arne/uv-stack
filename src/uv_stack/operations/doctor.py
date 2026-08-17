@@ -174,35 +174,34 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
     Every unlink here names a path, not an inode — POSIX offers no
     unlink-by-inode — so each is preceded by an identity check that narrows,
     but cannot close, the window in which a concurrent writer could swap the
-    file underneath us. Both paths check before they act. The success path in
-    particular re-checks ``dst``: ``src`` still naming the moved inode does
-    not prove our link survived, and unlinking ``src`` on that assumption
-    would drop the inode's last name while reporting the move as done.
+    file underneath us. Hence the success path's re-check of ``dst``: ``src``
+    still naming the moved inode says nothing about what became of our link.
 
-    These residual windows stay open — narrowed where the POSIX file API
-    allows, and in two cases left open by choice:
+    The rollback withdraws ``dst`` on one condition and no other: ``dst``
+    names an inode in ``ours``, the one we measured or the one ``src`` names
+    now. Anything else is left alone — that link leaks, and only there is a
+    deletion ruled out. Withdrawing at all is a choice, not a POSIX limit:
+    ``dst`` is a name only we created, and leaving it would block every later
+    move. But the condition tests state, not provenance, so "rolled back"
+    promises a clean destination and nothing more:
 
-    - A ``src`` replaced after the link, with ``dst`` still naming the moved
-      inode — or, when ``src`` was replaced before the link and ``os.link``
-      published the replacement, with the writer's own ``src`` name for that
-      replacement removed between our ``src`` check and the withdrawal. Either
-      way the withdrawal takes what may be the last name of the inode ``dst``
-      holds, and its content is lost: the moved file in the first case, the
-      writer's replacement in the second. This one is a choice, not a POSIX
-      limit: the withdrawal is deliberate — ``dst`` is a name only we created,
-      and leaving it would block every later move to that destination — but
-      "rolled back" here means the destination is left clean, not that the file
-      whose name we withdrew survives.
-    - Any replacement of ``src`` that leaves ``dst`` naming an inode we cannot
-      attribute to our own link — a pre-link replacement followed by another
-      after the link, or a pre-link replacement by a symlink, whose target
-      ``os.link`` publishes. That link is left in place: a leak, never a
-      deletion.
-    - ``dst`` swapped between an identity check and the unlink that check
-      guards. On the rollback path that withdraws a stranger's file; on the
-      success path it costs the moved inode its last name.
-    - ``src`` swapped between its check and its unlink on the success path,
-      which removes the replacement rather than the file we moved.
+    - Neither the name at ``dst`` nor the inode it holds is provably ours. A
+      pre-link replacement of ``src`` is what ``os.link`` publishes; a symlink
+      planted after the caller's ``lstat`` publishes its target, which may be
+      the moved inode; a stranger may re-link either inode there before we
+      look; ``dst`` swapped after our ``lstat`` is withdrawn regardless.
+      Illustrations, not an enumeration: any history ending in an ``ours``
+      inode at ``dst`` takes the withdrawal.
+    - Nor is another name for that inode guaranteed. The withdrawal may take
+      its last, and the content is then gone: the file we moved, or a writer's
+      file we could not tell from it.
+
+    The paths that report success leave windows of their own:
+
+    - ``dst`` swapped between its identity check and the unlink of ``src``
+      that check guards, costing the moved inode what may be its last name.
+    - ``src`` swapped between its check and its unlink, which removes the
+      replacement rather than the file we moved.
     - ``src`` already gone when we look — or gone by the time we unlink — with
       ``dst`` unlinked or replaced in the same interval. No name of ours is
       left to remove, so the function returns and the caller records the move
@@ -221,9 +220,8 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
         records whatever ``dst`` names at that moment, which is our own link
         only if nobody intervened — the very thing this check must not assume.
     :raises OSError: If ``src`` or ``dst`` changed identity during the move.
-        Every guarantee holds only as of the identity check that precedes the
-        action it guards, never after it; the residual windows above say what
-        each one costs past that point.
+        Every guarantee holds only as of the check that precedes the action it
+        guards; the windows above say what each one costs past that point.
     """
     moved_ident = (moved_stat.st_dev, moved_stat.st_ino)
     try:
@@ -274,12 +272,16 @@ def _move_no_replace(src: Path, dst: Path) -> None:
     source only while it still names the moved inode *and* ``dst`` still holds
     our link — a source replaced mid-move is left untouched, a destination
     taken by someone else aborts the move with the source intact, and the link
-    published at ``dst`` is withdrawn when :func:`_finish_move` can still prove
-    that link is ours.
+    published at ``dst`` is withdrawn only while ``dst`` names an inode
+    :func:`os.link` could have published for us. That test cannot prove the
+    link is ours; see :func:`_finish_move` for what it lets through.
 
-    A symlinked source is refused: :func:`os.link` follows symlinks by default,
-    so it would publish a link to the TARGET while ``src.lstat()`` describes the
-    symlink, and the unlink would silently relocate a third party's file.
+    A symlink at ``src`` is refused, but only one that is there when we look:
+    :func:`os.link` follows symlinks by default, so it would publish a link to
+    the TARGET while ``src.lstat()`` describes the symlink. One planted after
+    that check slips past and its target is published anyway, which silently
+    relocates a third party's file — or destroys it, when the target is the
+    moved inode and the rollback withdraws that inode's last name.
 
     :raises FileNotFoundError: If ``src`` does not exist when the move begins,
         or is removed in the window between that check and the link.
