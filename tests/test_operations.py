@@ -2362,3 +2362,45 @@ def test_refresh_attaches_advisories_to_a_failed_sync(
     )
     assert _DIRECT_REF not in retried.skipped_removals
     assert any("user-extra" in w and "user-owned" in w for w in retried.warnings)
+
+
+_TRACKING_DIRECT_REF_AND_PLAIN = (
+    "\n[tool.uv-stack]\nversion = 1\n"
+    'stack = ["standard"]\n'
+    f'applied = ["numpy", "pandas", "rdkit", "rich", "scipy", "{_DIRECT_REF}"]\n'
+)
+
+
+def test_refresh_never_passes_a_direct_reference_to_uv_remove(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A dropped `name @ url` is reported, never removed by its bare name.
+
+    `scipy` is dropped alongside it so a real `uv remove` runs: the point is not
+    that no removal happens, but that the removal which does happen carries the
+    plain name and not the direct reference's owned head.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    # Both dropped entries must be real dependencies: removal candidates are
+    # filtered against [project.dependencies], so a ledger-only entry would
+    # produce no uv remove at all and leave the assertions below vacuous.
+    project_dir = _tracked_project(
+        tmp_path,
+        _TRACKING_DIRECT_REF_AND_PLAIN,
+        extra_dependencies=("scipy", _DIRECT_REF),
+    )
+
+    rec = RecordingRunner(responder=_mutating_responder(project_dir))
+    result = refresh_project(
+        config_tree, rec, RefreshOptions(python="3.12"), cwd=project_dir
+    )
+
+    assert _DIRECT_REF in result.skipped_removals
+    assert _DIRECT_REF not in result.removed
+    assert "scipy" in result.removed
+    remove_args = [cmd.args for cmd in rec.commands if "remove" in cmd.args]
+    assert remove_args, "no uv remove ran, so the assertion below proves nothing"
+    assert not any("torch" in args for args in remove_args)
+    assert any("scipy" in args for args in remove_args)

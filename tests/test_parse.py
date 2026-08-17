@@ -80,3 +80,17 @@ def test_ownership_name(entry, expected):
     from uv_stack.parse import ownership_name
 
     assert ownership_name(entry) == expected
+
+
+def test_direct_reference_is_owned_but_not_removable():
+    """Ownership and removability are deliberately asymmetric for `name @ url`.
+
+    ownership_name resolves the head so the ledger can claim the entry;
+    requirement_name refuses the whole string so it can never be handed to
+    `uv remove` as a bare name, which would remove whatever else claims it.
+    """
+    from uv_stack.parse import ownership_name, requirement_name
+
+    entry = "torch @ https://example.invalid/torch-2.0-py3-none-any.whl"
+    assert ownership_name(entry) == "torch"
+    assert requirement_name(entry) is None
