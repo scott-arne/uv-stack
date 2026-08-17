@@ -247,14 +247,14 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
         # answers a failed move by withdrawing the YAML it just published.
         src.unlink(missing_ok=True)
         return
-    # src no longer names the inode we measured — either it was replaced after
-    # we linked that inode, or it was replaced BEFORE the link and os.link
-    # published the replacement. Withdraw dst in both cases, but only while it
-    # names an inode os.link could have published for us: the one we set out to
-    # move, or the one src names now. Any other inode at dst is a concurrent
-    # writer's file, and a bare "differs from moved_stat" test cannot tell that
-    # case apart from ours — so it must not be the condition. See the docstring
-    # for the windows this narrows but cannot close.
+    # src no longer names the inode we measured, so something replaced it —
+    # after we linked, or before, in which case os.link published whatever it
+    # found there. Withdraw dst either way, but only while it names an inode
+    # os.link could have published for us: the one we set out to move, or the
+    # one src names now. Any other inode at dst is a concurrent writer's file,
+    # and a bare "differs from moved_stat" test cannot tell that case apart
+    # from ours — so it must not be the condition. See the docstring for what
+    # this condition does not establish, and the windows it cannot close.
     ours = {moved_ident, (current.st_dev, current.st_ino)}
     try:
         dst_now = dst.lstat()
