@@ -9,6 +9,7 @@ envs missing their source files.
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -167,27 +168,56 @@ class RepairAction:
     reason: str | None = None
 
 
-def _finish_move(src: Path, dst: Path, linked_stat: os.stat_result) -> None:
+def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
     """Complete a move after linking, ensuring source identity before unlinking.
+
+    Every unlink here names a path, not an inode — POSIX offers no
+    unlink-by-inode — so each is preceded by an identity check that narrows,
+    but cannot close, the window in which a concurrent writer could swap the
+    file underneath us. Three such windows are known and accepted: a second
+    replacement of ``src`` after the link leaves the published ``dst`` in
+    place because it can no longer be proven ours; ``dst`` could be replaced
+    between the check and the withdrawal below; and on the success path
+    ``src`` could be replaced between its check and its unlink. The last is
+    pre-existing and is the reason the guarantee below is scoped to the
+    rollback rather than stated for the function as a whole.
 
     :param src: The source path that was linked.
     :param dst: The destination path where the link was created.
-    :param linked_stat: The stat result of ``dst`` immediately after linking.
-    :raises OSError: If ``src`` changed identity during the move (the move is
-        rolled back and nothing is deleted).
+    :param moved_stat: The stat of the inode being moved, taken from ``src``
+        BEFORE the link. It must not come from ``dst`` after the link: that
+        records whatever ``dst`` names at that moment, which is our own link
+        only if nobody intervened — the very thing this check must not assume.
+    :raises OSError: If ``src`` changed identity during the move. On that path
+        the published link is withdrawn only when it can be shown to be ours,
+        so a concurrent writer's file at ``dst`` is left alone.
     """
     try:
         current = src.lstat()
     except FileNotFoundError:
         return  # src vanished after linking; dst preserves the inode
-    if (current.st_dev, current.st_ino) == (linked_stat.st_dev, linked_stat.st_ino):
+    if (current.st_dev, current.st_ino) == (moved_stat.st_dev, moved_stat.st_ino):
         src.unlink()
         return
-    # src was replaced after we linked the old inode: withdraw our link
-    # (identity-checked) and report without deleting anyone's file.
+    # src no longer names the inode we measured — either it was replaced after
+    # we linked that inode, or it was replaced BEFORE the link and os.link
+    # published the replacement. Withdraw dst in both cases, but only while it
+    # names an inode os.link could have published for us: the one we set out to
+    # move, or the one src names now. Any other inode at dst is a concurrent
+    # writer's file, and a bare "differs from moved_stat" test cannot tell that
+    # case apart from ours — so it must not be the condition.
+    #
+    # Two windows stay open here, both unclosable with the POSIX file API: a
+    # second replacement of src makes our link unprovable and it is left in
+    # place, and dst could be replaced between the lstat and the unlink below.
+    # The success path above carries the third; see the docstring.
+    ours = {
+        (moved_stat.st_dev, moved_stat.st_ino),
+        (current.st_dev, current.st_ino),
+    }
     try:
         dst_now = dst.lstat()
-        if (dst_now.st_dev, dst_now.st_ino) == (linked_stat.st_dev, linked_stat.st_ino):
+        if (dst_now.st_dev, dst_now.st_ino) in ours:
             dst.unlink(missing_ok=True)
     except FileNotFoundError:
         pass
@@ -198,16 +228,26 @@ def _move_no_replace(src: Path, dst: Path) -> None:
     """Move ``src`` to ``dst``, refusing to replace ``dst`` or a changed ``src``.
 
     Publishes via :func:`os.link` (fails if ``dst`` exists), then removes the
-    source only while it still names the linked inode — a source replaced
-    mid-move is left untouched and the published link is withdrawn.
+    source only while it still names the moved inode — a source replaced
+    mid-move is left untouched, and the link published at ``dst`` is withdrawn
+    when :func:`_finish_move` can still prove that link is ours.
+
+    A symlinked source is refused: :func:`os.link` follows symlinks by default,
+    so it would publish a link to the TARGET while ``src.lstat()`` describes the
+    symlink, and the unlink would silently relocate a third party's file.
 
     :raises FileExistsError: If ``dst`` already exists.
-    :raises OSError: If ``src`` changed identity during the move (the move is
-        rolled back and nothing is deleted).
+    :raises OSError: If ``src`` is not a regular file, or changed identity
+        during the move. ``src`` is not removed on that path, and any link
+        published at ``dst`` is withdrawn only under :func:`_finish_move`'s
+        identity rules — see its docstring for the residual windows those
+        rules narrow but cannot close.
     """
+    moved = src.lstat()
+    if not stat.S_ISREG(moved.st_mode):
+        raise OSError(f"{src} is not a regular file; nothing moved")
     os.link(src, dst)
-    linked = dst.lstat()
-    _finish_move(src, dst, linked)
+    _finish_move(src, dst, moved)
 
 
 def _fix_mkdir(config: ConfigRoot, finding: Finding) -> RepairAction:

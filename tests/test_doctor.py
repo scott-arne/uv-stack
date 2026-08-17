@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from uv_stack.config import ConfigRoot
 from uv_stack.operations.doctor import diagnose, repair
 
@@ -457,3 +459,79 @@ def test_repair_conversion_source_replaced_between_read_and_move(
     # Replacement intact.
     assert legacy.exists()
     assert legacy.read_text() == "pandas\n"
+
+
+def test_move_no_replace_never_adopts_a_foreign_destination(tmp_path: Path, monkeypatch):
+    """A dst published by someone else during the link window is not ours to delete.
+
+    os.link is replaced with the race itself: a foreign writer creates dst and
+    replaces src. Taking the identity from dst afterwards would match the
+    foreign file, and the rollback would unlink it.
+    """
+    from uv_stack.operations import doctor
+
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("original\n")
+
+    def racing_link(_a, _b, **_kwargs):
+        dst.write_text("foreign\n")
+        src.unlink()
+        src.write_text("replacement\n")
+
+    monkeypatch.setattr(doctor.os, "link", racing_link)
+
+    with pytest.raises(OSError, match="changed during move"):
+        doctor._move_no_replace(src, dst)
+
+    assert dst.read_text() == "foreign\n"
+    assert src.read_text() == "replacement\n"
+
+
+def test_move_no_replace_withdraws_a_link_to_a_replaced_source(
+    tmp_path: Path, monkeypatch
+):
+    """A source replaced BEFORE the link leaves no stray link at dst.
+
+    The link then publishes the replacement inode, which is neither the inode
+    we measured nor a stranger's file — it is ours, and leaving it behind
+    would block every later move to this destination.
+    """
+    from uv_stack.operations import doctor
+
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("original\n")
+    real_link = doctor.os.link
+
+    def racing_link(a, b, **kwargs):
+        # A concurrent writer replaces src between our lstat and the link.
+        src.unlink()
+        src.write_text("replacement\n")
+        real_link(a, b, **kwargs)
+
+    monkeypatch.setattr(doctor.os, "link", racing_link)
+
+    with pytest.raises(OSError, match="changed during move"):
+        doctor._move_no_replace(src, dst)
+
+    assert not dst.exists()
+    assert src.read_text() == "replacement\n"
+
+
+def test_move_no_replace_refuses_a_symlinked_source(tmp_path: Path):
+    """os.link would publish the TARGET, and the unlink would relocate it."""
+    from uv_stack.operations.doctor import _move_no_replace
+
+    target = tmp_path / "target.txt"
+    target.write_text("target\n")
+    src = tmp_path / "link.txt"
+    src.symlink_to(target)
+    dst = tmp_path / "dest.txt"
+
+    with pytest.raises(OSError, match="not a regular file"):
+        _move_no_replace(src, dst)
+
+    assert src.is_symlink()
+    assert target.read_text() == "target\n"
+    assert not dst.exists()
