@@ -427,10 +427,10 @@ def test_write_env_sources_refuses_orphan_python_without_the_open_flags(
     The preflight opens a file whose type is not known in advance, which needs
     O_NOFOLLOW and O_NONBLOCK; where either constant is absent it is skipped
     entirely rather than run unguarded. The orphan here is byte-for-byte the one
-    test_write_env_sources_adopts_matching_orphan_python adopts, so the only
-    difference is the gate: it must now meet the "already has a python.txt"
-    refusal — the behavior that predates adoption — with the file left untouched
-    for the user to clear.
+    test_write_env_sources_adopts_matching_orphan_python adopts, so the gate is
+    what decides between the two outcomes: with it off, the file must meet the
+    "already has a python.txt" refusal — the behavior that predates adoption —
+    and be left untouched for the user to clear.
     """
     from uv_stack.operations import scaffold
 
