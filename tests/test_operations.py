@@ -706,6 +706,16 @@ def test_init_project_no_track_removes_table_even_when_add_fails(
 def test_init_project_no_track_probe_failure_preserves_ledger(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):
+    """A failed interpreter probe leaves the ledger alone, even with --no-track.
+
+    Adjudicated, not incidental. --no-track removes the table as part of
+    creating the project; the probe runs before anything is created, so a bad
+    --python value aborts the command with the directory untouched. The
+    opposite pin is test_init_project_no_track_removes_table_even_when_add_fails:
+    once the run has begun mutating the project, no tool failure may leave the
+    table behind. Moving the removal above the probe would break this test --
+    that is the intended signal, not a stale assertion.
+    """
     from uv_stack.operations.pyproject import read_tracking
 
     monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)

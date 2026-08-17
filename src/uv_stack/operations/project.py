@@ -266,9 +266,15 @@ def init_project(
     # runs, and so both uv init and uv sync receive the same value.
     python = resolve_project_python(config, runner, options.python)
 
-    # Opting out is authoritative: clear stale metadata BEFORE any fallible
-    # uv step — but AFTER the interpreter probe, so a bad env spec cannot
-    # destroy the ledger.
+    # Opting out is authoritative once the run commits to touching this
+    # project, so this precedes every fallible uv step — but it deliberately
+    # FOLLOWS the interpreter probe. A probe failure means nothing has been
+    # created or mutated yet and the command aborts whole; a typo in --python
+    # must not destroy tracking metadata as a side effect. The boundary is
+    # pinned from both sides: test_init_project_no_track_probe_failure_
+    # preserves_ledger (probe fails -> table survives) and
+    # test_init_project_no_track_removes_table_even_when_add_fails (the run
+    # started -> table goes).
     if not options.track:
         remove_tracking(pyproject)
 
