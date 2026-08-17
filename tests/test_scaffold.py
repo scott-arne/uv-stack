@@ -293,6 +293,48 @@ def test_write_env_sources_does_not_withdraw_python_when_stack_lands_before_inte
     assert config_tree.env_python_path("interrupted").read_text() == "3.13\n"
 
 
+def test_write_env_sources_withdraws_python_when_a_third_party_wins_the_stack_race(
+    config_tree: ConfigRoot,
+):
+    """The motivating race, end to end: their stack.txt stands, our pin is withdrawn.
+
+    ``os.link`` lost, so the ``stack.txt`` on disk is somebody else's and the
+    ``python.txt`` this call just published would otherwise hang off their
+    environment. This is the only test that travels the
+    ``isinstance(exc, ConfigError)`` disjunct with the withdrawal allowed to
+    succeed: the failed-withdrawal test forces ``Path.unlink`` to raise, so
+    dropping that disjunct from the condition moves nothing there but a
+    substring of an error message. Here it changes what is on disk — without
+    it the withdrawal never runs and ``python.txt`` survives beside a
+    ``stack.txt`` that is not ours.
+    """
+    from uv_stack.fsutil import atomic_write_new
+
+    python_path = config_tree.env_python_path("lost-race")
+    stack_path = config_tree.env_stack_path("lost-race")
+
+    def losing_write_new(path, text):
+        if path.name == "python.txt":
+            return atomic_write_new(path, text)
+        # A concurrent writer wins the race; os.link would raise EEXIST here.
+        stack_path.parent.mkdir(parents=True, exist_ok=True)
+        stack_path.write_text("their-tokens\n", encoding="utf-8")
+        raise FileExistsError("Stack file exists")
+
+    with mock.patch(
+        "uv_stack.operations.scaffold.atomic_write_new", side_effect=losing_write_new
+    ):
+        with pytest.raises(ConfigError) as excinfo:
+            write_env_sources(config_tree, "lost-race", ["ds"], python="3.13")
+
+    # Our pin is gone; their environment keeps exactly what they wrote.
+    assert not python_path.exists()
+    assert stack_path.read_text(encoding="utf-8") == "their-tokens\n"
+    # The plain refusal, not the residual variant — the withdrawal succeeded.
+    assert "already has a stack.txt" in str(excinfo.value)
+    assert "could not be removed" not in str(excinfo.value)
+
+
 def test_write_env_sources_adopts_matching_orphan_python(config_tree: ConfigRoot):
     """A hard crash leaves this orphan; the retry adopts it and completes.
 
