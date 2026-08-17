@@ -440,6 +440,13 @@ def refresh_project(
     warning, which gives the user a full refresh cycle to intervene before
     anything is removed.
 
+    Accepted loss: entries reported under ``skipped_removals`` are dropped from
+    ``applied`` by the final ledger write, which lands BEFORE ``uv sync``. A
+    sync failure therefore suppresses the RefreshResult carrying the notice AND
+    erases the entry the retry would recompute it from, so the user is never
+    told. Holding the ledger open across sync to preserve the notice is the
+    failure mode ``pending`` exists to prevent; the notice loses.
+
     :param config: Configuration root.
     :param runner: Command runner.
     :param options: Refresh options.

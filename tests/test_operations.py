@@ -2253,3 +2253,67 @@ def test_refresh_nameless_entries_survive_ownership_filter(
     assert tracking is not None
     assert "-e ./libs/foo" in tracking.applied
     assert "git+https://h/y.git" in tracking.applied
+
+
+_DIRECT_REF = "torch @ https://example.invalid/torch-2.0-py3-none-any.whl"
+
+_TRACKING_WITH_DIRECT_REF = (
+    "\n[tool.uv-stack]\nversion = 1\n"
+    'stack = ["standard"]\n'
+    f'applied = ["numpy", "pandas", "rdkit", "rich", "{_DIRECT_REF}"]\n'
+)
+
+
+def test_refresh_skipped_removal_notice_is_lost_when_sync_fails(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """Documents an accepted loss, not a bug — see refresh_project's docstring.
+
+    The final ledger is written BEFORE uv sync and drops skipped entries from
+    `applied`. A sync failure therefore both suppresses the RefreshResult that
+    carries the notice and erases the entry the retry would recompute it from.
+    Fixing it would mean holding the ledger open across a fallible step, which
+    is the failure mode `pending` exists to prevent.
+    """
+    from uv_stack.errors import ToolError
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING_WITH_DIRECT_REF)
+
+    # The entry IS classified as skipped — the dry run proves the notice exists.
+    planned = refresh_project(
+        config_tree,
+        RecordingRunner(),
+        RefreshOptions(python="3.12", dry_run=True),
+        cwd=project_dir,
+    )
+    assert _DIRECT_REF in planned.skipped_removals
+
+    def _fail_sync(cmd: Command) -> CommandResult:
+        result = _mutating_responder(project_dir)(cmd)
+        if cmd.args[0] == "uv" and cmd.args[1] == "sync":
+            raise ToolError("sync failed", command=cmd.args, returncode=1)
+        return result
+
+    with pytest.raises(ToolError):
+        refresh_project(
+            config_tree,
+            RecordingRunner(responder=_fail_sync),
+            RefreshOptions(python="3.12"),
+            cwd=project_dir,
+        )
+
+    # The final ledger landed before sync, without the skipped entry.
+    after = read_tracking(project_dir / "pyproject.toml")
+    assert after is not None and _DIRECT_REF not in after.applied
+
+    # The retry has nothing left to report it from.
+    retried = refresh_project(
+        config_tree,
+        RecordingRunner(responder=_mutating_responder(project_dir)),
+        RefreshOptions(python="3.12"),
+        cwd=project_dir,
+    )
+    assert _DIRECT_REF not in retried.skipped_removals
