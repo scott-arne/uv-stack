@@ -23,12 +23,13 @@ _HEADER = "[tool.uv-stack]"
 _UV_STACK_PATH = ("tool", "uv-stack")
 
 #: Field names the owned table renders itself. A [tool.uv-stack.<field>]
-#: subtable shadows one of them. When the field is set, tomllib refuses (for
-#: required fields) or the next write fails with an opaque "result would not
-#: parse" (for fields rendered when set). When unset, the subtable silently
-#: shadows it indefinitely. Refusing on read names the collision where it is
-#: diagnosable, regardless of whether the current harm is a write failure or a
-#: masked field.
+#: subtable shadows one of them. With the scalar also present tomllib refuses
+#: the file outright, so only the scalar-absent shape reaches us — and there
+#: the harm depends on the field: render_tracking always emits version, stack
+#: and applied, so the next write fails with an opaque "result would not
+#: parse", while python and pending are emitted only when set, so an unset one
+#: writes cleanly and goes on masking the subtable indefinitely. Refusing on
+#: read names the collision where it is fixable.
 _RESERVED_KEYS = frozenset(ProjectTracking.model_fields)
 
 #: Shared newer-schema refusal text — read_tracking raises it centrally and
@@ -149,9 +150,9 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     Foreign subtables (``[tool.uv-stack.*]`` — dict values under our table) are
     filtered out before validation: tolerated on read exactly as
     :func:`write_tracking` preserves them on write. A subtable named after one
-    of our own fields is refused instead: when the field is set, the next write
-    would fail with an opaque message; when unset, the subtable silently masks
-    it indefinitely.
+    of our own fields is refused instead: depending on the field it either
+    breaks the next write with an opaque message or masks the field
+    indefinitely, and neither is diagnosable where it surfaces.
 
     :param pyproject: Path to ``pyproject.toml``.
     :raises ConfigError: On TOML syntax errors or schema-invalid tables.

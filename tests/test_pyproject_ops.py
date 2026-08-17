@@ -448,7 +448,7 @@ def test_reserved_name_subtable_refused_stack_and_applied(tmp_path: Path):
     covers.
     """
     pyproject = tmp_path / "pyproject.toml"
-    # stack present, applied absent -> stack subtable would collide, omit stack scalar
+    # The stack scalar is omitted: present, it would collide in tomllib first.
     pyproject.write_text(
         _BASE + "\n[tool.uv-stack]\napplied = []\n\n[tool.uv-stack.stack]\nx = 1\n"
     )
@@ -456,7 +456,7 @@ def test_reserved_name_subtable_refused_stack_and_applied(tmp_path: Path):
         read_tracking(pyproject)
     assert "[tool.uv-stack.stack] shadows the 'stack' field" in str(excinfo.value)
 
-    # applied present, stack absent -> applied subtable would collide, omit applied scalar
+    # Likewise for applied; stack stays, since only the shadowed field may be omitted.
     pyproject.write_text(
         _BASE + "\n[tool.uv-stack]\nstack = []\n\n[tool.uv-stack.applied]\nx = 1\n"
     )
