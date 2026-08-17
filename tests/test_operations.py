@@ -58,13 +58,11 @@ def test_env_interpreter_spawn_failure_returns_none(config_tree: ConfigRoot):
     from uv_stack.operations.create import env_interpreter
 
     def _spawn_failure_responder(cmd: Command) -> CommandResult:
-        if "run" in cmd.args:
-            raise ToolError(
-                "Could not run micromamba: No such file or directory.",
-                command=["micromamba"],
-                returncode=127,
-            )
-        return CommandResult(returncode=0, stdout="")
+        raise ToolError(
+            "Could not run micromamba: No such file or directory.",
+            command=["micromamba"],
+            returncode=127,
+        )
 
     rec = RecordingRunner(responder=_spawn_failure_responder)
     assert env_interpreter(config_tree, rec, "main") is None

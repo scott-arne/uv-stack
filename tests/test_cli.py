@@ -2396,15 +2396,23 @@ def test_refresh_spawn_failure_past_pending_write_prints_adoption_warning(
     monkeypatch.setenv("PATH", str(nowhere))
     monkeypatch.setenv("COLUMNS", "1000")
     result = CliRunner().invoke(
-        cli, ["--root", str(root), "refresh", "--python", "3.12"],
-        env={"PATH": str(nowhere), "COLUMNS": "1000"}
+        cli, ["--root", str(root), "refresh", "--python", "3.12"]
     )
     assert result.exit_code == 1
     flat = _flat_panel(result)
     # The adoption warning reached stderr.
     assert "was applied by an interrupted run" in flat
     assert "chemprop" in flat
-    # The error panel names the uv binary, proving a rendered ToolError rather
-    # than a traceback.
-    assert "Could not run" in flat
-    assert "uv" in flat
+    # The panel names the binary that could not be started, proving a rendered
+    # ToolError rather than a traceback. ('uv' alone would match the panel's
+    # own 'uv-stack error' title.)
+    assert "Could not run uv" in flat
+    assert "Is uv installed and on PATH?" in flat
+    # Pin the boundary this test is named for. The pending write landed —
+    # 'chemprop' is durably in applied, so no later run re-derives the adoption
+    # warning — while pending is still set, so the final ledger write did not.
+    # This is exactly the window in which losing the advisory is unrecoverable.
+    import tomllib
+    ledger = tomllib.loads((project_dir / "pyproject.toml").read_text())["tool"]["uv-stack"]
+    assert "chemprop" in ledger["applied"]
+    assert ledger.get("pending") is not None
