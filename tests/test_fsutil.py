@@ -489,7 +489,14 @@ def test_name_lock_treats_eacces_as_contention(tmp_path, monkeypatch):
     assert "another stack process" in str(excinfo.value)
 
 
+#: Root bypasses the mode bits these tests rely on, so their premise cannot
+#: hold there. Checked with getattr because the expression is evaluated at
+#: collection time, on every platform, before the fcntl skip applies.
+_IS_ROOT = getattr(os, "geteuid", lambda: -1)() == 0
+
+
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
 def test_name_lock_locks_a_lock_file_it_may_not_write(tmp_path):
     """A lock file created by another user in a shared config root still locks.
 
@@ -516,3 +523,37 @@ def test_name_lock_locks_a_lock_file_it_may_not_write(tmp_path):
 
     with name_lock(lock_path, "x", timeout=0.2):
         pass  # acquires read-only; without the fallback the open raised EACCES
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_name_lock_degrades_when_the_lock_file_cannot_be_had(tmp_path):
+    """A .locks directory this user may not write degrades, it does not fail.
+
+    Two shapes, both from a shared root: the directory exists but belongs to
+    another user (no new lock file can be created in it), and the directory is
+    absent under a root that is not ours to write (the mkdir itself is
+    refused). Either way there is no lock to take — but the data directories
+    may well still be writable, since os.replace and os.link need those, not
+    this one, so failing here would break a create that would otherwise
+    succeed. Degrading matches the unlockable-filesystem branch and leaves the
+    writers' post-publish checks as the backstop.
+    """
+    read_only_dir = tmp_path / "occupied" / ".locks"
+    read_only_dir.mkdir(parents=True)
+    read_only_dir.chmod(0o555)
+    try:
+        with name_lock(read_only_dir / "stem-x.lock", "x", timeout=0.2):
+            pass  # degraded; a raise here is the regression
+    finally:
+        read_only_dir.chmod(0o755)
+
+    read_only_root = tmp_path / "unwritable"
+    read_only_root.mkdir()
+    read_only_root.chmod(0o555)
+    try:
+        with name_lock(read_only_root / ".locks" / "stem-x.lock", "x", timeout=0.2):
+            pass
+        assert not (read_only_root / ".locks").exists()
+    finally:
+        read_only_root.chmod(0o755)

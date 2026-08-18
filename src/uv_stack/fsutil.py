@@ -215,15 +215,15 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     The lock file is created on first use and **never removed**. Unlinking a
     file another process may already hold open would let a third process create
     a fresh file at the same path and take a lock that excludes nobody, so the
-    empty file is left behind deliberately. Where a config root is shared and
-    the file belongs to another user, it is opened read-only instead — all
-    ``flock`` needs — so the lock never turns a root the rest of ``stack``
-    writes fine into one where every create fails.
+    empty file is left behind deliberately.
 
-    Where ``fcntl`` does not exist, or where the filesystem refuses to lock
-    (any errno outside the contended set — some NFS and FUSE mounts return
-    ENOLCK or EOPNOTSUPP), this is a no-op that yields immediately; what that
-    gives up is stated at each call site.
+    Where ``fcntl`` does not exist, where the filesystem refuses to lock (any
+    errno outside the contended set — some NFS and FUSE mounts return ENOLCK
+    or EOPNOTSUPP), or where the lock file simply cannot be had because this
+    user may not write the shared config root, this is a no-op that yields
+    immediately; what that gives up is stated at each call site. The lock
+    therefore never turns a root the rest of ``stack`` writes fine into one
+    where every create fails.
 
     :param path: Lock file. Parent directories are created if absent.
     :param name: The profile/bundle/environment name being created, for the
@@ -232,9 +232,9 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         time.
     :raises ConfigError: If the lock is still held when the timeout expires,
         or if something other than a regular file sits at ``path``.
-    :raises OSError: If the lock file cannot be created or opened — a bad
-        config root, an over-long name, or a symlink planted at ``path``
-        surfaces here rather than at the write it guards.
+    :raises OSError: If the lock file cannot be opened for a reason other than
+        permission — an over-long name, or a symlink planted at ``path`` —
+        surfacing here rather than at the write it guards.
     """
     if not _LOCK_AVAILABLE:
         yield
@@ -243,7 +243,6 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     import fcntl
 
     limit = _LOCK_TIMEOUT if timeout is None else timeout
-    path.parent.mkdir(parents=True, exist_ok=True)
     # 0o666 & ~umask, matching atomic_write_new, so the lock file follows the
     # same convention as everything else stack writes. O_NOFOLLOW refuses a
     # planted symlink; unlike the two skips below this open cannot be declined
@@ -255,24 +254,30 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     # _O_NOFOLLOW is 0 and only the symlink refusal is lost; the locking
     # itself is unaffected.
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o666)
-    except PermissionError as denied:
-        # A lock file a *different* user created in a shared config root: the
-        # umask leaves it 0644 under any normal setting, so it is not ours to
-        # write. Read access is enough — flock takes the open file
-        # description, not the access mode — and widening the create mode past
-        # the umask instead would hand every local user a way to hold the
-        # lock. Refusing here would be worse than either: it would fail every
-        # create in a root the rest of stack still writes fine, since
-        # os.replace and os.link need the directory, not the file. (On a
-        # CPython build without HAVE_FLOCK the F_SETLK fallback needs a
-        # writable fd and reports EBADF, which degrades to the no-op below.)
+    except PermissionError:
+        # A shared config root whose .locks directory or lock file belongs to
+        # another user: under any normal umask that leaves them 0755 and 0644,
+        # neither of which this user may write. Read access is enough to lock,
+        # since flock takes the open file description and not the access mode,
+        # so try that before giving up. Widening the create mode would not
+        # help — it cannot reach a file stack neither created nor owns, which
+        # is precisely this case. (On a CPython build without HAVE_FLOCK the
+        # F_SETLK emulation needs a writable fd and reports EBADF, reaching
+        # the same degrade as an unlockable filesystem below.)
         try:
             fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
         except OSError:
-            # Nothing to fall back to — report the write denial, which names
-            # the real problem, rather than whatever the retry tripped over.
-            raise denied from None
+            # No lock file to be had at all: nothing here is ours to write and
+            # nothing is there to read. Degrade to the same no-op an
+            # unlockable filesystem takes rather than failing a create the
+            # rest of stack would complete — os.replace and os.link need the
+            # directory the data lives in, not this one. A root that is
+            # genuinely unusable still fails a moment later, at the write,
+            # naming the file the user actually asked for.
+            yield
+            return
     try:
         # flock on a FIFO or device node fails with an errno outside the
         # contended set, which would take the degrade branch below and make
