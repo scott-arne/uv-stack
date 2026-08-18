@@ -249,14 +249,15 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         non-directory — including a symlink to nowhere or to a non-directory —
         stands at ``path``'s parent or at any ancestor of it that would have to
         be created. The offender is named, which is not always the parent. A
-        symlink *loop* above the parent is the one exception; it raises
+        symlink above the parent that the kernel will not resolve — a loop, or
+        a chain past its link budget — is the one exception; it raises
         ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
-        symlink planted at ``path``, a directory at ``path``, and a symlink
-        loop at an ancestor of ``path``'s parent are the reachable ones; the
-        list is not closed, so a filesystem that fails an open some other way
-        surfaces here rather than at the write it guards.
+        symlink planted at ``path``, a directory at ``path``, and an
+        unresolvable symlink at an ancestor of ``path``'s parent are the
+        reachable ones; the list is not closed, so a filesystem that fails an
+        open some other way surfaces here rather than at the write it guards.
     """
     if not _LOCK_AVAILABLE:
         yield
@@ -288,10 +289,14 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         # .locks, whatever its type, and also a symlink to nowhere higher up,
         # which mkdir retries as a component to create once the first attempt
         # gives ENOENT. ENOTDIR when the offender is something mkdir has to
-        # traverse: any non-directory above .locks, including a symlink that
-        # resolves to one. A symlink loop above .locks is the single shape
-        # neither arm takes — mkdir reports it as ELOOP, which surfaces as the
-        # bare OSError the docstring describes. Neither errno is a permission
+        # traverse: any other non-directory above .locks, including a symlink
+        # that resolves to one. A symlink above .locks that the kernel will not
+        # resolve — a loop, or a chain longer than it will follow, which is a
+        # smaller budget than SYMLOOP_MAX suggests and differs for absolute and
+        # relative targets — is the single shape neither arm takes: mkdir
+        # reports ELOOP, which surfaces as the bare OSError the docstring
+        # describes, even where the chain would have resolved to a perfectly
+        # good directory. Neither errno is a permission
         # error, so no branch below sees them either. Unlike a permission
         # problem, degrading buys nothing here: no name under this root could
         # ever take a lock, and anyone who can write a shared root can plant
