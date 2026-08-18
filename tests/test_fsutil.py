@@ -500,8 +500,8 @@ _IS_ROOT = getattr(os, "geteuid", lambda: -1)() == 0
 def test_name_lock_locks_a_lock_file_it_may_not_write(tmp_path):
     """A lock file created by another user in a shared config root still locks.
 
-    The create mode is 0o666 & ~umask, so under any normal umask the file is
-    0644 and a second user sharing the root cannot open it O_RDWR. Failing
+    The create mode is 0o666 & ~umask, so under a typical 022 umask the file
+    is 0644 and a second user sharing the root cannot open it O_RDWR. Failing
     there would break every create in a root the rest of stack writes fine —
     os.replace and os.link need the directory, not the file. A 0444 file
     reproduces that refusal for the owner. Exclusion has to survive the
@@ -536,8 +536,9 @@ def test_name_lock_degrades_when_the_lock_file_cannot_be_had(tmp_path):
     refused). Either way there is no lock to take — but the data directories
     may well still be writable, since os.replace and os.link need those, not
     this one, so failing here would break a create that would otherwise
-    succeed. Degrading matches the unlockable-filesystem branch and leaves the
-    writers' post-publish checks as the backstop.
+    succeed. Degrading matches the unlockable-filesystem branch: the three
+    stem writers keep their post-publish checks, and write_env_sources, which
+    has none, is left exactly where it stood before the lock existed.
     """
     read_only_dir = tmp_path / "occupied" / ".locks"
     read_only_dir.mkdir(parents=True)
@@ -557,3 +558,54 @@ def test_name_lock_degrades_when_the_lock_file_cannot_be_had(tmp_path):
         assert not (read_only_root / ".locks").exists()
     finally:
         read_only_root.chmod(0o755)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.parametrize("plant", ["file", "dangling symlink"])
+def test_name_lock_refuses_a_non_directory_at_the_locks_directory(tmp_path, plant):
+    """Something that is not a directory at .locks is refused, not degraded.
+
+    mkdir(exist_ok=True) re-raises FileExistsError for a non-directory, which
+    is neither a permission error nor an flock errno, so it reaches neither
+    degrade. Degrading it would cost every name in the root its lock at once,
+    for nothing — the same trade the FIFO check above refuses for one name.
+    """
+    locks = tmp_path / ".locks"
+    if plant == "file":
+        locks.write_text("")
+    else:
+        locks.symlink_to(tmp_path / "missing")
+
+    with pytest.raises(ConfigError) as excinfo:
+        with name_lock(locks / "stem-x.lock", "x", timeout=0.2):
+            pytest.fail("entered with a non-directory at .locks")
+
+    assert "not a directory" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_surfaces_a_non_permission_error_from_the_read_only_retry(
+    tmp_path, monkeypatch
+):
+    """The read-only retry degrades on permission errnos only.
+
+    An object swapped in at the lock path between the two opens — a symlink,
+    giving ELOOP — is not "no lock file to be had": degrading on it would cost
+    exclusion silently. Only a real TOCTOU produces that pairing, so it is
+    injected.
+    """
+    calls = []
+
+    def swap_after_the_first(path, flags, *args):
+        calls.append(flags)
+        if len(calls) == 1:
+            raise PermissionError(errno.EACCES, "Permission denied")
+        raise OSError(errno.ELOOP, "Too many levels of symbolic links")
+
+    monkeypatch.setattr(os, "open", swap_after_the_first)
+    with pytest.raises(OSError) as excinfo:
+        with name_lock(tmp_path / ".locks" / "stem-x.lock", "x", timeout=0.2):
+            pytest.fail("degraded on an errno that is not a permission problem")
+
+    assert excinfo.value.errno == errno.ELOOP
+    assert len(calls) == 2, "the retry never ran, so nothing was exercised"

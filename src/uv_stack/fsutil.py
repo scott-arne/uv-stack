@@ -71,6 +71,16 @@ _LOCK_POLL = 0.01
 #: records on Linux) also degrades, where a retry loop might succeed.
 _LOCK_CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
 
+#: Errnos from the read-only retry that mean "there is no lock file to be had
+#: here", as opposed to "something is wrong here". A .locks directory this user
+#: may not write gives ENOENT — there is nothing to open, and nothing may be
+#: created — and a lock file owned by someone else gives EACCES or EPERM. Only
+#: those degrade. Anything else is an object at the path rather than a
+#: permission problem: a symlink swapped in after the first open (ELOOP), a
+#: directory (EISDIR). Degrading on those would silently cost exclusion, which
+#: is the failure the S_ISREG check below exists to refuse loudly.
+_LOCK_UNOBTAINABLE_ERRNOS = frozenset({errno.ENOENT, errno.EACCES, errno.EPERM})
+
 
 def atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically.
@@ -215,26 +225,33 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     The lock file is created on first use and **never removed**. Unlinking a
     file another process may already hold open would let a third process create
     a fresh file at the same path and take a lock that excludes nobody, so the
-    empty file is left behind deliberately.
+    empty file is left behind deliberately — and so the timeout error below
+    points at the process holding the lock rather than at the file.
 
     Where ``fcntl`` does not exist, where the filesystem refuses to lock (any
     errno outside the contended set — some NFS and FUSE mounts return ENOLCK
     or EOPNOTSUPP), or where the lock file simply cannot be had because this
     user may not write the shared config root, this is a no-op that yields
-    immediately; what that gives up is stated at each call site. The lock
-    therefore never turns a root the rest of ``stack`` writes fine into one
-    where every create fails.
+    immediately; what that gives up is stated at each call site. Permissions
+    that the rest of ``stack`` writes fine are therefore never turned into a
+    root where every create fails. An object planted where the lock belongs is
+    the one thing not degraded: it costs exclusion without saving anything, so
+    it is refused.
 
-    :param path: Lock file. Parent directories are created if absent.
+    :param path: Lock file. Its parent directory is created if absent and if
+        this user may create it.
     :param name: The profile/bundle/environment name being created, for the
         timeout message.
     :param timeout: Seconds to wait. ``None`` reads the module default at call
         time.
-    :raises ConfigError: If the lock is still held when the timeout expires,
-        or if something other than a regular file sits at ``path``.
-    :raises OSError: If the lock file cannot be opened for a reason other than
-        permission — an over-long name, or a symlink planted at ``path`` —
-        surfacing here rather than at the write it guards.
+    :raises ConfigError: If the lock is still held when the timeout expires, if
+        a FIFO, socket, or device node sits at ``path``, or if something that
+        is not a directory sits at its parent.
+    :raises OSError: If the lock file cannot be opened for a reason that is
+        neither of those and not a permission problem — an over-long name, a
+        symlink planted at ``path``, a directory at ``path``, a config root
+        that is not a directory — surfacing here rather than at the write it
+        guards.
     """
     if not _LOCK_AVAILABLE:
         yield
@@ -253,31 +270,51 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     # flags, is what handles a planted FIFO. Where the constant is absent
     # _O_NOFOLLOW is 0 and only the symlink refusal is lost; the locking
     # itself is unaffected.
+    fd = -1
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o666)
+    except FileExistsError:
+        # Something that is not a directory sits at .locks — a regular file, a
+        # dangling symlink. mkdir(exist_ok=True) re-raises for those, and it is
+        # not a permission error, so neither branch below sees it. Unlike those,
+        # degrading here would buy nothing: no name in this root could ever take
+        # a lock, and anyone who can write a shared root can plant it. Refuse it
+        # the way a non-regular file at the lock path itself is refused.
+        raise ConfigError(
+            f"Lock directory is not a directory: {path.parent}",
+            hint="Remove it and retry; stack only ever creates a directory here.",
+        ) from None
     except PermissionError:
         # A shared config root whose .locks directory or lock file belongs to
-        # another user: under any normal umask that leaves them 0755 and 0644,
-        # neither of which this user may write. Read access is enough to lock,
-        # since flock takes the open file description and not the access mode,
-        # so try that before giving up. Widening the create mode would not
+        # another user: under a typical 022 umask that leaves them 0755 and
+        # 0644, neither of which this user may write. Read access is enough to
+        # lock, since flock takes the open file description and not the access
+        # mode, so try that before giving up. Widening the create mode would not
         # help — it cannot reach a file stack neither created nor owns, which
         # is precisely this case. (On a CPython build without HAVE_FLOCK the
         # F_SETLK emulation needs a writable fd and reports EBADF, reaching
         # the same degrade as an unlockable filesystem below.)
         try:
             fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
-        except OSError:
-            # No lock file to be had at all: nothing here is ours to write and
-            # nothing is there to read. Degrade to the same no-op an
-            # unlockable filesystem takes rather than failing a create the
-            # rest of stack would complete — os.replace and os.link need the
-            # directory the data lives in, not this one. A root that is
-            # genuinely unusable still fails a moment later, at the write,
-            # naming the file the user actually asked for.
-            yield
-            return
+        except OSError as exc:
+            if exc.errno not in _LOCK_UNOBTAINABLE_ERRNOS:
+                # Not a permission problem after all: an object was swapped in
+                # at the path between the two opens. Silently degrading would
+                # cost exclusion, so let it surface.
+                raise
+    if fd == -1:
+        # No lock file to be had at all: nothing here is ours to write and
+        # nothing is there to read. Degrade to the same no-op an unlockable
+        # filesystem takes rather than failing a create the rest of stack would
+        # complete — os.replace and os.link need the directory the data lives
+        # in, not this one. A root that is genuinely unusable still fails a
+        # moment later, at the write, naming the file the user actually asked
+        # for. Yielding out here rather than inside the handler keeps the
+        # caller's own exceptions from being chained to a lock-file error that
+        # has nothing to do with them.
+        yield
+        return
     try:
         # flock on a FIFO or device node fails with an errno outside the
         # contended set, which would take the degrade branch below and make
@@ -307,8 +344,10 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
                         "Timed out waiting for another stack process to finish "
                         f"creating '{name}'",
                         hint=(
-                            "Another stack process may be stuck; retry, or remove "
-                            f"{path} if none is running."
+                            "Another stack process may be stuck; retry, or find "
+                            f"the process holding {path} (lsof) and stop it. "
+                            "Deleting the lock file releases nothing and lets "
+                            "the next writer straight past it."
                         ),
                     ) from None
                 time.sleep(_LOCK_POLL)

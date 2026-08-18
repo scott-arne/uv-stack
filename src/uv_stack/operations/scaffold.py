@@ -199,8 +199,10 @@ def write_profile(
     :param tags: Optional tags.
     :returns: The path written.
     :raises ConfigError: If the profile already exists, would shadow an existing
-        bundle, or another process holds the lock when the timeout expires.
-    :raises OSError: If the lock file cannot be created or opened.
+        bundle, or the stem lock cannot be used — another process holds it past
+        the timeout, or something stack did not create occupies the lock path.
+    :raises OSError: If the lock file cannot be opened for a reason other than
+        permission; a permission failure degrades to no locking instead.
     """
     _validate_name("profile", name)
     shadow_message = (
@@ -242,9 +244,11 @@ def write_bundle(
     :param tags: Optional tags.
     :returns: The path written.
     :raises ConfigError: If the bundle already exists, references itself,
-        would be shadowed by an existing profile, or another process holds
-        the lock when the timeout expires.
-    :raises OSError: If the lock file cannot be created or opened.
+        would be shadowed by an existing profile, or the stem lock cannot be
+        used — another process holds it past the timeout, or something stack
+        did not create occupies the lock path.
+    :raises OSError: If the lock file cannot be opened for a reason other than
+        permission; a permission failure degrades to no locking instead.
     """
     _validate_name("bundle", name)
     self_refs = bundle_self_references(name, tokens)
@@ -376,9 +380,11 @@ def write_env_sources(
         environment already has a ``stack.txt``, if it has a ``python.txt``
         that cannot be adopted on the terms above, if the ``stack.txt``
         publish was itself refused and the ``python.txt`` this call published
-        could not then be withdrawn, or if another process holds the per-name
-        lock when the timeout expires.
-    :raises OSError: If the per-name lock file cannot be created or opened.
+        could not then be withdrawn, or if the per-name lock cannot be used —
+        another process holds it past the timeout, or something stack did not
+        create occupies the lock path.
+    :raises OSError: If the lock file cannot be opened for a reason other than
+        permission; a permission failure degrades to no locking instead.
     """
     _validate_name("environment", name)
     # Preflight, adoption, both publishes and the withdrawal are one operation.
@@ -502,9 +508,11 @@ def write_starter_profile(config: ConfigRoot) -> Path:
     :param config: Configuration root.
     :returns: The path written.
     :raises ConfigError: If a starter profile already exists, would shadow an
-        existing bundle, or another process holds the lock when the timeout
-        expires.
-    :raises OSError: If the lock file cannot be created or opened.
+        existing bundle, or the stem lock cannot be used — another process
+        holds it past the timeout, or something stack did not create occupies
+        the lock path.
+    :raises OSError: If the lock file cannot be opened for a reason other than
+        permission; a permission failure degrades to no locking instead.
     """
     shadow_message = (
         "Profile 'starter' would shadow the existing bundle: "
