@@ -27,11 +27,12 @@ _LINK_FALLBACK_ERRNOS = frozenset(
 #: absent getattr yields 0, which does not weaken the guard — it removes it,
 #: and an identity recheck afterwards comes too late to make up for it: it can
 #: reject what the open returned, not stop the open from following a symlink
-#: or hanging on a FIFO. Both callers that can decline the open therefore skip
-#: it entirely rather than take it unguarded; what each gives up by skipping
-#: differs, and is stated at the call site. name_lock is the one caller that
-#: cannot decline — there is no lock without the open — so it takes O_NOFOLLOW
-#: alone and rejects a non-regular target after the fact.
+#: or hanging on a FIFO. Every caller that can decline the open therefore
+#: skips it entirely rather than take it unguarded; what each gives up by
+#: skipping differs, and is stated at the call site. name_lock's create is the
+#: one open that cannot be declined — there is no lock without it — so it
+#: passes both constants for whatever they are worth on the platform and
+#: rejects a non-regular target after the fact.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _FASTPATH_AVAILABLE = bool(_O_NOFOLLOW) and bool(_O_NONBLOCK)
@@ -230,9 +231,10 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
 
     Where ``fcntl`` does not exist, where the filesystem refuses to lock (any
     errno outside the contended set — some NFS and FUSE mounts return ENOLCK
-    or EOPNOTSUPP), or where the lock file simply cannot be had because this
-    user may not write the shared config root, this is a no-op that yields
-    immediately; what that gives up is stated at each call site. Permissions
+    or EOPNOTSUPP), or where the lock file simply cannot be had — because this
+    user may not write the shared config root, or because reopening it
+    read-only would take open guards this platform lacks — this is a no-op that
+    yields immediately; what that gives up is stated at each call site. Permissions
     that the rest of ``stack`` writes fine are therefore never turned into a
     root where every create fails. An object planted where the lock belongs is
     the one thing not degraded: it costs exclusion without saving anything, so
@@ -267,19 +269,19 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
 
     limit = _LOCK_TIMEOUT if timeout is None else timeout
     # 0o666 & ~umask, matching atomic_write_new, so the lock file follows the
-    # same convention as everything else stack writes. O_NOFOLLOW refuses a
-    # planted symlink; unlike the two skips below this open cannot be declined
-    # when the flags are missing, since there is no lock without it, so it
-    # takes O_NOFOLLOW alone rather than both guards. O_NONBLOCK is not needed
-    # to keep the open from waiting — O_RDWR on a FIFO returns immediately on
-    # Linux and the BSDs — so the regular-file check below, not the open
-    # flags, is what handles a planted FIFO. Where the constant is absent
-    # _O_NOFOLLOW is 0 and only the symlink refusal is lost; the locking
-    # itself is unaffected.
+    # same convention as everything else stack writes. Both guard flags, since
+    # the target's type is not known in advance: O_NOFOLLOW refuses a planted
+    # symlink, and O_NONBLOCK keeps a planted FIFO or device node from parking
+    # the open before the regular-file check below can refuse it. O_RDWR on a
+    # FIFO happens to return immediately on Linux and the BSDs, but POSIX does
+    # not define that open at all, and the flag costs nothing on the regular
+    # file this is in every real case. Unlike the retry below, this open cannot
+    # be declined when a constant is missing — there is no lock without it — so
+    # a missing one is 0 and costs that single guard rather than the lock.
     fd = -1
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o666)
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW | _O_NONBLOCK, 0o666)
     except (FileExistsError, NotADirectoryError):
         # Something that is not a directory stands where one has to be: at
         # .locks, or — since parents=True walks up — at any ancestor above it.
@@ -326,14 +328,24 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         # is precisely this case. (On a CPython build without HAVE_FLOCK the
         # F_SETLK emulation needs a writable fd and reports EBADF, reaching
         # the same degrade as an unlockable filesystem below.)
-        try:
-            fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
-        except OSError as exc:
-            if exc.errno not in _LOCK_UNOBTAINABLE_ERRNOS:
-                # Not a permission problem after all: an object was swapped in
-                # at the path between the two opens. Silently degrading would
-                # cost exclusion, so let it surface.
-                raise
+        #
+        # O_NONBLOCK is load-bearing on this open in a way it is not on the
+        # create: a read-only open of a FIFO waits for a writer, and nothing
+        # here will ever supply one. Without the flag, a FIFO planted by the
+        # user who owns the path parks every writer of that name forever —
+        # past any timeout, the create having failed EACCES before the
+        # regular-file check could refuse it. This open can be declined, unlike
+        # the create, so a platform missing either constant skips it and takes
+        # the degrade below rather than opening a target it cannot guard.
+        if _FASTPATH_AVAILABLE:
+            try:
+                fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK)
+            except OSError as exc:
+                if exc.errno not in _LOCK_UNOBTAINABLE_ERRNOS:
+                    # Not a permission problem after all: an object was swapped
+                    # in at the path between the two opens. Silently degrading
+                    # would cost exclusion, so let it surface.
+                    raise
     if fd == -1:
         # No lock file to be had at all: nothing here is ours to write and
         # nothing is there to read. Degrade to the same no-op an unlockable

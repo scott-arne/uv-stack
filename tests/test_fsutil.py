@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
+import signal
 import stat
 import time
 from pathlib import Path
@@ -659,3 +661,77 @@ def test_name_lock_surfaces_a_non_permission_error_from_the_read_only_retry(
 
     assert excinfo.value.errno == errno.ELOOP
     assert len(calls) == 2, "the retry never ran, so nothing was exercised"
+
+
+@contextlib.contextmanager
+def _deadline(seconds):
+    """Fail rather than hang if the body blocks.
+
+    The defect the two tests below cover does not make them fail — it makes
+    them wait forever inside ``os.open``, which stalls the whole suite with no
+    output and no failing test to point at. SIGALRM turns that into an ordinary
+    assertion failure. The handler raises, so it interrupts the blocked syscall
+    instead of letting PEP 475 retry it.
+    """
+
+    def _fire(signum, frame):
+        raise AssertionError(f"blocked for more than {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, _fire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
+def test_name_lock_refuses_an_unwritable_fifo_without_waiting(tmp_path):
+    """A FIFO the caller may read but not write is refused, not waited on.
+
+    The FIFO test above plants one this user owns, so the create opens it
+    O_RDWR and the regular-file check refuses it. Deny write and the create
+    fails EACCES first, which sends it to the read-only retry — and a read-only
+    open of a FIFO waits for a writer. Nothing supplies one, so without
+    O_NONBLOCK on that open the timeout is never consulted and every writer of
+    this name parks forever: a shape the lock is supposed to refuse turned into
+    a hang, planted by anyone who owns a path in a shared root.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    os.mkfifo(lock_path, 0o444)
+
+    with _deadline(5.0):
+        with pytest.raises(ConfigError) as excinfo:
+            with name_lock(lock_path, "x", timeout=0.2):
+                pytest.fail("entered with a FIFO at the lock path")
+
+    assert "not a regular file" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
+def test_name_lock_skips_the_retry_it_cannot_guard(tmp_path, monkeypatch):
+    """Without both guard flags the read-only retry is not attempted at all.
+
+    The retry is the one open in name_lock that can be declined — declining
+    costs this name its lock, which the degrade below already accepts, while
+    taking it unguarded risks following a planted symlink or waiting on a
+    planted FIFO. So a platform missing either constant skips it. Asserting the
+    degrade rather than a refusal is what distinguishes skipping from opening:
+    an unguarded retry would reach the regular-file check and raise.
+    """
+    from uv_stack import fsutil
+
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    os.mkfifo(lock_path, 0o444)
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
+
+    with _deadline(5.0):
+        with name_lock(lock_path, "x", timeout=0.2):
+            pass
