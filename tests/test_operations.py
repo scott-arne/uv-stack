@@ -2401,6 +2401,7 @@ def test_refresh_never_passes_a_direct_reference_to_uv_remove(
     assert _DIRECT_REF not in result.removed
     assert "scipy" in result.removed
     remove_args = [cmd.args for cmd in rec.commands if "remove" in cmd.args]
-    assert remove_args, "no uv remove ran, so the assertion below proves nothing"
-    assert not any("torch" in args for args in remove_args)
-    assert any("scipy" in args for args in remove_args)
+    # Pin the whole payload rather than membership. A fragment check passes even
+    # when the direct reference is handed over verbatim, because "torch" is never
+    # an argv element in its own right.
+    assert remove_args == [["uv", "remove", "--no-sync", "scipy"]]
