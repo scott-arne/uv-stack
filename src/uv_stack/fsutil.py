@@ -246,12 +246,14 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         time.
     :raises ConfigError: If the lock is still held when the timeout expires, if
         a FIFO, socket, or device node sits at ``path``, or if something that
-        is not a directory sits at its parent.
+        is not a directory stands at ``path``'s parent or at any ancestor of it
+        that would have to be created — the offender is named, which is not
+        always the parent.
     :raises OSError: If the lock file cannot be opened for a reason that is
-        neither of those and not a permission problem — an over-long name, a
-        symlink planted at ``path``, a directory at ``path``, a config root
-        that is not a directory — surfacing here rather than at the write it
-        guards.
+        neither of those and not a permission problem. An over-long name, a
+        symlink planted at ``path``, and a directory at ``path`` are the
+        reachable ones; the list is not closed, so a filesystem that fails an
+        open some other way surfaces here rather than at the write it guards.
     """
     if not _LOCK_AVAILABLE:
         yield
@@ -274,16 +276,28 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o666)
-    except FileExistsError:
-        # Something that is not a directory sits at .locks — a regular file, a
-        # dangling symlink. mkdir(exist_ok=True) re-raises for those, and it is
-        # not a permission error, so neither branch below sees it. Unlike those,
-        # degrading here would buy nothing: no name in this root could ever take
-        # a lock, and anyone who can write a shared root can plant it. Refuse it
-        # the way a non-regular file at the lock path itself is refused.
+    except (FileExistsError, NotADirectoryError):
+        # Something that is not a directory stands where one has to be: at
+        # .locks, or — since parents=True walks up — at the config root above
+        # it. mkdir(exist_ok=True) reports the first shape as EEXIST and the
+        # second as ENOTDIR, and neither is a permission error, so neither
+        # branch below sees them. Unlike a permission problem, degrading buys
+        # nothing here: no name under this root could ever take a lock, and
+        # anyone who can write a shared root can plant one. So refuse, the way
+        # a non-regular file at the lock path itself is refused — and name the
+        # offender rather than the lock path, because a message pointing at a
+        # .locks that does not exist sends the user looking for nothing.
+        blocker = next(
+            (
+                ancestor
+                for ancestor in (path.parent, *path.parent.parents)
+                if os.path.lexists(ancestor) and not ancestor.is_dir()
+            ),
+            path.parent,
+        )
         raise ConfigError(
-            f"Lock directory is not a directory: {path.parent}",
-            hint="Remove it and retry; stack only ever creates a directory here.",
+            f"Not a directory: {blocker}",
+            hint="stack needs a directory here; move or remove it and retry.",
         ) from None
     except PermissionError:
         # A shared config root whose .locks directory or lock file belongs to

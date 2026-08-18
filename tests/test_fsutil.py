@@ -561,26 +561,68 @@ def test_name_lock_degrades_when_the_lock_file_cannot_be_had(tmp_path):
 
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
-@pytest.mark.parametrize("plant", ["file", "dangling symlink"])
-def test_name_lock_refuses_a_non_directory_at_the_locks_directory(tmp_path, plant):
-    """Something that is not a directory at .locks is refused, not degraded.
+@pytest.mark.parametrize(
+    "plant",
+    ["file at .locks", "dangling symlink at .locks", "file at the root", "dangling root"],
+)
+def test_name_lock_refuses_a_non_directory_where_it_needs_one(tmp_path, plant):
+    """A non-directory where the lock directory goes is refused, and named.
 
-    mkdir(exist_ok=True) re-raises FileExistsError for a non-directory, which
-    is neither a permission error nor an flock errno, so it reaches neither
-    degrade. Degrading it would cost every name in the root its lock at once,
-    for nothing — the same trade the FIFO check above refuses for one name.
+    mkdir(exist_ok=True) reports one at .locks as FileExistsError and one at
+    the root above it as NotADirectoryError. Neither is a permission error and
+    neither is an flock errno, so they reach neither degrade. Degrading would
+    cost every name in the root its lock at once, for nothing — the same trade
+    the FIFO check above refuses for a single name.
+
+    parents=True means the offender may be an ancestor rather than .locks
+    itself, so the reported path is asserted exactly: a message naming a .locks
+    that does not exist sends the reader looking for nothing, which is worse
+    than the bare traceback it replaced.
     """
-    locks = tmp_path / ".locks"
-    if plant == "file":
-        locks.write_text("")
+    root = tmp_path / "root"
+    if plant.endswith("the root") or plant == "dangling root":
+        offender = root
+        if plant == "dangling root":
+            root.symlink_to(tmp_path / "missing")
+        else:
+            root.write_text("")
     else:
-        locks.symlink_to(tmp_path / "missing")
+        root.mkdir()
+        offender = root / ".locks"
+        if plant.startswith("file"):
+            offender.write_text("")
+        else:
+            offender.symlink_to(tmp_path / "missing")
 
     with pytest.raises(ConfigError) as excinfo:
-        with name_lock(locks / "stem-x.lock", "x", timeout=0.2):
-            pytest.fail("entered with a non-directory at .locks")
+        with name_lock(root / ".locks" / "stem-x.lock", "x", timeout=0.2):
+            pytest.fail("entered with a non-directory where the lock goes")
 
-    assert "not a directory" in str(excinfo.value)
+    assert str(excinfo.value) == f"Not a directory: {offender}"
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_name_lock_degrading_does_not_chain_onto_the_callers_exception(tmp_path):
+    """A degraded lock leaves nothing of its own above the caller's failure.
+
+    Yielding from inside the except block chained everything the body raised
+    onto an unrelated lock-file error, so the user's traceback opened with a
+    lock file they had never heard of and reached the file they actually asked
+    for three exceptions later.
+    """
+    locks = tmp_path / ".locks"
+    locks.mkdir()
+    locks.chmod(0o555)
+    try:
+        with pytest.raises(RuntimeError) as excinfo:
+            with name_lock(locks / "stem-x.lock", "x", timeout=0.2):
+                raise RuntimeError("the caller's own failure")
+    finally:
+        locks.chmod(0o755)
+
+    assert excinfo.value.__context__ is None
+    assert excinfo.value.__cause__ is None
 
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
