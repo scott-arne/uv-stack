@@ -829,3 +829,59 @@ def test_name_lock_refuses_an_unopenable_plant_of_any_shape(tmp_path, monkeypatc
             pytest.fail("entered with a non-regular file at the lock path")
 
     assert "not a regular file" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.parametrize(
+    "shape", [stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK], ids=["socket", "chardev", "blockdev"]
+)
+def test_name_lock_refuses_an_openable_plant_of_any_shape(tmp_path, monkeypatch, shape):
+    """The same generality argument, for the check on the far side of the open.
+
+    A plant this user can open never reaches the ``lstat`` above: it yields a
+    descriptor, and only the ``fstat`` refuses it. The two checks are separate
+    predicates in separate branches, and only a FIFO had ever reached this one
+    — so narrowing it to ``S_ISFIFO`` left the entire suite green while
+    ``name_lock`` would have gone on to ``flock`` an openable device node and
+    take the degrade its errno lands in. The shape is fabricated for the reason
+    the case above gives: the openable non-regular shapes need privilege to
+    create.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("")
+    planted = os.stat(lock_path).st_ino
+
+    real_fstat = os.fstat
+
+    def _report_the_shape(fd, **kwargs):
+        found = real_fstat(fd, **kwargs)
+        if found.st_ino == planted:
+            return os.stat_result((shape | 0o666, *tuple(found)[1:]))
+        return found
+
+    monkeypatch.setattr(os, "fstat", _report_the_shape)
+
+    with pytest.raises(ConfigError) as excinfo:
+        with name_lock(lock_path, "x", timeout=0.2):
+            pytest.fail("entered with a non-regular file at the lock path")
+
+    assert "not a regular file" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(not os.path.exists("/dev/null"), reason="requires /dev/null")
+def test_name_lock_refuses_a_real_openable_non_regular_file():
+    """One plant that reaches the descriptor check with nothing fabricated.
+
+    Every other case here either plants the one shape this suite can create or
+    fabricates the type, so the refusal has only ever been watched through a
+    monkeypatch. ``/dev/null`` is an openable character device needing no
+    privilege to reach, and it drives the create, the ``fstat`` and the refusal
+    exactly as a planted device node would.
+    """
+    with pytest.raises(ConfigError) as excinfo:
+        with name_lock(Path("/dev/null"), "x", timeout=0.2):
+            pytest.fail("entered with a character device at the lock path")
+
+    assert "not a regular file" in str(excinfo.value)
