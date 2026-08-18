@@ -215,7 +215,10 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     The lock file is created on first use and **never removed**. Unlinking a
     file another process may already hold open would let a third process create
     a fresh file at the same path and take a lock that excludes nobody, so the
-    empty file is left behind deliberately.
+    empty file is left behind deliberately. Where a config root is shared and
+    the file belongs to another user, it is opened read-only instead — all
+    ``flock`` needs — so the lock never turns a root the rest of ``stack``
+    writes fine into one where every create fails.
 
     Where ``fcntl`` does not exist, or where the filesystem refuses to lock
     (any errno outside the contended set — some NFS and FUSE mounts return
@@ -241,17 +244,35 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
 
     limit = _LOCK_TIMEOUT if timeout is None else timeout
     path.parent.mkdir(parents=True, exist_ok=True)
-    # 0o666 & ~umask, matching atomic_write_new: a lock file created by one
-    # user must stay openable by another sharing the config root, which 0o600
-    # would break. O_NOFOLLOW refuses a planted symlink; unlike the two skips
-    # below this open cannot be declined when the flags are missing, since
-    # there is no lock without it, so it takes O_NOFOLLOW alone rather than
-    # both guards. O_NONBLOCK is not needed to keep the open from waiting —
-    # O_RDWR on a FIFO returns immediately on Linux and the BSDs — so the
-    # regular-file check below, not the open flags, is what handles a planted
-    # FIFO. Where the constant is absent _O_NOFOLLOW is 0 and only the symlink
-    # refusal is lost; the locking itself is unaffected.
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o666)
+    # 0o666 & ~umask, matching atomic_write_new, so the lock file follows the
+    # same convention as everything else stack writes. O_NOFOLLOW refuses a
+    # planted symlink; unlike the two skips below this open cannot be declined
+    # when the flags are missing, since there is no lock without it, so it
+    # takes O_NOFOLLOW alone rather than both guards. O_NONBLOCK is not needed
+    # to keep the open from waiting — O_RDWR on a FIFO returns immediately on
+    # Linux and the BSDs — so the regular-file check below, not the open
+    # flags, is what handles a planted FIFO. Where the constant is absent
+    # _O_NOFOLLOW is 0 and only the symlink refusal is lost; the locking
+    # itself is unaffected.
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o666)
+    except PermissionError as denied:
+        # A lock file a *different* user created in a shared config root: the
+        # umask leaves it 0644 under any normal setting, so it is not ours to
+        # write. Read access is enough — flock takes the open file
+        # description, not the access mode — and widening the create mode past
+        # the umask instead would hand every local user a way to hold the
+        # lock. Refusing here would be worse than either: it would fail every
+        # create in a root the rest of stack still writes fine, since
+        # os.replace and os.link need the directory, not the file. (On a
+        # CPython build without HAVE_FLOCK the F_SETLK fallback needs a
+        # writable fd and reports EBADF, which degrades to the no-op below.)
+        try:
+            fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
+        except OSError:
+            # Nothing to fall back to — report the write denial, which names
+            # the real problem, rather than whatever the retry tripped over.
+            raise denied from None
     try:
         # flock on a FIFO or device node fails with an errno outside the
         # contended set, which would take the degrade branch below and make

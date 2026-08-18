@@ -54,7 +54,12 @@ def config_tree(tmp_path: Path) -> ConfigRoot:
 
 _HOLD_LOCK = """\
 import fcntl, os, sys
-fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o666)
+try:
+    fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o666)
+except PermissionError:
+    # Mirrors name_lock's own fallback, so a lock file this process may not
+    # write is still a lock file it can hold.
+    fd = os.open(sys.argv[1], os.O_RDONLY)
 fcntl.flock(fd, fcntl.LOCK_EX)
 sys.stdout.write("ready\\n")
 sys.stdout.flush()

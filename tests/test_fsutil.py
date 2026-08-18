@@ -487,3 +487,32 @@ def test_name_lock_treats_eacces_as_contention(tmp_path, monkeypatch):
             pytest.fail("entered despite EACCES contention")
 
     assert "another stack process" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_locks_a_lock_file_it_may_not_write(tmp_path):
+    """A lock file created by another user in a shared config root still locks.
+
+    The create mode is 0o666 & ~umask, so under any normal umask the file is
+    0644 and a second user sharing the root cannot open it O_RDWR. Failing
+    there would break every create in a root the rest of stack writes fine —
+    os.replace and os.link need the directory, not the file. A 0444 file
+    reproduces that refusal for the owner. Exclusion has to survive the
+    read-only fd, not just the open, so a real second process is checked
+    against it first.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+    lock_path.chmod(0o444)
+    with pytest.raises(PermissionError):
+        os.close(os.open(lock_path, os.O_RDWR))  # the premise, not the behavior
+
+    with _lock_held_by_another_process(lock_path):
+        with pytest.raises(ConfigError) as excinfo:
+            with name_lock(lock_path, "x", timeout=0.2):
+                pytest.fail("entered while another process held the lock")
+    assert "another stack process" in str(excinfo.value)
+
+    with name_lock(lock_path, "x", timeout=0.2):
+        pass  # acquires read-only; without the fallback the open raised EACCES
