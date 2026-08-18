@@ -381,8 +381,8 @@ def write_env_sources(
     :raises ConfigError: If ``name`` is not a valid environment name, if the environment
         already has a ``stack.txt``, if it has a ``python.txt`` that cannot be adopted
         on the terms above, if the ``stack.txt`` publish was itself refused and the
-        ``python.txt`` this call published could not then be withdrawn, or if the per-
-        name lock cannot be used — another process holds it past the timeout, or
+        ``python.txt`` this call published could not then be withdrawn, or if the
+        per-name lock cannot be used — another process holds it past the timeout, or
         something stack did not create occupies the lock path. Not every such object is
         refused this way; the rest raise ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason other than

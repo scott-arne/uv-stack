@@ -713,7 +713,6 @@ def test_name_lock_refuses_an_unwritable_fifo_without_waiting(tmp_path):
 
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
 @pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
 def test_name_lock_skips_the_retry_it_cannot_guard(tmp_path, monkeypatch):
     """Without both guard flags the read-only retry is not attempted at all.
@@ -721,17 +720,67 @@ def test_name_lock_skips_the_retry_it_cannot_guard(tmp_path, monkeypatch):
     The retry is the one open in name_lock that can be declined — declining
     costs this name its lock, which the degrade below already accepts, while
     taking it unguarded risks following a planted symlink or waiting on a
-    planted FIFO. So a platform missing either constant skips it. Asserting the
-    degrade rather than a refusal is what distinguishes skipping from opening:
-    an unguarded retry would reach the regular-file check and raise.
+    planted FIFO. So a platform missing either constant skips it.
+
+    A regular file this user may read but not write is the target that tells
+    skipping apart from opening: it is the only shape the retry would go on to
+    lock rather than refuse, so whether ``flock`` is reached says which
+    happened. A planted shape cannot distinguish them — it is refused on both
+    paths. Taking the lock with the flags present is the control: it proves the
+    file is lockable, so the silence in the second half is the skip and not some
+    unrelated failure to lock.
     """
+    import fcntl
+
     from uv_stack import fsutil
 
     lock_path = tmp_path / ".locks" / "stem-x.lock"
     lock_path.parent.mkdir(parents=True)
-    os.mkfifo(lock_path, 0o444)
+    lock_path.write_text("")
+    os.chmod(lock_path, 0o444)
+
+    locked = []
+    real_flock = fcntl.flock
+
+    def _spy(fd, operation):
+        locked.append(operation)
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", _spy)
+
+    with name_lock(lock_path, "x", timeout=0.2):
+        pass
+    assert locked, "a readable regular file should have been locked via the retry"
+
+    locked.clear()
     monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
 
+    with name_lock(lock_path, "x", timeout=0.2):
+        pass
+    assert not locked, "the retry was taken despite the guard flags being absent"
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
+@pytest.mark.parametrize("mode", [0o200, 0o000])
+def test_name_lock_refuses_a_plant_it_cannot_open(tmp_path, mode):
+    """A plant whose permission bits deny every open is refused, not degraded.
+
+    Both opens fail EACCES, which is what a lock file owned by another user on
+    a shared root also looks like — and that degrades to a no-op. Reading the
+    two the same way costs this name its exclusion for as long as the plant
+    sits there, silently, which is the one failure this lock must never have.
+    ``lstat`` tells them apart: it needs no permission on the file itself, only
+    search on ``.locks``, which every route to the degrade already had.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    os.mkfifo(lock_path, mode)
+
     with _deadline(5.0):
-        with name_lock(lock_path, "x", timeout=0.2):
-            pass
+        with pytest.raises(ConfigError) as excinfo:
+            with name_lock(lock_path, "x", timeout=0.2):
+                pytest.fail("entered with a FIFO at the lock path")
+
+    assert "not a regular file" in str(excinfo.value)

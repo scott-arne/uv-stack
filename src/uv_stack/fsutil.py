@@ -241,10 +241,10 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     yields immediately; what that gives up is stated at each call site. Permissions
     that the rest of ``stack`` writes fine are therefore never turned into a
     root where every create fails. An object planted where the lock belongs is
-    refused rather than degraded whenever an open reaches it: it costs exclusion
-    without saving anything. Only one combination hides it — a plant this user
-    may not write, on a platform lacking the retry's guard flags — because there
-    both opens are gone before anything can look at what is there.
+    refused rather than degraded: it costs exclusion without saving anything.
+    The refusal does not depend on being able to open the plant, so stripping
+    its permission bits does not buy a silent degrade — only a ``.locks`` this
+    user may not even search hides one, and that hides the whole directory.
 
     :param path: Lock file. Its parent directory is created if absent and if
         this user may create it.
@@ -253,14 +253,16 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     :param timeout: Seconds to wait. ``None`` reads the module default at call
         time.
     :raises ConfigError: If the lock is still held when the timeout expires, if
-        a FIFO or device node sits at ``path`` — but not a socket, which the
-        kernel will not open at all and which therefore raises below — or if any
-        non-directory — including a symlink to nowhere or to a non-directory —
-        stands at ``path``'s parent or at any ancestor of it that would have to
-        be created. The offender is named, which is not always the parent. A
-        symlink above the parent that the kernel will not resolve — a loop, or
-        a chain past its link budget — is the one exception; it raises
-        ``OSError`` below.
+        something other than a regular file sits at ``path`` — a FIFO or a
+        device node always, whatever its mode; a socket only where this user's
+        permissions rather than its type are what stop the open, since a kernel
+        that declines a socket by type raises ``OSError`` below instead — or if
+        any non-directory — including a symlink to nowhere or to a
+        non-directory — stands at ``path``'s parent or at any ancestor of it
+        that would have to be created. The offender is named, which is not
+        always the parent. A symlink above the parent that the kernel will not
+        resolve — a loop, or a chain past its link budget — is the one
+        exception; it raises ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
         symlink planted at ``path``, a socket or a directory at ``path``, and an
@@ -354,17 +356,36 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
                     # would cost exclusion, so let it surface.
                     raise
     if fd == -1:
-        # No lock file to be had: nothing here is ours to write and nothing is
-        # there to read — or, where the guard flags are missing, the read-only
-        # retry was declined before it could find out, the only route here that
-        # can leave a readable file unread. Degrade to the same no-op an
-        # unlockable filesystem takes rather than failing a create the rest of
-        # stack would complete — os.replace and os.link need the directory the
-        # data lives in, not this one. A root that is genuinely unusable fails a
-        # moment later, at the write, naming the file the user actually asked
-        # for. Yielding out here rather than inside the handler keeps the
-        # caller's own exceptions from being chained to a lock-file error that
-        # has nothing to do with them.
+        # Neither open got a descriptor, which reads as a permission problem —
+        # but a plant with its permission bits off is indistinguishable from one
+        # here, and degrading for it would silently cost this name its exclusion
+        # for as long as the plant sits there. That is the failure the S_ISREG
+        # check below exists to refuse, reached by a route that never gets an fd
+        # to check. lstat needs no permission on the file itself, only search on
+        # .locks, which every route here already had, so the plant is visible
+        # even at mode 0000. Anything it cannot see — nothing there at all, or a
+        # .locks this user may not search — leaves nothing to lock anyway and
+        # falls through to the degrade.
+        try:
+            planted = not stat.S_ISREG(os.lstat(path).st_mode)
+        except OSError:
+            planted = False
+        if planted:
+            raise ConfigError(
+                f"Lock file is not a regular file: {path}",
+                hint="Remove it and retry; stack only ever creates a plain file here.",
+            )
+        # A regular file, then, or nothing at all: nothing here is ours to write
+        # and nothing is there to read — or, where the guard flags are missing,
+        # the read-only retry was declined before it could find out, the one
+        # route here that can leave a readable file unread. Degrade to the same
+        # no-op an unlockable filesystem takes rather than failing a create the
+        # rest of stack would complete — os.replace and os.link need the
+        # directory the data lives in, not this one. A root that is genuinely
+        # unusable fails a moment later, at the write, naming the file the user
+        # actually asked for. Yielding out here rather than inside the handler
+        # keeps the caller's own exceptions from being chained to a lock-file
+        # error that has nothing to do with them.
         yield
         return
     try:
