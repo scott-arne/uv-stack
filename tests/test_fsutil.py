@@ -772,7 +772,7 @@ def test_name_lock_refuses_a_plant_it_cannot_open(tmp_path, mode):
     two the same way costs this name its exclusion for as long as the plant
     sits there, silently, which is the one failure this lock must never have.
     ``lstat`` tells them apart: it needs no permission on the file itself, only
-    search on ``.locks``, which every route to the degrade already had.
+    search on ``.locks``.
     """
     lock_path = tmp_path / ".locks" / "stem-x.lock"
     lock_path.parent.mkdir(parents=True)
@@ -782,5 +782,41 @@ def test_name_lock_refuses_a_plant_it_cannot_open(tmp_path, mode):
         with pytest.raises(ConfigError) as excinfo:
             with name_lock(lock_path, "x", timeout=0.2):
                 pytest.fail("entered with a FIFO at the lock path")
+
+    assert "not a regular file" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
+def test_name_lock_refuses_an_unopenable_plant_of_any_shape(tmp_path, monkeypatch):
+    """The plant check asks for a regular file, not for the shapes we can plant.
+
+    A socket is what separates those two predicates. Where the kernel checks
+    permission before type — Linux does — a socket whose mode denies both opens
+    reaches this check, and a predicate narrowed to FIFOs would degrade instead
+    of refusing it: exactly the silent loss of exclusion the check exists to
+    prevent. This platform declines a socket by type at every mode, so the
+    shape that discriminates cannot be planted here. The type is fabricated
+    instead, over a real file whose bits genuinely deny both opens, so
+    everything up to the ``lstat`` is the ordinary EACCES route.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("")
+    os.chmod(lock_path, 0o000)
+
+    real_lstat = os.lstat
+
+    def _report_a_socket(target, **kwargs):
+        found = real_lstat(target, **kwargs)
+        if os.fspath(target) == str(lock_path):
+            return os.stat_result((stat.S_IFSOCK | 0o000, *tuple(found)[1:]))
+        return found
+
+    monkeypatch.setattr(os, "lstat", _report_a_socket)
+
+    with pytest.raises(ConfigError) as excinfo:
+        with name_lock(lock_path, "x", timeout=0.2):
+            pytest.fail("entered with a socket at the lock path")
 
     assert "not a regular file" in str(excinfo.value)

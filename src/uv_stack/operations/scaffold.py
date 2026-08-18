@@ -203,7 +203,9 @@ def write_profile(
         something stack did not create occupies the lock path. Not every such object is
         refused this way; the rest raise ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason other than
-        permission; a permission failure degrades to no locking instead.
+        permission. A permission failure degrades to no locking instead, unless
+        something stack did not create is sitting at the lock path — that is
+        refused above, whether or not its mode permits an open.
     """
     _validate_name("profile", name)
     shadow_message = (
@@ -250,7 +252,9 @@ def write_bundle(
         the lock path. Not every such object is refused this way; the rest raise
         ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason other than
-        permission; a permission failure degrades to no locking instead.
+        permission. A permission failure degrades to no locking instead, unless
+        something stack did not create is sitting at the lock path — that is
+        refused above, whether or not its mode permits an open.
     """
     _validate_name("bundle", name)
     self_refs = bundle_self_references(name, tokens)
@@ -386,7 +390,9 @@ def write_env_sources(
         something stack did not create occupies the lock path. Not every such object is
         refused this way; the rest raise ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason other than
-        permission; a permission failure degrades to no locking instead.
+        permission. A permission failure degrades to no locking instead, unless
+        something stack did not create is sitting at the lock path — that is
+        refused above, whether or not its mode permits an open.
     """
     _validate_name("environment", name)
     # Preflight, adoption, both publishes and the withdrawal are one operation.
@@ -514,7 +520,9 @@ def write_starter_profile(config: ConfigRoot) -> Path:
         timeout, or something stack did not create occupies the lock path. Not every
         such object is refused this way; the rest raise ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason other than
-        permission; a permission failure degrades to no locking instead.
+        permission. A permission failure degrades to no locking instead, unless
+        something stack did not create is sitting at the lock path — that is
+        refused above, whether or not its mode permits an open.
     """
     shadow_message = (
         "Profile 'starter' would shadow the existing bundle: "

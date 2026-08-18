@@ -72,18 +72,24 @@ _LOCK_POLL = 0.01
 #: records on Linux) also degrades, where a retry loop might succeed.
 _LOCK_CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
 
-#: Errnos from the read-only retry that mean "there is no lock file to be had
-#: here", as opposed to "something is wrong here". A .locks directory this user
-#: may not write gives ENOENT — there is nothing to open, and nothing may be
-#: created — and a lock file owned by someone else gives EACCES or EPERM. Only
-#: those degrade. Anything else is an object at the path rather than a
-#: permission problem: a symlink swapped in after the first open (ELOOP), a
-#: socket, which the kernel declines to open at all. A directory is not among
-#: them — an O_RDONLY open of one succeeds, so a directory swapped in reaches
-#: the S_ISREG check rather than this set, and a directory that was there all
-#: along failed the create with EISDIR and never got here. Degrading on any of
-#: these would silently cost exclusion, which is the failure the S_ISREG check
-#: below exists to refuse loudly.
+#: Errnos from the read-only retry that mean "no descriptor because of what
+#: this user may do here", as opposed to "no descriptor because of what is
+#: sitting here". A .locks directory this user may not write gives ENOENT —
+#: there is nothing to open, and nothing may be created — and a lock file owned
+#: by someone else gives EACCES or EPERM. Membership does not decide the
+#: outcome on its own: these errnos say nothing about the target's type, so
+#: they fall through to the lstat below, which refuses a plant and degrades
+#: only where it finds no plant to refuse. Anything outside the set is the
+#: kernel declining the open on account of the object itself — a symlink
+#: swapped in after the first open (ELOOP), a socket or a device node it will
+#: not open at all (EOPNOTSUPP here, ENXIO elsewhere) — and is re-raised,
+#: because degrading on it would silently cost exclusion. Which side a shape
+#: falls on is the platform's ordering rather than a property of the shape:
+#: this kernel refuses a socket by type at every mode, while one that checks
+#: permission first reports EACCES for the same socket at 0200 and so puts it
+#: inside the set. The lstat is what makes both orders reach the same refusal.
+#: A directory that was there all along reaches none of this — the create fails
+#: EISDIR, which is neither a permission problem nor this set.
 _LOCK_UNOBTAINABLE_ERRNOS = frozenset({errno.ENOENT, errno.EACCES, errno.EPERM})
 
 
@@ -253,11 +259,12 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     :param timeout: Seconds to wait. ``None`` reads the module default at call
         time.
     :raises ConfigError: If the lock is still held when the timeout expires, if
-        something other than a regular file sits at ``path`` — a FIFO or a
-        device node always, whatever its mode; a socket only where this user's
-        permissions rather than its type are what stop the open, since a kernel
-        that declines a socket by type raises ``OSError`` below instead — or if
-        any non-directory — including a symlink to nowhere or to a
+        something other than a regular file sits at ``path`` — a FIFO always,
+        whatever its mode; a socket or a device node only where this user's
+        permissions, rather than the kernel declining the open outright, are
+        what stop it, since a socket refused by type and a device node with no
+        driver behind it raise ``OSError`` below instead — or if any
+        non-directory — including a symlink to nowhere or to a
         non-directory — stands at ``path``'s parent or at any ancestor of it
         that would have to be created. The offender is named, which is not
         always the parent. A symlink above the parent that the kernel will not
@@ -362,10 +369,11 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         # for as long as the plant sits there. That is the failure the S_ISREG
         # check below exists to refuse, reached by a route that never gets an fd
         # to check. lstat needs no permission on the file itself, only search on
-        # .locks, which every route here already had, so the plant is visible
-        # even at mode 0000. Anything it cannot see — nothing there at all, or a
-        # .locks this user may not search — leaves nothing to lock anyway and
-        # falls through to the degrade.
+        # .locks, so the plant is visible even at mode 0000. Where even that is
+        # refused — or there is nothing at the path at all — the degrade below
+        # stands: a .locks this user may not search disables locking for every
+        # name under it, plant or no plant, so seeing this one would not have
+        # saved the others.
         try:
             planted = not stat.S_ISREG(os.lstat(path).st_mode)
         except OSError:
