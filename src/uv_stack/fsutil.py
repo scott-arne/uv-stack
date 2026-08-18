@@ -245,10 +245,12 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     :param timeout: Seconds to wait. ``None`` reads the module default at call
         time.
     :raises ConfigError: If the lock is still held when the timeout expires, if
-        a FIFO, socket, or device node sits at ``path``, or if a file, a FIFO,
-        or a symlink to nowhere stands at ``path``'s parent or at any ancestor
-        of it that would have to be created — the offender is named, which is
-        not always the parent.
+        a FIFO, socket, or device node sits at ``path``, or if any
+        non-directory — including a symlink to nowhere or to a non-directory —
+        stands at ``path``'s parent or at any ancestor of it that would have to
+        be created. The offender is named, which is not always the parent. A
+        symlink *loop* above the parent is the one exception; it raises
+        ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
         symlink planted at ``path``, a directory at ``path``, and a symlink
@@ -280,21 +282,23 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     except (FileExistsError, NotADirectoryError):
         # Something that is not a directory stands where one has to be: at
         # .locks, or — since parents=True walks up — at any ancestor above it.
-        # mkdir(exist_ok=True) splits the two errnos by how it meets the
-        # offender, not by where the offender is: EEXIST when the offender is
-        # the final component of a step it tries to create (anything at .locks,
-        # and a symlink to nowhere or to itself at any level, which it retries
-        # after the ENOENT), ENOTDIR when the offender is a real non-directory
-        # it must traverse (a file or FIFO at the config root). A symlink loop
-        # above .locks is the one shape neither arm takes — it raises ELOOP,
-        # which surfaces as the bare OSError the docstring describes. Neither
-        # errno is a permission error, so no branch below sees them either.
-        # Unlike a permission problem, degrading buys
-        # nothing here: no name under this root could ever take a lock, and
-        # anyone who can write a shared root can plant one. So refuse, the way
-        # a non-regular file at the lock path itself is refused — and name the
-        # offender rather than the lock path, because a message pointing at a
-        # .locks that does not exist sends the user looking for nothing.
+        # Which of the two errnos mkdir(exist_ok=True) reports depends on how
+        # it meets the offender, not on where the offender is. EEXIST when the
+        # offender is the final component of a step mkdir attempts: anything at
+        # .locks, whatever its type, and also a symlink to nowhere higher up,
+        # which mkdir retries as a component to create once the first attempt
+        # gives ENOENT. ENOTDIR when the offender is something mkdir has to
+        # traverse: any non-directory above .locks, including a symlink that
+        # resolves to one. A symlink loop above .locks is the single shape
+        # neither arm takes — mkdir reports it as ELOOP, which surfaces as the
+        # bare OSError the docstring describes. Neither errno is a permission
+        # error, so no branch below sees them either. Unlike a permission
+        # problem, degrading buys nothing here: no name under this root could
+        # ever take a lock, and anyone who can write a shared root can plant
+        # one. So refuse, the way a non-regular file at the lock path itself is
+        # refused — and name the offender rather than the lock path, because a
+        # message pointing at a .locks that does not exist sends the user
+        # looking for nothing.
         blocker = next(
             (
                 ancestor

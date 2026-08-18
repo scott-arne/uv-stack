@@ -574,10 +574,11 @@ def test_name_lock_refuses_a_non_directory_where_it_needs_one(tmp_path, where, k
     """A non-directory where the lock directory goes is refused, and named.
 
     Both errnos mkdir(exist_ok=True) raises for this are covered, and they do
-    not split by location: a dangling symlink gives FileExistsError wherever it
-    sits, because mkdir retries it as a component to create after the ENOENT,
-    while a file gives FileExistsError at .locks and NotADirectoryError at the
-    root, where it is traversed rather than created. Neither is a permission
+    not split by location: anything at .locks gives FileExistsError, since
+    mkdir meets it as a component to create, and so does a dangling symlink at
+    the root, which mkdir retries as a component once the first attempt gives
+    ENOENT; a file at the root gives NotADirectoryError, because there mkdir
+    traverses it rather than creating it. Neither is a permission
     error and neither is an flock errno, so they reach neither degrade.
     Degrading would cost every name in the root its lock at once, for nothing —
     the same trade the FIFO check above refuses for a single name.
