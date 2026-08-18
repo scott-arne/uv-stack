@@ -313,15 +313,17 @@ def write_env_sources(
     ``_withdraw``'s two residuals). A concurrent writer that *adopted* this
     ``python.txt`` and won the ``stack.txt`` race loses its interpreter pin
     when we withdraw; nothing on disk distinguishes that writer from one that
-    never asked for an interpreter — but only where that writer did not take
-    the lock, such as an older ``stack``, a hand-editing user, or a degraded
-    lock. When neither condition holds — the publish
-    raised something other than a ``ConfigError`` and a ``stack.txt`` is
-    present — no withdrawal happens: ``python.txt`` then either sits beside a
-    ``stack.txt`` that did land (a complete environment), or, where that
-    ``stack.txt`` is a third party's (whose file may equally have appeared
-    before the publish raised), remains as an adopter-residual orphan (strictly
-    less harmful than the unretryable state the withdrawal would have created).
+    never asked for an interpreter. That scenario arises only where the adopter
+    did not serialize behind the per-name lock this call takes: an older
+    ``stack`` that predates the locking, or a lock that degraded to a no-op
+    because the filesystem could not take it. When neither *withdrawal*
+    condition holds — the publish raised something other than a ``ConfigError``
+    and a ``stack.txt`` is present — no withdrawal happens: ``python.txt`` then
+    either sits beside a ``stack.txt`` that did land (a complete environment),
+    or, where that ``stack.txt`` is a third party's (whose file may equally
+    have appeared before the publish raised), remains as an adopter-residual
+    orphan (strictly less harmful than the unretryable state the withdrawal
+    would have created).
 
     Adoption is deliberately narrow: it requires a regular file (not a
     directory, FIFO, socket, or device node — reading any non-regular file can
@@ -374,9 +376,9 @@ def write_env_sources(
         environment already has a ``stack.txt``, if it has a ``python.txt``
         that cannot be adopted on the terms above, if the ``stack.txt``
         publish was itself refused and the ``python.txt`` this call published
-        could not then be withdrawn, or if another process holds the lock
-        when the timeout expires.
-    :raises OSError: If the lock file cannot be created or opened.
+        could not then be withdrawn, or if another process holds the per-name
+        lock when the timeout expires.
+    :raises OSError: If the per-name lock file cannot be created or opened.
     """
     _validate_name("environment", name)
     # Preflight, adoption, both publishes and the withdrawal are one operation.

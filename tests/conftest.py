@@ -89,5 +89,10 @@ def _lock_held_by_another_process(lock_path: Path) -> Iterator[None]:
             proc.stdin.close()
             proc.wait(timeout=10)
         finally:
+            # Unconditional: a failed assert or a child that outlives the
+            # timeout must not leave a process holding the lock for the rest
+            # of the session. kill() no-ops once the child has been reaped,
+            # and the wait() reaps it when it has not.
             proc.kill()
+            proc.wait()
             proc.stdout.close()

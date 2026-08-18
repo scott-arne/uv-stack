@@ -27,9 +27,11 @@ _LINK_FALLBACK_ERRNOS = frozenset(
 #: absent getattr yields 0, which does not weaken the guard — it removes it,
 #: and the identity recheck each caller runs afterwards comes too late to make
 #: up for it: it can reject what the open returned, not stop the open from
-#: following a symlink or hanging on a FIFO. Callers therefore skip the guarded
-#: open entirely rather than take it unguarded; what each gives up by skipping
-#: differs, and is stated at the call site.
+#: following a symlink or hanging on a FIFO. The identical-rewrite fast paths
+#: therefore skip the guarded open entirely rather than take it unguarded;
+#: what each gives up by skipping differs, and is stated at the call site.
+#: name_lock is the one caller that cannot skip — it must open the lock file
+#: to lock it at all — so it takes the open with O_NOFOLLOW alone.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _FASTPATH_AVAILABLE = bool(_O_NOFOLLOW) and bool(_O_NONBLOCK)
@@ -58,10 +60,16 @@ _LOCK_TIMEOUT = 5.0
 #: handoff is imperceptible, large enough not to spin.
 _LOCK_POLL = 0.01
 
-#: The only flock failures that mean "somebody else holds it". Anything else
-#: means this filesystem cannot lock at all — some NFS and FUSE mounts return
-#: ENOLCK or EOPNOTSUPP — which is the no-fcntl case arriving by another route.
-_LOCK_CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN})
+#: Errnos treated as contention — another process holds the lock. EACCES is
+#: here because CPython's fcntl.flock falls back to fcntl(F_SETLK) where the
+#: build lacks HAVE_FLOCK, and POSIX permits F_SETLK to report a conflicting
+#: lock as either EACCES or EAGAIN. Any other errno is treated as "this
+#: filesystem cannot lock" and degrades to the no-fcntl no-op: some NFS and
+#: FUSE mounts return ENOLCK or EOPNOTSUPP, and the degrade is chosen so an
+#: unlockable filesystem keeps working rather than failing every create. The
+#: trade-off is that a transient ENOLCK (e.g., kernel out of memory for lock
+#: records on Linux) also degrades, where a retry loop might succeed.
+_LOCK_CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -210,9 +218,9 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     empty file is left behind deliberately.
 
     Where ``fcntl`` does not exist, or where the filesystem refuses to lock
-    (returning ENOLCK or EOPNOTSUPP, as some NFS and FUSE mounts do), this is
-    a no-op that yields immediately; what that gives up is stated at each call
-    site.
+    (any errno outside the contended set — some NFS and FUSE mounts return
+    ENOLCK or EOPNOTSUPP), this is a no-op that yields immediately; what that
+    gives up is stated at each call site.
 
     :param path: Lock file. Parent directories are created if absent.
     :param name: The profile/bundle/environment name being created, for the
@@ -234,8 +242,13 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     path.parent.mkdir(parents=True, exist_ok=True)
     # 0o666 & ~umask, matching atomic_write_new: a lock file created by one
     # user must stay openable by another sharing the config root, which 0o600
-    # would break. O_NOFOLLOW refuses a planted symlink, the same guard
-    # atomic_write's fast path insists on.
+    # would break. O_NOFOLLOW refuses a planted symlink; unlike atomic_write's
+    # fast path this open cannot be skipped when the flags are missing, since
+    # there is no lock without it, so it takes O_NOFOLLOW alone rather than
+    # both guards. O_NONBLOCK is not needed here: the open is O_RDWR, which
+    # returns immediately on a planted FIFO instead of waiting for a peer.
+    # Where the constant is absent _O_NOFOLLOW is 0 and only the symlink
+    # refusal is lost — the locking itself is unaffected.
     fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o666)
     try:
         deadline = time.monotonic() + limit

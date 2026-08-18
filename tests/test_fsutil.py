@@ -10,7 +10,13 @@ import pytest
 
 from tests.conftest import _lock_held_by_another_process
 from uv_stack.errors import ConfigError
-from uv_stack.fsutil import _LOCK_AVAILABLE, atomic_write, atomic_write_new, name_lock
+from uv_stack.fsutil import (
+    _LOCK_AVAILABLE,
+    _O_NOFOLLOW,
+    atomic_write,
+    atomic_write_new,
+    name_lock,
+)
 
 
 def test_atomic_write_creates_file(tmp_path: Path):
@@ -409,3 +415,51 @@ def test_name_lock_degrades_when_the_filesystem_cannot_lock(tmp_path, monkeypatc
 
     assert entered
     assert elapsed < 1.0, f"degraded path waited {elapsed:.2f}s instead of proceeding"
+    assert lock_path.is_file()
+
+
+@pytest.mark.skipif(not _O_NOFOLLOW, reason="requires O_NOFOLLOW")
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_refuses_a_symlink_at_the_lock_path(tmp_path):
+    """The lock's open refuses to follow a symlink planted at the lock path.
+
+    Without O_NOFOLLOW the open follows the link, so anyone able to write to
+    the config root can redirect it at a file of their choosing — and O_CREAT
+    through a dangling link would create that file. Exclusion still works in
+    that case, which is why nothing else in the suite catches a missing flag.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    external = tmp_path / "target"
+    external.write_text("content")
+    lock_path.symlink_to(external)
+
+    with pytest.raises(OSError):
+        with name_lock(lock_path, "x"):
+            pytest.fail("entered with a symlink at the lock path")
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_treats_eacces_as_contention(tmp_path, monkeypatch):
+    """EACCES from fcntl.flock is treated as contention, not a degrade trigger.
+
+    CPython's fcntl.flock emulates with fcntl(F_SETLK) where the build lacks
+    HAVE_FLOCK, and POSIX permits F_SETLK to report a conflicting lock as
+    either EACCES or EAGAIN. Before EACCES was added to the contended set,
+    it fell through to the degrade branch and name_lock entered its body
+    holding nothing.
+    """
+    import fcntl
+
+    def refuse_with_eacces(fd, op):
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(fcntl, "flock", refuse_with_eacces)
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_TIMEOUT", 0.2)
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+
+    with pytest.raises(ConfigError) as excinfo:
+        with name_lock(lock_path, "x"):
+            pytest.fail("entered despite EACCES contention")
+
+    assert "another stack process" in str(excinfo.value)
