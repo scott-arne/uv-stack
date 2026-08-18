@@ -425,18 +425,42 @@ def test_name_lock_refuses_a_symlink_at_the_lock_path(tmp_path):
 
     Without O_NOFOLLOW the open follows the link, so anyone able to write to
     the config root can redirect it at a file of their choosing — and O_CREAT
-    through a dangling link would create that file. Exclusion still works in
-    that case, which is why nothing else in the suite catches a missing flag.
+    through a *dangling* link creates that file outright. Exclusion still
+    works in that case, so nothing else in the suite would catch the missing
+    flag; the target's non-creation is the property worth pinning. The errno
+    is not asserted: it is ELOOP here, EMLINK on FreeBSD, EFTYPE on NetBSD.
     """
     lock_path = tmp_path / ".locks" / "stem-x.lock"
     lock_path.parent.mkdir(parents=True)
-    external = tmp_path / "target"
-    external.write_text("content")
-    lock_path.symlink_to(external)
+    target = tmp_path / "planted-target"
+    lock_path.symlink_to(target)
+    assert not target.exists()
 
     with pytest.raises(OSError):
         with name_lock(lock_path, "x"):
             pytest.fail("entered with a symlink at the lock path")
+
+    assert not target.exists(), "O_CREAT followed the link and created the target"
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_refuses_a_fifo_at_the_lock_path(tmp_path):
+    """A non-regular file at the lock path is refused, not silently tolerated.
+
+    flock on a FIFO fails with an errno outside the contended set (ENOTSUP on
+    macOS), which without this check takes the degrade branch and makes the
+    lock a silent no-op for that name — verified by having a second process
+    acquire the same path while the first believed it held the lock.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    os.mkfifo(lock_path)
+
+    with pytest.raises(ConfigError) as excinfo:
+        with name_lock(lock_path, "x"):
+            pytest.fail("entered with a FIFO at the lock path")
+
+    assert "not a regular file" in str(excinfo.value)
 
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")

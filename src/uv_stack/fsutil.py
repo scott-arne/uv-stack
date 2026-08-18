@@ -25,13 +25,13 @@ _LINK_FALLBACK_ERRNOS = frozenset(
 #: known in advance needs both: O_NOFOLLOW so a symlinked target is never
 #: opened, O_NONBLOCK so a FIFO target never blocks the open. Where either is
 #: absent getattr yields 0, which does not weaken the guard — it removes it,
-#: and the identity recheck each caller runs afterwards comes too late to make
-#: up for it: it can reject what the open returned, not stop the open from
-#: following a symlink or hanging on a FIFO. The identical-rewrite fast paths
-#: therefore skip the guarded open entirely rather than take it unguarded;
-#: what each gives up by skipping differs, and is stated at the call site.
-#: name_lock is the one caller that cannot skip — it must open the lock file
-#: to lock it at all — so it takes the open with O_NOFOLLOW alone.
+#: and an identity recheck afterwards comes too late to make up for it: it can
+#: reject what the open returned, not stop the open from following a symlink
+#: or hanging on a FIFO. Both callers that can decline the open therefore skip
+#: it entirely rather than take it unguarded; what each gives up by skipping
+#: differs, and is stated at the call site. name_lock is the one caller that
+#: cannot decline — there is no lock without the open — so it takes O_NOFOLLOW
+#: alone and rejects a non-regular target after the fact.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _FASTPATH_AVAILABLE = bool(_O_NOFOLLOW) and bool(_O_NONBLOCK)
@@ -227,10 +227,11 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         timeout message.
     :param timeout: Seconds to wait. ``None`` reads the module default at call
         time.
-    :raises ConfigError: If the lock is still held when the timeout expires.
+    :raises ConfigError: If the lock is still held when the timeout expires,
+        or if something other than a regular file sits at ``path``.
     :raises OSError: If the lock file cannot be created or opened — a bad
-        config root or an over-long name surfaces here rather than at the
-        write it guards.
+        config root, an over-long name, or a symlink planted at ``path``
+        surfaces here rather than at the write it guards.
     """
     if not _LOCK_AVAILABLE:
         yield
@@ -242,15 +243,26 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     path.parent.mkdir(parents=True, exist_ok=True)
     # 0o666 & ~umask, matching atomic_write_new: a lock file created by one
     # user must stay openable by another sharing the config root, which 0o600
-    # would break. O_NOFOLLOW refuses a planted symlink; unlike atomic_write's
-    # fast path this open cannot be skipped when the flags are missing, since
+    # would break. O_NOFOLLOW refuses a planted symlink; unlike the two skips
+    # below this open cannot be declined when the flags are missing, since
     # there is no lock without it, so it takes O_NOFOLLOW alone rather than
-    # both guards. O_NONBLOCK is not needed here: the open is O_RDWR, which
-    # returns immediately on a planted FIFO instead of waiting for a peer.
-    # Where the constant is absent _O_NOFOLLOW is 0 and only the symlink
-    # refusal is lost — the locking itself is unaffected.
+    # both guards. O_NONBLOCK is not needed to keep the open from waiting —
+    # O_RDWR on a FIFO returns immediately on Linux and the BSDs — so the
+    # regular-file check below, not the open flags, is what handles a planted
+    # FIFO. Where the constant is absent _O_NOFOLLOW is 0 and only the symlink
+    # refusal is lost; the locking itself is unaffected.
     fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o666)
     try:
+        # flock on a FIFO or device node fails with an errno outside the
+        # contended set, which would take the degrade branch below and make
+        # this a silent no-op for the name — the one failure this lock must
+        # never have. Anyone who can write to a shared config root can plant
+        # one, so refuse loudly instead.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ConfigError(
+                f"Lock file is not a regular file: {path}",
+                hint="Remove it and retry; stack only ever creates a plain file here.",
+            )
         deadline = time.monotonic() + limit
         locked = False
         while True:
