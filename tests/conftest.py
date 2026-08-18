@@ -84,6 +84,10 @@ def _lock_held_by_another_process(lock_path: Path) -> Iterator[None]:
         assert proc.stdout.readline() == "ready\n"
         yield
     finally:
-        assert proc.stdin is not None
-        proc.stdin.close()
-        proc.wait(timeout=10)
+        try:
+            assert proc.stdin is not None
+            proc.stdin.close()
+            proc.wait(timeout=10)
+        finally:
+            proc.kill()
+            proc.stdout.close()

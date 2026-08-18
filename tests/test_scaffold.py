@@ -945,9 +945,10 @@ def test_write_env_sources_waits_for_another_process_on_the_same_env(
     config = ConfigRoot(tmp_path)
 
     with _lock_held_by_another_process(config.env_lock_path("myenv")):
-        with pytest.raises(ConfigError):
+        with pytest.raises(ConfigError) as excinfo:
             write_env_sources(config, "myenv", ["rich"], python="3.12")
 
+    assert "another stack process" in str(excinfo.value)
     assert not config.env_stack_path("myenv").exists()
     assert not config.env_python_path("myenv").exists()
 
@@ -960,3 +961,4 @@ def test_writers_still_work_when_locking_is_unavailable(tmp_path, monkeypatch):
     assert write_profile(config, "x", ["rich"]).is_file()
     assert write_bundle(config, "y", ["x"]).is_file()
     assert all(p.is_file() for p in write_env_sources(config, "e", ["x"], python="3.12"))
+    assert not config.locks_dir.exists()

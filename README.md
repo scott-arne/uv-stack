@@ -380,6 +380,7 @@ All state lives under one directory, resolved in this order:
 │   └── <name>.yaml
 ├── bundles/
 │   └── <name>.yaml
+├── .locks/                   # internal lock files (safe to leave alone)
 └── envs/
     └── <name>/
         ├── stack.txt             # required (defines the env)

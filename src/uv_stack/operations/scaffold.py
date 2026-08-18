@@ -198,7 +198,9 @@ def write_profile(
     :param description: Optional one-line description.
     :param tags: Optional tags.
     :returns: The path written.
-    :raises ConfigError: If the profile already exists or would shadow an existing bundle.
+    :raises ConfigError: If the profile already exists, would shadow an existing
+        bundle, or another process holds the lock when the timeout expires.
+    :raises OSError: If the lock file cannot be created or opened.
     """
     _validate_name("profile", name)
     shadow_message = (
@@ -206,7 +208,7 @@ def write_profile(
     )
     path = config.profile_path(name)
     # The pre-check, the publish, and _publish_unshadowed's post-check are one
-    # operation as far as another stack process is concerned. Without this the
+    # operation as far as another create is concerned. Without this the
     # post-check still catches a live competitor, but a competitor killed
     # between its publish and its own post-check leaves the collision on disk.
     # Where the lock is unavailable that is exactly the residual.
@@ -239,8 +241,10 @@ def write_bundle(
     :param description: Optional one-line description.
     :param tags: Optional tags.
     :returns: The path written.
-    :raises ConfigError: If the bundle already exists, references itself, or
-        would be shadowed by an existing profile.
+    :raises ConfigError: If the bundle already exists, references itself,
+        would be shadowed by an existing profile, or another process holds
+        the lock when the timeout expires.
+    :raises OSError: If the lock file cannot be created or opened.
     """
     _validate_name("bundle", name)
     self_refs = bundle_self_references(name, tokens)
@@ -309,7 +313,9 @@ def write_env_sources(
     ``_withdraw``'s two residuals). A concurrent writer that *adopted* this
     ``python.txt`` and won the ``stack.txt`` race loses its interpreter pin
     when we withdraw; nothing on disk distinguishes that writer from one that
-    never asked for an interpreter. When neither condition holds — the publish
+    never asked for an interpreter — but only where that writer did not take
+    the lock, such as an older ``stack``, a hand-editing user, or a degraded
+    lock. When neither condition holds — the publish
     raised something other than a ``ConfigError`` and a ``stack.txt`` is
     present — no withdrawal happens: ``python.txt`` then either sits beside a
     ``stack.txt`` that did land (a complete environment), or, where that
@@ -366,9 +372,11 @@ def write_env_sources(
         ``python.txt`` is absent from the list.
     :raises ConfigError: If ``name`` is not a valid environment name, if the
         environment already has a ``stack.txt``, if it has a ``python.txt``
-        that cannot be adopted on the terms above, or if the ``stack.txt``
+        that cannot be adopted on the terms above, if the ``stack.txt``
         publish was itself refused and the ``python.txt`` this call published
-        could not then be withdrawn.
+        could not then be withdrawn, or if another process holds the lock
+        when the timeout expires.
+    :raises OSError: If the lock file cannot be created or opened.
     """
     _validate_name("environment", name)
     # Preflight, adoption, both publishes and the withdrawal are one operation.
@@ -491,13 +499,18 @@ def write_starter_profile(config: ConfigRoot) -> Path:
 
     :param config: Configuration root.
     :returns: The path written.
-    :raises ConfigError: If a starter profile already exists or would shadow an existing bundle.
+    :raises ConfigError: If a starter profile already exists, would shadow an
+        existing bundle, or another process holds the lock when the timeout
+        expires.
+    :raises OSError: If the lock file cannot be created or opened.
     """
     shadow_message = (
         "Profile 'starter' would shadow the existing bundle: "
         f"{config.bundle_path('starter')}"
     )
     path = config.profile_path("starter")
+    # Same lock coverage as write_profile — pre-check, publish, and post-check
+    # are one operation. See write_profile for what it buys.
     with name_lock(config.stem_lock_path("starter"), "starter"):
         if config.bundle_exists("starter"):
             raise ConfigError(shadow_message, hint=_SHADOW_HINT)

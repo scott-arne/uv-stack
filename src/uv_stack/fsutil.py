@@ -36,7 +36,7 @@ _FASTPATH_AVAILABLE = bool(_O_NOFOLLOW) and bool(_O_NONBLOCK)
 
 
 def _lock_supported() -> bool:
-    """Whether this platform has the POSIX advisory locking `name_lock` needs."""
+    """Whether this platform has the POSIX advisory locking ``name_lock`` needs."""
     try:
         import fcntl  # noqa: F401
     except ImportError:  # pragma: no cover - non-Unix platforms
@@ -57,6 +57,11 @@ _LOCK_TIMEOUT = 5.0
 #: How long to wait between flock attempts. Small enough that an uncontended
 #: handoff is imperceptible, large enough not to spin.
 _LOCK_POLL = 0.01
+
+#: The only flock failures that mean "somebody else holds it". Anything else
+#: means this filesystem cannot lock at all — some NFS and FUSE mounts return
+#: ENOLCK or EOPNOTSUPP — which is the no-fcntl case arriving by another route.
+_LOCK_CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN})
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -204,8 +209,10 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     a fresh file at the same path and take a lock that excludes nobody, so the
     empty file is left behind deliberately.
 
-    Where ``fcntl`` does not exist this is a no-op that yields immediately;
-    what that gives up is stated at each call site.
+    Where ``fcntl`` does not exist, or where the filesystem refuses to lock
+    (returning ENOLCK or EOPNOTSUPP, as some NFS and FUSE mounts do), this is
+    a no-op that yields immediately; what that gives up is stated at each call
+    site.
 
     :param path: Lock file. Parent directories are created if absent.
     :param name: The profile/bundle/environment name being created, for the
@@ -227,19 +234,23 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     path.parent.mkdir(parents=True, exist_ok=True)
     # 0o666 & ~umask, matching atomic_write_new: a lock file created by one
     # user must stay openable by another sharing the config root, which 0o600
-    # would break.
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
+    # would break. O_NOFOLLOW refuses a planted symlink, the same guard
+    # atomic_write's fast path insists on.
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o666)
     try:
         deadline = time.monotonic() + limit
+        locked = False
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
                 break
-            except OSError:
-                # flock reports contention as EWOULDBLOCK/EAGAIN, which are the
-                # same errno; anything else from flock on a descriptor we just
-                # opened is not a condition retrying would clear, but waiting
-                # out the deadline reports it as the timeout it will become.
+            except OSError as exc:
+                if exc.errno not in _LOCK_CONTENDED_ERRNOS:
+                    # This filesystem cannot lock. Degrade to the no-op the
+                    # missing-fcntl path takes rather than stalling out the
+                    # deadline and blaming a competitor that does not exist.
+                    break
                 if time.monotonic() >= deadline:
                     raise ConfigError(
                         "Timed out waiting for another stack process to finish "
@@ -253,6 +264,7 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         try:
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if locked:
+                fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)

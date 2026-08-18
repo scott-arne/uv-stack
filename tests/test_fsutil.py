@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 import os
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -358,6 +360,7 @@ def test_name_lock_releases_on_exception(tmp_path):
         pass
 
 
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
 def test_name_lock_creates_the_directory_and_keeps_the_file(tmp_path):
     """The lock file is created on demand and deliberately never removed."""
     lock_path = tmp_path / ".locks" / "stem-x.lock"
@@ -380,3 +383,29 @@ def test_name_lock_is_a_noop_without_fcntl(tmp_path, monkeypatch):
 
     assert entered
     assert not lock_path.exists()
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_degrades_when_the_filesystem_cannot_lock(tmp_path, monkeypatch):
+    """ENOLCK from a network mount degrades like a missing fcntl, and does not stall.
+
+    Before this was discriminated, every create on such a filesystem waited out
+    the full timeout and then blamed a competing process that did not exist.
+    """
+    import fcntl
+
+    def refuse(fd, op):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(fcntl, "flock", refuse)
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_TIMEOUT", 5.0)
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+
+    started = time.monotonic()
+    entered = False
+    with name_lock(lock_path, "x"):
+        entered = True
+    elapsed = time.monotonic() - started
+
+    assert entered
+    assert elapsed < 1.0, f"degraded path waited {elapsed:.2f}s instead of proceeding"
