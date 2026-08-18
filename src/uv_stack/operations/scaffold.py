@@ -17,7 +17,13 @@ import yaml
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
-from uv_stack.fsutil import _FASTPATH_AVAILABLE, _O_NOFOLLOW, _O_NONBLOCK, atomic_write_new
+from uv_stack.fsutil import (
+    _FASTPATH_AVAILABLE,
+    _O_NOFOLLOW,
+    _O_NONBLOCK,
+    atomic_write_new,
+    name_lock,
+)
 from uv_stack.resolver import bundle_self_references
 
 _OVERWRITE_HINT = "Edit the file directly or choose another name."
@@ -198,16 +204,22 @@ def write_profile(
     shadow_message = (
         f"Profile '{name}' would shadow the existing bundle: {config.bundle_path(name)}"
     )
-    if config.bundle_exists(name):
-        raise ConfigError(shadow_message, hint=_SHADOW_HINT)
     path = config.profile_path(name)
-    _publish_unshadowed(
-        path,
-        _render_yaml(description, list(tags or []), packages),
-        f"Profile '{name}' already exists: {path}",
-        shadowed=lambda: config.bundle_exists(name),
-        shadow_message=shadow_message,
-    )
+    # The pre-check, the publish, and _publish_unshadowed's post-check are one
+    # operation as far as another stack process is concerned. Without this the
+    # post-check still catches a live competitor, but a competitor killed
+    # between its publish and its own post-check leaves the collision on disk.
+    # Where the lock is unavailable that is exactly the residual.
+    with name_lock(config.stem_lock_path(name), name):
+        if config.bundle_exists(name):
+            raise ConfigError(shadow_message, hint=_SHADOW_HINT)
+        _publish_unshadowed(
+            path,
+            _render_yaml(description, list(tags or []), packages),
+            f"Profile '{name}' already exists: {path}",
+            shadowed=lambda: config.bundle_exists(name),
+            shadow_message=shadow_message,
+        )
     return path
 
 
@@ -244,16 +256,19 @@ def write_bundle(
         f"Bundle '{name}' would be shadowed by the existing profile: "
         f"{config.profile_path(name)}"
     )
-    if config.profile_exists(name):
-        raise ConfigError(shadow_message, hint=_SHADOW_HINT)
     path = config.bundle_path(name)
-    _publish_unshadowed(
-        path,
-        _render_yaml(description, list(tags or []), tokens),
-        f"Bundle '{name}' already exists: {path}",
-        shadowed=lambda: config.profile_exists(name),
-        shadow_message=shadow_message,
-    )
+    # Same stem lock as write_profile — the two kinds share one namespace, so
+    # they must contend on one file. See write_profile for what it buys.
+    with name_lock(config.stem_lock_path(name), name):
+        if config.profile_exists(name):
+            raise ConfigError(shadow_message, hint=_SHADOW_HINT)
+        _publish_unshadowed(
+            path,
+            _render_yaml(description, list(tags or []), tokens),
+            f"Bundle '{name}' already exists: {path}",
+            shadowed=lambda: config.profile_exists(name),
+            shadow_message=shadow_message,
+        )
     return path
 
 
@@ -356,103 +371,109 @@ def write_env_sources(
         could not then be withdrawn.
     """
     _validate_name("environment", name)
-    stack_path = config.env_stack_path(name)
-    python_path = config.env_python_path(name)
-    python_text = python + "\n" if python is not None else None
+    # Preflight, adoption, both publishes and the withdrawal are one operation.
+    # Unlocked, a competitor can adopt the python.txt this call published, win
+    # the stack.txt race, and then lose its interpreter pin when this call's
+    # handler withdraws that inode — the inode is byte-identical either way, so
+    # nothing in the POSIX file API can tell the two apart after the fact.
+    with name_lock(config.env_lock_path(name), name):
+        stack_path = config.env_stack_path(name)
+        python_path = config.env_python_path(name)
+        python_text = python + "\n" if python is not None else None
 
-    # Preflight both targets before writing anything.
-    if stack_path.exists():
-        raise ConfigError(
-            f"Environment '{name}' already has a stack.txt.",
-            hint="Edit it directly, or omit TOKENS to rebuild the env.",
-        )
-    adopt_python = False
-    if python_text is not None and python_path.exists():
-        # Adoption may only take a regular file: a non-regular python.txt (FIFO,
-        # directory, socket, device node) is not something this code could have
-        # written, and reading one can block indefinitely or fail in ways refusing
-        # it does not. Anything other than a regular file falls through to the
-        # existing "already has a python.txt" refusal — the pre-change behavior.
-        # A symlink is refused by the open itself, which carries O_NOFOLLOW.
-        # Where either open flag does not exist on the platform, the preflight is
-        # not attempted: adoption is impossible and every existing python.txt
-        # reaches that same refusal, which costs the user a manual edit or delete
-        # but is recoverable, unlike an open that blocks on a FIFO.
-        if _FASTPATH_AVAILABLE:
-            try:
-                # O_NOFOLLOW and O_NONBLOCK keep the open itself from following a
-                # symlink or blocking on a FIFO, and binding the check to the
-                # descriptor means the bytes compared are the ones fstat approved.
-                # Both flags and the gate above come from fsutil, so one place
-                # decides whether this open is safe to make.
-                flags = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
-                fd = os.open(python_path, flags)
-                try:
-                    st_fd = os.fstat(fd)
-                    if stat.S_ISREG(st_fd.st_mode):
-                        with os.fdopen(fd, "rb") as handle:
-                            fd = -1  # ownership transferred to file object
-                            current_bytes = handle.read()
-                        if current_bytes.decode("utf-8") == python_text:
-                            # The read proves only what the descriptor's inode held,
-                            # while adoption is a claim about the pathname: re-verify
-                            # the path still names that inode before skipping the write.
-                            st_path = os.lstat(python_path)
-                            adopt_python = (
-                                (st_fd.st_dev, st_fd.st_ino) == (st_path.st_dev, st_path.st_ino)
-                            )
-                finally:
-                    if fd != -1:
-                        os.close(fd)
-            except (OSError, UnicodeDecodeError):
-                # A python.txt we cannot open, read, or decode as UTF-8 is not one we
-                # can prove is our own debris, so it is refused like any other foreign file.
-                pass
-        if not adopt_python:
+        # Preflight both targets before writing anything.
+        if stack_path.exists():
             raise ConfigError(
-                f"Environment '{name}' already has a python.txt.",
-                hint="Edit or delete it, or omit --python to inherit it.",
+                f"Environment '{name}' already has a stack.txt.",
+                hint="Edit it directly, or omit TOKENS to rebuild the env.",
             )
+        adopt_python = False
+        if python_text is not None and python_path.exists():
+            # Adoption may only take a regular file: a non-regular python.txt (FIFO,
+            # directory, socket, device node) is not something this code could have
+            # written, and reading one can block indefinitely or fail in ways refusing
+            # it does not. Anything other than a regular file falls through to the
+            # existing "already has a python.txt" refusal — the pre-change behavior.
+            # A symlink is refused by the open itself, which carries O_NOFOLLOW.
+            # Where either open flag does not exist on the platform, the preflight is
+            # not attempted: adoption is impossible and every existing python.txt
+            # reaches that same refusal, which costs the user a manual edit or delete
+            # but is recoverable, unlike an open that blocks on a FIFO.
+            if _FASTPATH_AVAILABLE:
+                try:
+                    # O_NOFOLLOW and O_NONBLOCK keep the open itself from following a
+                    # symlink or blocking on a FIFO, and binding the check to the
+                    # descriptor means the bytes compared are the ones fstat approved.
+                    # Both flags and the gate above come from fsutil, so one place
+                    # decides whether this open is safe to make.
+                    flags = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
+                    fd = os.open(python_path, flags)
+                    try:
+                        st_fd = os.fstat(fd)
+                        if stat.S_ISREG(st_fd.st_mode):
+                            with os.fdopen(fd, "rb") as handle:
+                                fd = -1  # ownership transferred to file object
+                                current_bytes = handle.read()
+                            if current_bytes.decode("utf-8") == python_text:
+                                # The read proves only what the descriptor's inode held,
+                                # while adoption is a claim about the pathname: re-verify
+                                # the path still names that inode before skipping the write.
+                                st_path = os.lstat(python_path)
+                                adopt_python = (
+                                    (st_fd.st_dev, st_fd.st_ino) == (st_path.st_dev, st_path.st_ino)
+                                )
+                    finally:
+                        if fd != -1:
+                            os.close(fd)
+                except (OSError, UnicodeDecodeError):
+                    # A python.txt we cannot open, read, or decode as UTF-8 is not one we
+                    # can prove is our own debris, so it is refused like any other foreign file.
+                    pass
+            if not adopt_python:
+                raise ConfigError(
+                    f"Environment '{name}' already has a python.txt.",
+                    hint="Edit or delete it, or omit --python to inherit it.",
+                )
 
-    written: list[Path] = []
-    published_python: os.stat_result | None = None
-    if python_text is not None and not adopt_python:
-        published_python = _publish(
-            python_path,
-            python_text,
-            f"Environment '{name}' already has a python.txt.",
-            "Edit or delete it, or omit --python to inherit it.",
-        )
-        written.append(python_path)
-    try:
-        _publish(
-            stack_path,
-            "\n".join(tokens) + "\n",
-            f"Environment '{name}' already has a stack.txt.",
-            "Edit it directly, or omit TOKENS to rebuild the env.",
-        )
-    except BaseException as exc:
-        # Withdraw unless a stack.txt that may be this call's own is sitting
-        # there. The two disjuncts are not equally strong: ConfigError comes
-        # only from _publish mapping FileExistsError, so it proves the
-        # no-clobber publish lost the name and the file is somebody else's,
-        # while the exists() check proves nothing about history — only that no
-        # stack.txt is there now to be left without its interpreter pin.
-        should_withdraw = isinstance(exc, ConfigError) or not stack_path.exists()
-        if published_python is not None and should_withdraw:
-            if not _withdraw(python_path, published_python):
-                if isinstance(exc, ConfigError):
-                    # Residual clause matches _withdraw_and_raise; hints differ intentionally.
-                    raise ConfigError(
-                        f"{exc.message.rstrip('.')}; {python_path} was just written and could "
-                        "not be removed",
-                        hint=f"Delete {python_path} by hand, then try again.",
-                    ) from exc
-                # Replacing a KeyboardInterrupt or an unexpected error with a
-                # ConfigError would hide the real failure. The residual python.txt
-                # is then an orphan, which adoption already handles.
-        raise
-    return [stack_path, *written]
+        written: list[Path] = []
+        published_python: os.stat_result | None = None
+        if python_text is not None and not adopt_python:
+            published_python = _publish(
+                python_path,
+                python_text,
+                f"Environment '{name}' already has a python.txt.",
+                "Edit or delete it, or omit --python to inherit it.",
+            )
+            written.append(python_path)
+        try:
+            _publish(
+                stack_path,
+                "\n".join(tokens) + "\n",
+                f"Environment '{name}' already has a stack.txt.",
+                "Edit it directly, or omit TOKENS to rebuild the env.",
+            )
+        except BaseException as exc:
+            # Withdraw unless a stack.txt that may be this call's own is sitting
+            # there. The two disjuncts are not equally strong: ConfigError comes
+            # only from _publish mapping FileExistsError, so it proves the
+            # no-clobber publish lost the name and the file is somebody else's,
+            # while the exists() check proves nothing about history — only that no
+            # stack.txt is there now to be left without its interpreter pin.
+            should_withdraw = isinstance(exc, ConfigError) or not stack_path.exists()
+            if published_python is not None and should_withdraw:
+                if not _withdraw(python_path, published_python):
+                    if isinstance(exc, ConfigError):
+                        # Residual clause matches _withdraw_and_raise; hints differ intentionally.
+                        raise ConfigError(
+                            f"{exc.message.rstrip('.')}; {python_path} was just written and could "
+                            "not be removed",
+                            hint=f"Delete {python_path} by hand, then try again.",
+                        ) from exc
+                    # Replacing a KeyboardInterrupt or an unexpected error with a
+                    # ConfigError would hide the real failure. The residual python.txt
+                    # is then an orphan, which adoption already handles.
+            raise
+        return [stack_path, *written]
 
 
 _STARTER_PROFILE = """\
@@ -476,14 +497,15 @@ def write_starter_profile(config: ConfigRoot) -> Path:
         "Profile 'starter' would shadow the existing bundle: "
         f"{config.bundle_path('starter')}"
     )
-    if config.bundle_exists("starter"):
-        raise ConfigError(shadow_message, hint=_SHADOW_HINT)
     path = config.profile_path("starter")
-    _publish_unshadowed(
-        path,
-        _STARTER_PROFILE,
-        f"Profile 'starter' already exists: {path}",
-        shadowed=lambda: config.bundle_exists("starter"),
-        shadow_message=shadow_message,
-    )
+    with name_lock(config.stem_lock_path("starter"), "starter"):
+        if config.bundle_exists("starter"):
+            raise ConfigError(shadow_message, hint=_SHADOW_HINT)
+        _publish_unshadowed(
+            path,
+            _STARTER_PROFILE,
+            f"Profile 'starter' already exists: {path}",
+            shadowed=lambda: config.bundle_exists("starter"),
+            shadow_message=shadow_message,
+        )
     return path

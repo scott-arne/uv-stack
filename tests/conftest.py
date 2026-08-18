@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -47,3 +50,40 @@ def config_tree(tmp_path: Path) -> ConfigRoot:
     env.joinpath("requirements.local.in").write_text("some-local-pkg\n")
 
     return ConfigRoot(root)
+
+
+_HOLD_LOCK = """\
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o666)
+fcntl.flock(fd, fcntl.LOCK_EX)
+sys.stdout.write("ready\\n")
+sys.stdout.flush()
+sys.stdin.readline()
+"""
+
+
+@contextmanager
+def _lock_held_by_another_process(lock_path: Path) -> Iterator[None]:
+    """Run a child process holding an exclusive flock on ``lock_path``.
+
+    Yields once the child confirms it has the lock, so the test body never
+    races the child's startup. The child releases by exiting when its stdin
+    closes.
+    """
+    import subprocess
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_LOCK, str(lock_path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline() == "ready\n"
+        yield
+    finally:
+        assert proc.stdin is not None
+        proc.stdin.close()
+        proc.wait(timeout=10)

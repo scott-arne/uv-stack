@@ -66,6 +66,10 @@ class ConfigRoot:
     def envs_dir(self) -> Path:
         return self.root / "envs"
 
+    @property
+    def locks_dir(self) -> Path:
+        return self.root / ".locks"
+
     # -- path helpers ----------------------------------------------------
     def project_python_path(self) -> Path:
         """Path to the root-level default for ``create project --python``.
@@ -107,6 +111,22 @@ class ConfigRoot:
 
     def env_environment_yml(self, name: str) -> Path:
         return self.env_dir(name) / "environment.yml"
+
+    def stem_lock_path(self, name: str) -> Path:
+        """Lock covering the shared profile/bundle stem namespace.
+
+        Profiles and bundles collide on a bare stem — that is the collision
+        this lock serializes — so both kinds take the same file.
+        """
+        return self.locks_dir / f"stem-{name}.lock"
+
+    def env_lock_path(self, name: str) -> Path:
+        """Lock covering one environment's source files.
+
+        A separate namespace from :meth:`stem_lock_path`: an env named ``x``
+        does not collide with a profile named ``x``.
+        """
+        return self.locks_dir / f"env-{name}.lock"
 
     # -- existence -------------------------------------------------------
     def profile_exists(self, name: str) -> bool:

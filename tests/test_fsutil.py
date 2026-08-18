@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from uv_stack.fsutil import atomic_write, atomic_write_new
+from tests.conftest import _lock_held_by_another_process
+from uv_stack.errors import ConfigError
+from uv_stack.fsutil import _LOCK_AVAILABLE, atomic_write, atomic_write_new, name_lock
 
 
 def test_atomic_write_creates_file(tmp_path: Path):
@@ -309,3 +311,72 @@ def test_atomic_write_non_ascii_utf8_byte_exactness(tmp_path):
     stamped = target.stat().st_mtime
     atomic_write(target, content)
     assert target.stat().st_mtime == stamped  # skip: UTF-8 match
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_excludes_another_process(tmp_path):
+    """A second process cannot enter while the first holds the lock.
+
+    Deterministic rather than timing-based: the exclusion is proved by the
+    timeout firing, which is guaranteed while the child holds the lock.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+
+    with _lock_held_by_another_process(lock_path):
+        with pytest.raises(ConfigError) as excinfo:
+            with name_lock(lock_path, "x", timeout=0.2):
+                pytest.fail("entered the lock while another process held it")
+
+    assert "another stack process" in str(excinfo.value)
+    assert "x" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_is_acquirable_once_the_holder_exits(tmp_path):
+    """The kernel releases the lock when the holder dies, so no name wedges."""
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+
+    with _lock_held_by_another_process(lock_path):
+        pass  # the child exits here, without ever unlocking explicitly
+
+    with name_lock(lock_path, "x", timeout=0.2):
+        pass  # acquires; a wedged lock would raise
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_releases_on_exception(tmp_path):
+    """An exception in the body still unlocks — the next caller is not blocked."""
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+
+    with pytest.raises(RuntimeError):
+        with name_lock(lock_path, "x", timeout=0.2):
+            raise RuntimeError("boom")
+
+    with name_lock(lock_path, "x", timeout=0.2):
+        pass
+
+
+def test_name_lock_creates_the_directory_and_keeps_the_file(tmp_path):
+    """The lock file is created on demand and deliberately never removed."""
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+
+    with name_lock(lock_path, "x"):
+        assert lock_path.is_file()
+    # Unlinking a file another process may hold open would let a third take a
+    # lock that excludes nobody, so the empty file stays.
+    assert lock_path.is_file()
+
+
+def test_name_lock_is_a_noop_without_fcntl(tmp_path, monkeypatch):
+    """Where fcntl is absent the block still runs and no lock file is made."""
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_AVAILABLE", False)
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+
+    entered = False
+    with name_lock(lock_path, "x"):
+        entered = True
+
+    assert entered
+    assert not lock_path.exists()

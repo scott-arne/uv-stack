@@ -19,7 +19,7 @@ from uv_stack.config import ConfigRoot
 from uv_stack.fsutil import atomic_write_new
 from uv_stack.parse import read_clean_lines
 
-_KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib"}
+_KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib", ".locks"}
 
 
 @dataclass

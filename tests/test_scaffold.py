@@ -4,8 +4,10 @@ from unittest import mock
 
 import pytest
 
+from tests.conftest import _lock_held_by_another_process
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
+from uv_stack.fsutil import _LOCK_AVAILABLE
 from uv_stack.operations.scaffold import (
     _SHADOW_HINT,
     write_bundle,
@@ -891,3 +893,70 @@ def test_write_bundle_probe_failure_with_failed_withdrawal(
     assert str(path) in str(excinfo.value.hint)
     assert "Delete" in excinfo.value.hint
     assert path.exists()
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_write_profile_waits_for_another_process_holding_the_stem_lock(
+    tmp_path, monkeypatch
+):
+    """write_profile is serialized against another process on the same stem.
+
+    Shortening the module default rather than passing a timeout is deliberate:
+    it proves write_profile reaches the lock at all, which a parameter the test
+    supplies itself could not.
+    """
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_TIMEOUT", 0.2)
+    config = ConfigRoot(tmp_path)
+
+    with _lock_held_by_another_process(config.stem_lock_path("x")):
+        with pytest.raises(ConfigError) as excinfo:
+            write_profile(config, "x", ["rich"])
+
+    assert "another stack process" in str(excinfo.value)
+    # Nothing was published while the competitor held the name.
+    assert not config.profile_path("x").exists()
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_write_bundle_contends_on_the_same_stem_lock_as_write_profile(
+    tmp_path, monkeypatch
+):
+    """The two kinds share one lock file — that is what makes them serialize.
+
+    A bundle taking a bundle-specific lock would pass a same-kind test and
+    still leave the cross-kind collision this task exists to close wide open.
+    """
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_TIMEOUT", 0.2)
+    config = ConfigRoot(tmp_path)
+
+    with _lock_held_by_another_process(config.stem_lock_path("x")):
+        with pytest.raises(ConfigError):
+            write_bundle(config, "x", ["rich"])
+
+    assert not config.bundle_path("x").exists()
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_write_env_sources_waits_for_another_process_on_the_same_env(
+    tmp_path, monkeypatch
+):
+    """The adopter surface is serialized too, not just the profile/bundle one."""
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_TIMEOUT", 0.2)
+    config = ConfigRoot(tmp_path)
+
+    with _lock_held_by_another_process(config.env_lock_path("myenv")):
+        with pytest.raises(ConfigError):
+            write_env_sources(config, "myenv", ["rich"], python="3.12")
+
+    assert not config.env_stack_path("myenv").exists()
+    assert not config.env_python_path("myenv").exists()
+
+
+def test_writers_still_work_when_locking_is_unavailable(tmp_path, monkeypatch):
+    """Degrading to a no-op must not change the ordinary success path."""
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_AVAILABLE", False)
+    config = ConfigRoot(tmp_path)
+
+    assert write_profile(config, "x", ["rich"]).is_file()
+    assert write_bundle(config, "y", ["x"]).is_file()
+    assert all(p.is_file() for p in write_env_sources(config, "e", ["x"], python="3.12"))

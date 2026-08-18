@@ -6,7 +6,12 @@ import errno
 import os
 import stat
 import tempfile
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+
+from uv_stack.errors import ConfigError
 
 #: os.link failures that mean "this filesystem cannot hard-link" — fall back
 #: to exclusive create. EEXIST is deliberately absent: that is the no-clobber
@@ -28,6 +33,30 @@ _LINK_FALLBACK_ERRNOS = frozenset(
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _FASTPATH_AVAILABLE = bool(_O_NOFOLLOW) and bool(_O_NONBLOCK)
+
+
+def _lock_supported() -> bool:
+    """Whether this platform has the POSIX advisory locking `name_lock` needs."""
+    try:
+        import fcntl  # noqa: F401
+    except ImportError:  # pragma: no cover - non-Unix platforms
+        return False
+    return True
+
+
+#: True only where fcntl.flock exists. Where it does not, name_lock is a no-op
+#: and the writers fall back to their post-publish collision checks alone: the
+#: both-processes-survive race stays closed, while the killed-mid-window case
+#: and the adopter residual do not. Same degrade-silently posture as
+#: _FASTPATH_AVAILABLE above and _PTY_AVAILABLE in runner.py.
+_LOCK_AVAILABLE = _lock_supported()
+
+#: Read at call time, not bound as a default argument, so a test can shorten it.
+_LOCK_TIMEOUT = 5.0
+
+#: How long to wait between flock attempts. Small enough that an uncontended
+#: handoff is imperceptible, large enough not to spin.
+_LOCK_POLL = 0.01
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -158,3 +187,72 @@ def atomic_write_new(path: Path, text: str) -> os.stat_result:
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
+
+
+@contextmanager
+def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterator[None]:
+    """Hold an exclusive interprocess lock at ``path`` for the duration of the block.
+
+    Serializes whole create-a-name operations across processes, so a pre-check,
+    the publish it guards, and the post-check that confirms it cannot be
+    interleaved with another process doing the same. The kernel releases the
+    lock when the holder exits or dies, so a killed holder never wedges the
+    name.
+
+    The lock file is created on first use and **never removed**. Unlinking a
+    file another process may already hold open would let a third process create
+    a fresh file at the same path and take a lock that excludes nobody, so the
+    empty file is left behind deliberately.
+
+    Where ``fcntl`` does not exist this is a no-op that yields immediately;
+    what that gives up is stated at each call site.
+
+    :param path: Lock file. Parent directories are created if absent.
+    :param name: The profile/bundle/environment name being created, for the
+        timeout message.
+    :param timeout: Seconds to wait. ``None`` reads the module default at call
+        time.
+    :raises ConfigError: If the lock is still held when the timeout expires.
+    :raises OSError: If the lock file cannot be created or opened — a bad
+        config root or an over-long name surfaces here rather than at the
+        write it guards.
+    """
+    if not _LOCK_AVAILABLE:
+        yield
+        return
+
+    import fcntl
+
+    limit = _LOCK_TIMEOUT if timeout is None else timeout
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # 0o666 & ~umask, matching atomic_write_new: a lock file created by one
+    # user must stay openable by another sharing the config root, which 0o600
+    # would break.
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
+    try:
+        deadline = time.monotonic() + limit
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                # flock reports contention as EWOULDBLOCK/EAGAIN, which are the
+                # same errno; anything else from flock on a descriptor we just
+                # opened is not a condition retrying would clear, but waiting
+                # out the deadline reports it as the timeout it will become.
+                if time.monotonic() >= deadline:
+                    raise ConfigError(
+                        "Timed out waiting for another stack process to finish "
+                        f"creating '{name}'",
+                        hint=(
+                            "Another stack process may be stuck; retry, or remove "
+                            f"{path} if none is running."
+                        ),
+                    ) from None
+                time.sleep(_LOCK_POLL)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
