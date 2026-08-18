@@ -78,8 +78,12 @@ _LOCK_CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCE
 #: created — and a lock file owned by someone else gives EACCES or EPERM. Only
 #: those degrade. Anything else is an object at the path rather than a
 #: permission problem: a symlink swapped in after the first open (ELOOP), a
-#: directory (EISDIR). Degrading on those would silently cost exclusion, which
-#: is the failure the S_ISREG check below exists to refuse loudly.
+#: socket, which the kernel declines to open at all. A directory is not among
+#: them — an O_RDONLY open of one succeeds, so a directory swapped in reaches
+#: the S_ISREG check rather than this set, and a directory that was there all
+#: along failed the create with EISDIR and never got here. Degrading on any of
+#: these would silently cost exclusion, which is the failure the S_ISREG check
+#: below exists to refuse loudly.
 _LOCK_UNOBTAINABLE_ERRNOS = frozenset({errno.ENOENT, errno.EACCES, errno.EPERM})
 
 
@@ -237,8 +241,10 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     yields immediately; what that gives up is stated at each call site. Permissions
     that the rest of ``stack`` writes fine are therefore never turned into a
     root where every create fails. An object planted where the lock belongs is
-    the one thing not degraded: it costs exclusion without saving anything, so
-    it is refused.
+    refused rather than degraded whenever an open reaches it: it costs exclusion
+    without saving anything. Only one combination hides it — a plant this user
+    may not write, on a platform lacking the retry's guard flags — because there
+    both opens are gone before anything can look at what is there.
 
     :param path: Lock file. Its parent directory is created if absent and if
         this user may create it.
@@ -247,7 +253,8 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     :param timeout: Seconds to wait. ``None`` reads the module default at call
         time.
     :raises ConfigError: If the lock is still held when the timeout expires, if
-        a FIFO, socket, or device node sits at ``path``, or if any
+        a FIFO or device node sits at ``path`` — but not a socket, which the
+        kernel will not open at all and which therefore raises below — or if any
         non-directory — including a symlink to nowhere or to a non-directory —
         stands at ``path``'s parent or at any ancestor of it that would have to
         be created. The offender is named, which is not always the parent. A
@@ -256,7 +263,7 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
-        symlink planted at ``path``, a directory at ``path``, and an
+        symlink planted at ``path``, a socket or a directory at ``path``, and an
         unresolvable symlink at an ancestor of ``path``'s parent are the
         reachable ones; the list is not closed, so a filesystem that fails an
         open some other way surfaces here rather than at the write it guards.
@@ -347,11 +354,13 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
                     # would cost exclusion, so let it surface.
                     raise
     if fd == -1:
-        # No lock file to be had at all: nothing here is ours to write and
-        # nothing is there to read. Degrade to the same no-op an unlockable
-        # filesystem takes rather than failing a create the rest of stack would
-        # complete — os.replace and os.link need the directory the data lives
-        # in, not this one. A root that is genuinely unusable still fails a
+        # No lock file to be had: nothing here is ours to write and nothing is
+        # there to read — or, where the guard flags are missing, the read-only
+        # retry was declined before it could find out, the only route here that
+        # can leave a readable file unread. Degrade to the same no-op an
+        # unlockable filesystem takes rather than failing a create the rest of
+        # stack would complete — os.replace and os.link need the directory the
+        # data lives in, not this one. A root that is genuinely unusable fails a
         # moment later, at the write, naming the file the user actually asked
         # for. Yielding out here rather than inside the handler keeps the
         # caller's own exceptions from being chained to a lock-file error that

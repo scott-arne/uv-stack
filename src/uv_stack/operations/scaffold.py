@@ -198,9 +198,10 @@ def write_profile(
     :param description: Optional one-line description.
     :param tags: Optional tags.
     :returns: The path written.
-    :raises ConfigError: If the profile already exists, would shadow an existing
-        bundle, or the stem lock cannot be used — another process holds it past
-        the timeout, or something stack did not create occupies the lock path.
+    :raises ConfigError: If the profile already exists, would shadow an existing bundle,
+        or the stem lock cannot be used — another process holds it past the timeout, or
+        something stack did not create occupies the lock path. Not every such object is
+        refused this way; the rest raise ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason other than
         permission; a permission failure degrades to no locking instead.
     """
@@ -243,10 +244,11 @@ def write_bundle(
     :param description: Optional one-line description.
     :param tags: Optional tags.
     :returns: The path written.
-    :raises ConfigError: If the bundle already exists, references itself,
-        would be shadowed by an existing profile, or the stem lock cannot be
-        used — another process holds it past the timeout, or something stack
-        did not create occupies the lock path.
+    :raises ConfigError: If the bundle already exists, references itself, would be
+        shadowed by an existing profile, or the stem lock cannot be used — another
+        process holds it past the timeout, or something stack did not create occupies
+        the lock path. Not every such object is refused this way; the rest raise
+        ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason other than
         permission; a permission failure degrades to no locking instead.
     """
@@ -376,13 +378,13 @@ def write_env_sources(
     :param python: When given, also write ``python.txt`` with this version.
     :returns: The paths written by THIS call, ``stack.txt`` first. An adopted
         ``python.txt`` is absent from the list.
-    :raises ConfigError: If ``name`` is not a valid environment name, if the
-        environment already has a ``stack.txt``, if it has a ``python.txt``
-        that cannot be adopted on the terms above, if the ``stack.txt``
-        publish was itself refused and the ``python.txt`` this call published
-        could not then be withdrawn, or if the per-name lock cannot be used —
-        another process holds it past the timeout, or something stack did not
-        create occupies the lock path.
+    :raises ConfigError: If ``name`` is not a valid environment name, if the environment
+        already has a ``stack.txt``, if it has a ``python.txt`` that cannot be adopted
+        on the terms above, if the ``stack.txt`` publish was itself refused and the
+        ``python.txt`` this call published could not then be withdrawn, or if the per-
+        name lock cannot be used — another process holds it past the timeout, or
+        something stack did not create occupies the lock path. Not every such object is
+        refused this way; the rest raise ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason other than
         permission; a permission failure degrades to no locking instead.
     """
@@ -507,10 +509,10 @@ def write_starter_profile(config: ConfigRoot) -> Path:
 
     :param config: Configuration root.
     :returns: The path written.
-    :raises ConfigError: If a starter profile already exists, would shadow an
-        existing bundle, or the stem lock cannot be used — another process
-        holds it past the timeout, or something stack did not create occupies
-        the lock path.
+    :raises ConfigError: If a starter profile already exists, would shadow an existing
+        bundle, or the stem lock cannot be used — another process holds it past the
+        timeout, or something stack did not create occupies the lock path. Not every
+        such object is refused this way; the rest raise ``OSError`` below.
     :raises OSError: If the lock file cannot be opened for a reason other than
         permission; a permission failure degrades to no locking instead.
     """
