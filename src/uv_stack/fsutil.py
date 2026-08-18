@@ -75,21 +75,26 @@ _LOCK_CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCE
 #: Errnos from the read-only retry that mean "no descriptor because of what
 #: this user may do here", as opposed to "no descriptor because of what is
 #: sitting here". A .locks directory this user may not write gives ENOENT —
-#: there is nothing to open, and nothing may be created — and a lock file owned
-#: by someone else gives EACCES or EPERM. Membership does not decide the
-#: outcome on its own: these errnos say nothing about the target's type, so
-#: they fall through to the lstat below, which refuses a plant and degrades
-#: only where it finds no plant to refuse. Anything outside the set is the
-#: kernel declining the open on account of the object itself — a symlink
-#: swapped in after the first open (ELOOP), a socket or a device node it will
-#: not open at all (EOPNOTSUPP here, ENXIO elsewhere) — and is re-raised,
-#: because degrading on it would silently cost exclusion. Which side a shape
-#: falls on is the platform's ordering rather than a property of the shape:
-#: this kernel refuses a socket by type at every mode, while one that checks
-#: permission first reports EACCES for the same socket at 0200 and so puts it
-#: inside the set. The lstat is what makes both orders reach the same refusal.
-#: A directory that was there all along reaches none of this — the create fails
-#: EISDIR, which is neither a permission problem nor this set.
+#: there is nothing to open, and nothing may be created — and a path this user
+#: is barred from, by permission bits or by a MAC layer, gives EACCES or, on
+#: some systems, EPERM. Membership does not decide the outcome on its own:
+#: these errnos say nothing about the target's type, so they fall through to
+#: the lstat below, which refuses a plant and degrades only where it finds no
+#: plant to refuse. An errno outside the set is re-raised, because degrading on
+#: it would silently cost exclusion — whether it is the kernel declining this
+#: particular object (a symlink swapped in after the first open, ELOOP; a
+#: socket whose type it will not open, EOPNOTSUPP here and ENXIO elsewhere; a
+#: device node with no driver behind it, ENXIO) or a failure with nothing to do
+#: with the path at all.
+#:
+#: Which side a shape falls on is the platform's ordering rather than a
+#: property of the shape: this kernel refuses a socket by type at every mode,
+#: while one that checks permission first reports EACCES for the same socket at
+#: 0200 and so puts it inside the set. Neither order degrades, which is the
+#: point — but they refuse by different routes and raise different exceptions,
+#: the lstat here and the re-raise there. A directory that was there all along
+#: reaches none of this: the create fails EISDIR, which is neither a permission
+#: problem nor this set.
 _LOCK_UNOBTAINABLE_ERRNOS = frozenset({errno.ENOENT, errno.EACCES, errno.EPERM})
 
 
@@ -259,21 +264,22 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     :param timeout: Seconds to wait. ``None`` reads the module default at call
         time.
     :raises ConfigError: If the lock is still held when the timeout expires, if
-        something other than a regular file sits at ``path`` — a FIFO always,
-        whatever its mode; a socket or a device node only where this user's
-        permissions, rather than the kernel declining the open outright, are
-        what stop it, since a socket refused by type and a device node with no
-        driver behind it raise ``OSError`` below instead — or if any
-        non-directory — including a symlink to nowhere or to a
-        non-directory — stands at ``path``'s parent or at any ancestor of it
-        that would have to be created. The offender is named, which is not
-        always the parent. A symlink above the parent that the kernel will not
-        resolve — a loop, or a chain past its link budget — is the one
-        exception; it raises ``OSError`` below.
+        something other than a regular file sits at ``path`` and the kernel
+        either let this user open it or refused only on this user's
+        permissions, or if any non-directory — including a symlink to nowhere
+        or to a non-directory — stands at ``path``'s parent or at any ancestor
+        of it that would have to be created. The offender is named, which is
+        not always the parent. What the kernel declines to open for a reason of
+        its own escapes this and raises ``OSError`` below: a symlink at
+        ``path``, a socket whose type it will not open, a device node with no
+        driver behind it, a directory, and a symlink above the parent it will
+        not resolve — a loop, or a chain past its link budget. A FIFO is the
+        shape that never escapes, at any mode.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
-        symlink planted at ``path``, a socket or a directory at ``path``, and an
-        unresolvable symlink at an ancestor of ``path``'s parent are the
+        symlink planted at ``path``, a socket or a device node the kernel will
+        not open, a directory at ``path``, and an unresolvable symlink at an
+        ancestor of ``path``'s parent are the
         reachable ones; the list is not closed, so a filesystem that fails an
         open some other way surfaces here rather than at the write it guards.
     """

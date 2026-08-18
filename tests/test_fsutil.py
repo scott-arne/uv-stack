@@ -788,7 +788,10 @@ def test_name_lock_refuses_a_plant_it_cannot_open(tmp_path, mode):
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
 @pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
-def test_name_lock_refuses_an_unopenable_plant_of_any_shape(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "shape", [stat.S_IFSOCK, stat.S_IFCHR, stat.S_IFBLK], ids=["socket", "chardev", "blockdev"]
+)
+def test_name_lock_refuses_an_unopenable_plant_of_any_shape(tmp_path, monkeypatch, shape):
     """The plant check asks for a regular file, not for the shapes we can plant.
 
     A socket is what separates those two predicates. Where the kernel checks
@@ -799,6 +802,12 @@ def test_name_lock_refuses_an_unopenable_plant_of_any_shape(tmp_path, monkeypatc
     shape that discriminates cannot be planted here. The type is fabricated
     instead, over a real file whose bits genuinely deny both opens, so
     everything up to the ``lstat`` is the ordinary EACCES route.
+
+    The device nodes are the same argument one step further out: they need
+    privilege to create, so no test can plant them either, and a predicate
+    written as a list of the shapes a test happens to use would let them
+    through. Only the parametrization makes ``not S_ISREG`` the thing under
+    test rather than the two shapes this suite can produce.
     """
     lock_path = tmp_path / ".locks" / "stem-x.lock"
     lock_path.parent.mkdir(parents=True)
@@ -807,16 +816,16 @@ def test_name_lock_refuses_an_unopenable_plant_of_any_shape(tmp_path, monkeypatc
 
     real_lstat = os.lstat
 
-    def _report_a_socket(target, **kwargs):
+    def _report_the_shape(target, **kwargs):
         found = real_lstat(target, **kwargs)
         if os.fspath(target) == str(lock_path):
-            return os.stat_result((stat.S_IFSOCK | 0o000, *tuple(found)[1:]))
+            return os.stat_result((shape | 0o000, *tuple(found)[1:]))
         return found
 
-    monkeypatch.setattr(os, "lstat", _report_a_socket)
+    monkeypatch.setattr(os, "lstat", _report_the_shape)
 
     with pytest.raises(ConfigError) as excinfo:
         with name_lock(lock_path, "x", timeout=0.2):
-            pytest.fail("entered with a socket at the lock path")
+            pytest.fail("entered with a non-regular file at the lock path")
 
     assert "not a regular file" in str(excinfo.value)
