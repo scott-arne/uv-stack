@@ -562,17 +562,25 @@ def test_name_lock_degrades_when_the_lock_file_cannot_be_had(tmp_path):
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
 @pytest.mark.parametrize(
-    "plant",
-    ["file at .locks", "dangling symlink at .locks", "file at the root", "dangling root"],
+    ("where", "kind"),
+    [
+        ("locks", "file"),
+        ("locks", "dangling symlink"),
+        ("root", "file"),
+        ("root", "dangling symlink"),
+    ],
 )
-def test_name_lock_refuses_a_non_directory_where_it_needs_one(tmp_path, plant):
+def test_name_lock_refuses_a_non_directory_where_it_needs_one(tmp_path, where, kind):
     """A non-directory where the lock directory goes is refused, and named.
 
-    mkdir(exist_ok=True) reports one at .locks as FileExistsError and one at
-    the root above it as NotADirectoryError. Neither is a permission error and
-    neither is an flock errno, so they reach neither degrade. Degrading would
-    cost every name in the root its lock at once, for nothing — the same trade
-    the FIFO check above refuses for a single name.
+    Both errnos mkdir(exist_ok=True) raises for this are covered, and they do
+    not split by location: a dangling symlink gives FileExistsError wherever it
+    sits, because mkdir retries it as a component to create after the ENOENT,
+    while a file gives FileExistsError at .locks and NotADirectoryError at the
+    root, where it is traversed rather than created. Neither is a permission
+    error and neither is an flock errno, so they reach neither degrade.
+    Degrading would cost every name in the root its lock at once, for nothing —
+    the same trade the FIFO check above refuses for a single name.
 
     parents=True means the offender may be an ancestor rather than .locks
     itself, so the reported path is asserted exactly: a message naming a .locks
@@ -580,19 +588,15 @@ def test_name_lock_refuses_a_non_directory_where_it_needs_one(tmp_path, plant):
     than the bare traceback it replaced.
     """
     root = tmp_path / "root"
-    if plant.endswith("the root") or plant == "dangling root":
+    if where == "root":
         offender = root
-        if plant == "dangling root":
-            root.symlink_to(tmp_path / "missing")
-        else:
-            root.write_text("")
     else:
         root.mkdir()
         offender = root / ".locks"
-        if plant.startswith("file"):
-            offender.write_text("")
-        else:
-            offender.symlink_to(tmp_path / "missing")
+    if kind == "file":
+        offender.write_text("")
+    else:
+        offender.symlink_to(tmp_path / "missing")
 
     with pytest.raises(ConfigError) as excinfo:
         with name_lock(root / ".locks" / "stem-x.lock", "x", timeout=0.2):
@@ -621,6 +625,9 @@ def test_name_lock_degrading_does_not_chain_onto_the_callers_exception(tmp_path)
     finally:
         locks.chmod(0o755)
 
+    # Without this the test passes vacuously wherever 0555 stops forcing the
+    # degrade: an undegraded lock has nothing to chain in the first place.
+    assert not (locks / "stem-x.lock").exists(), "the lock was taken, so nothing degraded"
     assert excinfo.value.__context__ is None
     assert excinfo.value.__cause__ is None
 

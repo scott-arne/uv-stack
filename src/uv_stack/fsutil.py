@@ -245,15 +245,16 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     :param timeout: Seconds to wait. ``None`` reads the module default at call
         time.
     :raises ConfigError: If the lock is still held when the timeout expires, if
-        a FIFO, socket, or device node sits at ``path``, or if something that
-        is not a directory stands at ``path``'s parent or at any ancestor of it
-        that would have to be created — the offender is named, which is not
-        always the parent.
+        a FIFO, socket, or device node sits at ``path``, or if a file, a FIFO,
+        or a symlink to nowhere stands at ``path``'s parent or at any ancestor
+        of it that would have to be created — the offender is named, which is
+        not always the parent.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
-        symlink planted at ``path``, and a directory at ``path`` are the
-        reachable ones; the list is not closed, so a filesystem that fails an
-        open some other way surfaces here rather than at the write it guards.
+        symlink planted at ``path``, a directory at ``path``, and a symlink
+        loop at an ancestor of ``path``'s parent are the reachable ones; the
+        list is not closed, so a filesystem that fails an open some other way
+        surfaces here rather than at the write it guards.
     """
     if not _LOCK_AVAILABLE:
         yield
@@ -278,10 +279,17 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW, 0o666)
     except (FileExistsError, NotADirectoryError):
         # Something that is not a directory stands where one has to be: at
-        # .locks, or — since parents=True walks up — at the config root above
-        # it. mkdir(exist_ok=True) reports the first shape as EEXIST and the
-        # second as ENOTDIR, and neither is a permission error, so neither
-        # branch below sees them. Unlike a permission problem, degrading buys
+        # .locks, or — since parents=True walks up — at any ancestor above it.
+        # mkdir(exist_ok=True) splits the two errnos by how it meets the
+        # offender, not by where the offender is: EEXIST when the offender is
+        # the final component of a step it tries to create (anything at .locks,
+        # and a symlink to nowhere or to itself at any level, which it retries
+        # after the ENOENT), ENOTDIR when the offender is a real non-directory
+        # it must traverse (a file or FIFO at the config root). A symlink loop
+        # above .locks is the one shape neither arm takes — it raises ELOOP,
+        # which surfaces as the bare OSError the docstring describes. Neither
+        # errno is a permission error, so no branch below sees them either.
+        # Unlike a permission problem, degrading buys
         # nothing here: no name under this root could ever take a lock, and
         # anyone who can write a shared root can plant one. So refuse, the way
         # a non-regular file at the lock path itself is refused — and name the
@@ -297,7 +305,7 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         )
         raise ConfigError(
             f"Not a directory: {blocker}",
-            hint="stack needs a directory here; move or remove it and retry.",
+            hint="Move or remove it and retry; stack only ever creates a directory here.",
         ) from None
     except PermissionError:
         # A shared config root whose .locks directory or lock file belongs to
