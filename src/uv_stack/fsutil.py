@@ -8,7 +8,7 @@ import stat
 import tempfile
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 from uv_stack.errors import ConfigError
@@ -251,16 +251,23 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
 
     Where ``fcntl`` does not exist, where the filesystem refuses to lock (any
     errno outside the contended set — some NFS and FUSE mounts return ENOLCK
-    or EOPNOTSUPP), or where the lock file simply cannot be had — because this
-    user may not write the shared config root, or because reopening it
-    read-only would take open guards this platform lacks — this is a no-op that
-    yields immediately; what that gives up is stated at each call site. Permissions
+    or EOPNOTSUPP), or where there is no lock file to be had — because this user
+    may not write the shared config root, or because reopening it read-only
+    would take open guards this platform lacks — this is a no-op that yields
+    immediately; what that gives up is stated at each call site. Permissions
     that the rest of ``stack`` writes fine are therefore never turned into a
-    root where every create fails. An object planted where the lock belongs is
-    refused rather than degraded: it costs exclusion without saving anything.
-    The refusal does not depend on being able to open the plant, so stripping
-    its permission bits does not buy a silent degrade — only a ``.locks`` this
-    user may not even search hides one, and that hides the whole directory.
+    root where every create fails.
+
+    What is refused rather than degraded is an object that *is* at ``path`` and
+    that neither open could obtain a descriptor for, whatever its type. Without
+    a descriptor there is no exclusion, so degrading would hand back a lock that
+    does not lock, silently, for as long as that object sits there — and it
+    costs nothing to save. Only a ``.locks`` this user may not even search hides
+    such an object, and that hides the whole directory. So that this strictness
+    never falls on a lock ``stack`` itself created, each acquisition re-applies
+    mode ``0o666`` to the file: the create is subject to whichever umask reached
+    the name first, and a ``077`` would otherwise leave every other user of a
+    shared root locked out of it.
 
     :param path: Lock file. Its parent directory is created if absent and if
         this user may create it.
@@ -269,20 +276,22 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     :param timeout: Seconds to wait. ``None`` reads the module default at call
         time.
     :raises ConfigError: If the lock is still held when the timeout expires, if
-        something other than a regular file sits at ``path`` and the kernel
-        either let this user open it or refused only on this user's permissions
-        while still letting them search the parent, or if any non-directory —
-        including a symlink to nowhere or to a non-directory — stands at
-        ``path``'s parent or at any ancestor of it that would have to be
-        created. The offender is named, which is not always the parent. What
+        something stands at ``path`` that this user cannot obtain a descriptor
+        for and the kernel refused only on this user's permissions while still
+        letting them search the parent, if something other than a regular file
+        stands there and the kernel let this user open it, or if any
+        non-directory — including a symlink to nowhere or to a non-directory —
+        stands at ``path``'s parent or at any ancestor of it that would have to
+        be created. The offender is named, which is not always the parent. What
         the kernel declines to open for a reason of its own escapes this and
         raises ``OSError`` below: a symlink at ``path``, a socket whose type it
         will not open, a device node with no driver behind it, a directory, and
         a symlink above the parent it will not resolve — a loop, or a chain
         past its link budget. A FIFO is the shape that never escapes, at any
-        mode. A parent this user may not search is the one case that neither
-        refuses nor raises: it hides whatever stands below it, so the whole
-        directory degrades, as the paragraph above says.
+        mode. Two cases neither refuse nor raise: a parent this user may not
+        search, which hides whatever stands below it so the whole directory
+        degrades, and a platform without the open guards, which declines the
+        read-only retry before it can learn whether the file was readable.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
         symlink planted at ``path``, a socket or a device node the kernel will
@@ -309,6 +318,7 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     # be declined when a constant is missing — there is no lock without it — so
     # a missing one is 0 and costs that single guard rather than the lock.
     fd = -1
+    retried = False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_CREAT | os.O_RDWR | _O_NOFOLLOW | _O_NONBLOCK, 0o666)
@@ -368,6 +378,7 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         # the create, so a platform missing either constant skips it and takes
         # the degrade below rather than opening a target it cannot guard.
         if _FASTPATH_AVAILABLE:
+            retried = True
             try:
                 fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK)
             except OSError as exc:
@@ -378,36 +389,49 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
                     raise
     if fd == -1:
         # Neither open got a descriptor, which reads as a permission problem —
-        # but a plant with its permission bits off is indistinguishable from one
-        # here, and degrading for it would silently cost this name its exclusion
-        # for as long as the plant sits there. That is the failure the S_ISREG
-        # check below exists to refuse, reached by a route that never gets an fd
-        # to check. lstat needs no permission on the file itself, only search on
-        # .locks, so the plant is visible even at mode 0000. Where even that is
-        # refused — or there is nothing at the path at all — the degrade below
-        # stands: a .locks this user may not search disables locking for every
-        # name under it, plant or no plant, so seeing this one would not have
-        # saved the others.
+        # but the descriptor is the whole mechanism, so whatever the reason,
+        # there is no exclusion to be had here. lstat says whether that is
+        # because something is sitting at the path or because nothing is; it
+        # needs no permission on the file itself, only search on .locks, so it
+        # sees an object even at mode 0000.
         try:
-            planted = not stat.S_ISREG(os.lstat(path).st_mode)
+            found = os.lstat(path)
         except OSError:
-            planted = False
-        if planted:
+            found = None
+        if found is not None and not stat.S_ISREG(found.st_mode):
             raise ConfigError(
                 f"Lock file is not a regular file: {path}",
                 hint="Remove it and retry; stack only ever creates a plain file here.",
             )
-        # A regular file, then, or nothing at all: nothing here is ours to write
-        # and nothing is there to read — or, where the guard flags are missing,
-        # the read-only retry was declined before it could find out, the one
-        # route here that can leave a readable file unread. Degrade to the same
-        # no-op an unlockable filesystem takes rather than failing a create the
-        # rest of stack would complete — os.replace and os.link need the
-        # directory the data lives in, not this one. A root that is genuinely
-        # unusable fails a moment later, at the write, naming the file the user
-        # actually asked for. Yielding out here rather than inside the handler
-        # keeps the caller's own exceptions from being chained to a lock-file
-        # error that has nothing to do with them.
+        if found is not None and retried:
+            # A regular file that neither open could touch: a lock another user
+            # created under a umask that left it unreadable, or one whose mode
+            # was changed afterwards. Degrading here would hand back a lock that
+            # does not lock, silently, for every process that meets this file —
+            # which is the failure this whole context manager exists to prevent,
+            # so refuse instead. The fchmod below keeps stack's own locks out of
+            # this case whatever umask created them, so a root that only ever
+            # sees stack does not reach it.
+            raise ConfigError(
+                f"Cannot open the lock file: {path}",
+                hint=(
+                    "Its owner must make it readable, or it must be removed; "
+                    "stack cannot serialize this name without opening it."
+                ),
+            )
+        # Nothing at the path, a .locks this user may not even search, or — where
+        # the guard flags are missing — a file the read-only retry was declined
+        # before it could reach, the one route here that can leave a readable file
+        # unread. None of the three is an object this user has been shown to be
+        # locked out of, and a .locks that cannot be searched disables locking for
+        # every name under it, so refusing one name would not have saved the
+        # others. Degrade to the same no-op an unlockable filesystem takes rather
+        # than failing a create the rest of stack would complete — os.replace and
+        # os.link need the directory the data lives in, not this one. A root that
+        # is genuinely unusable fails a moment later, at the write, naming the
+        # file the user actually asked for. Yielding out here rather than inside
+        # the handler keeps the caller's own exceptions from being chained to a
+        # lock-file error that has nothing to do with them.
         yield
         return
     try:
@@ -421,6 +445,17 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
                 f"Lock file is not a regular file: {path}",
                 hint="Remove it and retry; stack only ever creates a plain file here.",
             )
+        # 0o666 flat, not 0o666 & ~umask like everything else stack writes. The
+        # create above takes whichever umask the first user to reach this name
+        # happened to have, and a 077 leaves a lock file no other user can open
+        # — which costs every one of them their exclusion, since a descriptor is
+        # the whole mechanism. The mode is not for this process, which already
+        # holds the fd; it is for the next user, and it is why the refusal above
+        # can be strict without breaking a shared root. Failure means the file is
+        # someone else's, and it was openable enough to get here, so there is
+        # nothing to fix and nothing worth reporting.
+        with suppress(OSError):
+            os.fchmod(fd, 0o666)
         deadline = time.monotonic() + limit
         locked = False
         while True:

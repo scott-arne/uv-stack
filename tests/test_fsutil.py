@@ -714,6 +714,83 @@ def test_name_lock_refuses_an_unwritable_fifo_without_waiting(tmp_path):
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
 @pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
+def test_name_lock_refuses_a_regular_lock_file_it_cannot_open(tmp_path):
+    """A descriptor is the mechanism, so no descriptor has to mean no entry.
+
+    A regular file at the lock path that neither open can obtain is the one
+    unopenable shape that is not obviously a plant: a lock another user created
+    under a restrictive umask looks exactly like this. Degrading for it used to
+    seem like the conservative choice — it keeps a shared root working — but
+    what it actually does is hand every process that meets the file a lock that
+    excludes nobody, silently and permanently, which is the whole failure this
+    context manager exists to prevent. Refuse, and say so.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("")
+    os.chmod(lock_path, 0o000)
+
+    with pytest.raises(ConfigError) as excinfo:
+        with name_lock(lock_path, "x", timeout=0.2):
+            pytest.fail("entered without a descriptor, so without any exclusion")
+
+    assert "Cannot open the lock file" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
+def test_name_lock_widens_its_own_lock_file_past_a_restrictive_umask(tmp_path):
+    """What keeps the refusal above off stack's own locks.
+
+    The create takes ``0o666 & ~umask``, so whichever user reaches a name first
+    fixes its lock file's mode for everyone after them — and a 077 umask leaves
+    one that no other user can open. That is not a plant and not a
+    misconfiguration; it is the default outcome of a common umask, and under the
+    refusal above it would turn a shared root into a hard error for every user
+    but one. Re-applying the mode on each acquisition keeps the file openable
+    however it was created.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    previous = os.umask(0o077)
+    try:
+        with name_lock(lock_path, "x", timeout=0.2):
+            pass
+    finally:
+        os.umask(previous)
+
+    mode = stat.S_IMODE(lock_path.stat().st_mode)
+    assert mode == 0o666, f"a 077 umask left the lock file {oct(mode)}, unopenable by others"
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
+def test_name_lock_degrades_where_it_never_learned_the_file_was_unopenable(tmp_path, monkeypatch):
+    """The refusal is for what was tried and failed, not for what was skipped.
+
+    Without the open guards the read-only retry is not attempted, so the EACCES
+    that reached here came from the ``O_RDWR`` create alone — and that says
+    nothing about whether the file could have been locked, since a 0444 file
+    fails the create and satisfies the retry. Refusing on that evidence would
+    fail every readable lock file on such a platform. Degrade instead: this is
+    the same "we never found out" the missing-``fcntl`` path already takes.
+    """
+    from uv_stack import fsutil
+
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("")
+    os.chmod(lock_path, 0o000)
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
+
+    entered = False
+    with name_lock(lock_path, "x", timeout=0.2):
+        entered = True
+
+    assert entered, "refused on evidence the platform never gathered"
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
 def test_name_lock_skips_the_retry_it_cannot_guard(tmp_path, monkeypatch):
     """Without both guard flags the read-only retry is not attempted at all.
 
@@ -753,6 +830,10 @@ def test_name_lock_skips_the_retry_it_cannot_guard(tmp_path, monkeypatch):
     assert locked, "a readable regular file should have been locked via the retry"
 
     locked.clear()
+    # The control half took the lock, and taking it re-applies 0666 so the next
+    # user of a shared root is never locked out. Narrow it again, or the second
+    # half's create would simply succeed and never reach the retry at all.
+    os.chmod(lock_path, 0o444)
     monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
 
     with name_lock(lock_path, "x", timeout=0.2):
