@@ -835,6 +835,15 @@ def test_name_lock_widens_the_descriptor_it_holds_not_the_path(tmp_path, monkeyp
     is forced so the create cannot already leave the mode the widening would set,
     and the swap is driven from the ``fstat`` immediately before the widening, the
     only hook between it and the open.
+
+    The name is read at the instant the widening returns rather than after the
+    block, because the same swap now also fails the post-lock identity recheck:
+    the acquisition releases and reopens, and the rename it then meets is a
+    regular file it legitimately widens on the second pass. Reading afterwards
+    would see that second widening and call it a leak. The symlink meets
+    ``O_NOFOLLOW`` on the way back in instead, so that half raises — which is
+    the documented refusal of a symlink at the lock path, reached a moment
+    later than usual.
     """
     lock_path = tmp_path / ".locks" / "stem-x.lock"
     held = tmp_path / "held"
@@ -843,7 +852,9 @@ def test_name_lock_widens_the_descriptor_it_holds_not_the_path(tmp_path, monkeyp
     os.chmod(victim, 0o600)
 
     real_fstat = os.fstat
+    real_fchmod = os.fchmod
     swapped = []
+    name_after_widening = []
 
     def _swap_the_name(fd, **kwargs):
         found = real_fstat(fd, **kwargs)
@@ -857,22 +868,31 @@ def test_name_lock_widens_the_descriptor_it_holds_not_the_path(tmp_path, monkeyp
             swapped.append(True)
         return found
 
-    monkeypatch.setattr(os, "fstat", _swap_the_name)
+    def _record_the_name(fd, mode):
+        real_fchmod(fd, mode)
+        if not name_after_widening:
+            # Resolves to the renamed-in file directly, and to the symlink's
+            # target otherwise, so one reading covers both swaps.
+            name_after_widening.append(stat.S_IMODE(os.stat(lock_path).st_mode))
 
+    monkeypatch.setattr(os, "fstat", _swap_the_name)
+    monkeypatch.setattr(os, "fchmod", _record_the_name)
+
+    reopen = pytest.raises(OSError) if swap == "symlink" else contextlib.nullcontext()
     previous = os.umask(0o077)
     try:
-        with name_lock(lock_path, "x", timeout=0.2):
-            pass
+        with reopen:
+            with name_lock(lock_path, "x", timeout=0.2):
+                pass
     finally:
         os.umask(previous)
 
     assert swapped, "the swap never happened, so nothing was exercised"
     opened = stat.S_IMODE(held.stat().st_mode)
     assert opened == 0o666, f"the widening never reached the file it held open: {oct(opened)}"
-    # Resolves to the renamed-in file directly, and to the symlink's target
-    # otherwise, so one assertion covers both swaps.
-    planted = stat.S_IMODE(lock_path.stat().st_mode)
-    assert planted == 0o600, f"the widening followed the name and left {oct(planted)}"
+    assert name_after_widening == [0o600], (
+        f"the widening followed the name and left {name_after_widening}"
+    )
 
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
@@ -1079,3 +1099,144 @@ def test_name_lock_refuses_a_real_openable_non_regular_file():
             pytest.fail("entered with a character device at the lock path")
 
     assert "not a regular file" in str(excinfo.value)
+
+
+def _still_locked_against_a_fresh_open(path: Path) -> bool:
+    """Whether a second open of ``path`` is refused the lock this process holds.
+
+    ``flock`` conflicts between two open file descriptions of the same file even
+    within one process, so this answers "is the object standing at ``path``
+    right now the one the caller has locked" without a second process.
+
+    :param path: Lock file to test.
+    :returns: ``True`` if a fresh non-blocking acquisition is refused.
+    """
+    import fcntl
+
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.parametrize("gone", ["renamed over", "unlinked"])
+def test_name_lock_holds_the_file_at_the_name_not_the_one_it_opened(tmp_path, monkeypatch, gone):
+    """A lock is only handed back on the object the name currently resolves to.
+
+    ``flock`` binds to the open file description, so a lock taken on a file that
+    has since been moved out from under the name excludes nobody: the next
+    process opens whatever answers to the name and locks that instead, and both
+    run the critical section at once. The assertion is made from inside the
+    block, where a fresh open of the name must meet the lock this process is
+    holding — an assertion after the block, or on the swap alone, would pass
+    just as well against a lock on the file that was swapped away.
+
+    Both disappearances are kept because they reach the identity check by
+    different routes: a rename leaves it two stats to compare, while an unlink
+    leaves it nothing to stat at all, and treating that second case as a match
+    would hand back a lock on a file no other process can even open.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("")
+    real_fchmod = os.fchmod
+    swaps: list[bool] = []
+
+    def _lose_the_file(fd, mode):
+        real_fchmod(fd, mode)
+        if swaps:
+            return
+        if gone == "renamed over":
+            fresh = lock_path.parent / "fresh"
+            fresh.write_text("")
+            os.rename(fresh, lock_path)
+        else:
+            lock_path.unlink()
+        swaps.append(True)
+
+    monkeypatch.setattr(os, "fchmod", _lose_the_file)
+
+    with name_lock(lock_path, "x", timeout=2.0):
+        assert _still_locked_against_a_fresh_open(lock_path), (
+            "the lock is on the file that was swapped away, not the one at the name"
+        )
+
+    assert swaps, "the swap never happened, so nothing was exercised"
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_waits_for_the_holder_of_the_file_that_replaced_it(tmp_path, monkeypatch):
+    """The replacement is contended, so the reopen must block rather than enter.
+
+    The swapped-in file is one another process already holds. Taking the lock on
+    the file that was opened first would sail past that holder — which is the
+    concurrency failure itself, not merely an identity mismatch — so this pins
+    the outcome rather than the mechanism.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("")
+    replacement = tmp_path / ".locks" / "replacement"
+    real_fchmod = os.fchmod
+    swaps: list[bool] = []
+
+    def _swap_in_the_held_file(fd, mode):
+        real_fchmod(fd, mode)
+        if not swaps:
+            # The holder keeps its descriptor across the rename, so the file
+            # arrives at the lock path already locked.
+            os.rename(replacement, lock_path)
+            swaps.append(True)
+
+    with _lock_held_by_another_process(replacement):
+        monkeypatch.setattr(os, "fchmod", _swap_in_the_held_file)
+        with pytest.raises(ConfigError) as excinfo:
+            with name_lock(lock_path, "x", timeout=0.2):
+                pytest.fail("entered while another process held the file at the lock path")
+
+    assert swaps, "the swap never happened, so nothing was exercised"
+    assert "another stack process" in str(excinfo.value)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_gives_up_when_the_lock_file_keeps_being_replaced(tmp_path, monkeypatch):
+    """The reopen shares the caller's timeout instead of retrying forever.
+
+    A replacement on every acquisition is the shape that would spin: each pass
+    takes a lock, finds the name has moved on, and reopens. The deadline is
+    computed once for the whole acquisition, so the loop ends on it — and says
+    what actually happened rather than blaming a competing ``stack`` process
+    that was never there.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("")
+    real_fchmod = os.fchmod
+    swaps: list[bool] = []
+
+    def _swap_every_time(fd, mode):
+        real_fchmod(fd, mode)
+        fresh = lock_path.parent / "fresh"
+        fresh.write_text("")
+        os.rename(fresh, lock_path)
+        swaps.append(True)
+
+    monkeypatch.setattr(os, "fchmod", _swap_every_time)
+
+    started = time.monotonic()
+    with pytest.raises(ConfigError) as excinfo:
+        with name_lock(lock_path, "x", timeout=0.2):
+            pytest.fail("entered on a file the name no longer resolves to")
+    elapsed = time.monotonic() - started
+
+    assert len(swaps) > 1, "the acquisition never reopened, so no retry was exercised"
+    assert "keeps being replaced" in str(excinfo.value)
+    # Generous against a loaded CI box while still failing an unbounded retry.
+    assert elapsed < 5.0, f"the retry outlived the timeout it was given: {elapsed:.1f}s"
