@@ -295,12 +295,14 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         past its link budget. A FIFO is the shape that never escapes, at any
         mode. A parent this user may not search hides whatever stands below it,
         so the whole directory degrades rather than refusing or raising. All of
-        that is what both open guards produce; without them a symlink at
-        ``path`` is resolved rather than turned away, so it stops being an entry
-        of its own and takes the one for what it resolves to — the same
-        ``OSError`` where it will not resolve at all — and a regular file this
-        user cannot open degrades instead of being refused, the read-only retry
-        never having been tried.
+        that assumes both open guards, and so does every promise above it.
+        POSIX requires both, and ``fcntl`` — which gates this function entirely
+        — ships only where POSIX does, so the guardless arm below is defensive
+        rather than reachable; the suite drives it by substituting the
+        constants. Which shape it refuses there is deliberately not promised
+        here: the open resolves a symlink that the ``lstat`` behind it does
+        not, so the two halves of that arm disagree about what is standing at
+        the path, and no single rule covers both.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
         symlink planted at ``path``, a socket or a device node the kernel will
