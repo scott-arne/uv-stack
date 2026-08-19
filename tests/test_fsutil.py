@@ -1253,9 +1253,10 @@ def test_name_lock_keeps_a_lock_whose_name_cannot_be_examined(tmp_path, monkeypa
     Only a name that is gone means the next process will open something else.
     Every other ``lstat`` failure — a parent that stopped being searchable, a
     mount answering ESTALE — leaves the question unanswered, and answering it
-    "swapped" costs a lock that was verifiably held: the reopen meets the same
-    obstacle and degrades to no lock at all, which is the one outcome this
-    context manager exists to prevent.
+    "swapped" throws away a lock the kernel granted for nothing in return.
+    Under the shape here that costs the whole timeout; under an unsearchable
+    parent it costs the lock outright, which is the one outcome this context
+    manager exists to prevent.
 
     Refusing on every call rather than once is what makes this discriminate.
     Treating the failure as a swap then reopens, hits it again, and burns the

@@ -392,11 +392,13 @@ def _swapped_out(fd: int, path: Path) -> bool:
     except OSError:
         # Some other reason the name cannot be examined — a parent that stopped
         # being searchable, a network mount answering ESTALE — which says
-        # nothing about identity. Report no swap: a caller here already holds a
-        # verified lock, and releasing it buys nothing, since whatever hid the
-        # name from lstat hides it from the reopen too and the reopen would
-        # then degrade to no lock at all. Keeping it is at worst the behaviour
-        # from before this check existed.
+        # nothing about identity. Report no swap: this caller holds a lock the
+        # kernel granted, and throwing it away over a question that was never
+        # answered is not a trade worth making. What the reopen would do
+        # instead is not one thing — an unsearchable parent degrades, a
+        # non-directory one refuses, a cleared transient succeeds — so the
+        # argument for keeping the lock is the one that holds whatever happens:
+        # it is at worst the behaviour from before this check existed.
         return False
     return (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino)
 
