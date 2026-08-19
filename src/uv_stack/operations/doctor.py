@@ -206,7 +206,7 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
       ``dst`` unlinked or replaced in the same interval. No name of ours is
       left to remove, so the function returns and the caller records the move
       as applied. That report can outrun the facts, and one ``dst.lstat()``
-      before the return would make it accurate. It is deliberately not taken:
+      before the return would narrow that window. It is deliberately not taken:
       a raise here reaches :func:`_fix_convert_yaml`, which answers a failed
       move by withdrawing the YAML it just published — and in this window that
       YAML is the last surviving copy, the source and its backup both having
@@ -510,9 +510,9 @@ _REPAIRS = {
 def repair(config: ConfigRoot, findings: list[Finding]) -> list[RepairAction]:
     """Apply the safe fix for each finding that has one.
 
-    Findings without a registered handler are ignored. Nothing here deletes
-    user content: conversions keep the original as ``*.bak`` and renames skip
-    when the destination exists.
+    Findings without a registered handler are ignored. Conversions preserve
+    the original as ``*.bak``; renames skip when the destination exists.
+    :func:`_move_no_replace` can withdraw the last name of the moved inode.
 
     :param config: The configuration root being repaired.
     :param findings: Findings from :func:`diagnose`.
