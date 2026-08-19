@@ -262,7 +262,7 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
             dst.unlink(missing_ok=True)
     except FileNotFoundError:
         pass
-    raise OSError(f"{src} changed during move; nothing deleted")
+    raise OSError(f"{src} changed during move; {dst} withdrawn or already gone")
 
 
 def _move_no_replace(src: Path, dst: Path) -> None:
