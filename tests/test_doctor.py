@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import _lock_held_by_another_process
 from uv_stack.config import ConfigRoot
+from uv_stack.fsutil import _LOCK_AVAILABLE
 from uv_stack.operations.doctor import diagnose, repair
 
 
@@ -632,3 +634,39 @@ def test_move_no_replace_completes_when_the_source_vanishes_before_the_unlink(
     assert removed, "the race never fired; this no longer tests the window"
     assert not src.exists()
     assert dst.read_text() == "precious\n"
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_repair_conversion_serializes_against_a_concurrent_create(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """A conversion is a create in the shared stem namespace, so it takes the lock.
+
+    Publishing profiles/<stem>.yaml collides with a bundle create for the same
+    stem, and the collision spans two paths, so no no-clobber write can reserve
+    it. Without the lock the two commit on top of each other and diagnose then
+    reports nothing wrong. Holding the stem lock from another process is what
+    proves doctor asks for it: the conversion has no other reason to stop.
+
+    The env's missing python.txt is repaired in the same pass on purpose. The
+    lock raises ConfigError, which repair() does not catch, so an unavailable
+    stem must cost its own finding and nothing else.
+    """
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_TIMEOUT", 0.2)
+    legacy = config_tree.profiles_dir / "old.in"
+    legacy.write_text("numpy\n")
+    (config_tree.envs_dir / "main" / "python.txt").unlink()
+
+    with _lock_held_by_another_process(config_tree.stem_lock_path("old")):
+        actions = repair(config_tree, diagnose(config_tree))
+
+    converted = [a for a in actions if a.finding.kind == "legacy-profile"]
+    assert converted and not converted[0].applied
+    assert "another stack process" in converted[0].reason
+    assert legacy.exists()
+    assert not (config_tree.profiles_dir / "old.yaml").exists()
+
+    unrelated = [a for a in actions if a.finding.kind == "missing-python-txt"]
+    assert unrelated and unrelated[0].applied, (
+        "one unavailable stem lock aborted the rest of the repair pass"
+    )

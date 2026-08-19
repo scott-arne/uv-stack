@@ -16,7 +16,8 @@ from pathlib import Path
 import yaml
 
 from uv_stack.config import ConfigRoot
-from uv_stack.fsutil import atomic_write_new
+from uv_stack.errors import ConfigError
+from uv_stack.fsutil import atomic_write_new, name_lock
 from uv_stack.parse import read_clean_lines
 
 _KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib", ".locks"}
@@ -383,6 +384,38 @@ def _fix_python_txt(config: ConfigRoot, finding: Finding) -> RepairAction:
 def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
     assert finding.path is not None and finding.dest is not None
     description = f"convert {finding.path} to {finding.dest}"
+    # A conversion publishes profiles/<stem>.yaml or bundles/<stem>.yaml, which
+    # is a create in the same shared namespace scaffold's writers serialize on.
+    # Their post-check cannot cover this one: it runs before doctor publishes,
+    # so a bundle create that starts inside doctor's window commits, and doctor
+    # then commits the profile on top of it — leaving both kinds of the stem on
+    # disk with diagnose reporting nothing wrong. The collision spans two paths,
+    # so no single no-clobber write can reserve it; only the shared lock can.
+    stem = finding.path.stem
+    try:
+        with name_lock(config.stem_lock_path(stem), stem):
+            return _convert_under_stem_lock(config, finding, description, stem)
+    except ConfigError as error:
+        # Nothing inside the block raises ConfigError, so this is the lock
+        # itself: contended past its timeout, or standing on something
+        # name_lock refuses. Skip this one finding and say why. Letting it out
+        # would abort the whole pass — repair() catches only OSError — and cost
+        # every later finding its fix over one unavailable stem.
+        return RepairAction(finding, description, applied=False, reason=str(error))
+
+
+def _convert_under_stem_lock(
+    config: ConfigRoot, finding: Finding, description: str, stem: str
+) -> RepairAction:
+    """Convert one legacy file to YAML, with the stem's create lock already held.
+
+    :param config: The configuration root being repaired.
+    :param finding: The ``legacy-profile`` or ``legacy-bundle`` finding.
+    :param description: The unapplied-action wording for a skip.
+    :param stem: The profile/bundle name both kinds share.
+    :returns: The action taken, applied or skipped with a reason.
+    """
+    assert finding.path is not None and finding.dest is not None
     # Lstat the source for identity binding.
     try:
         src_identity_before = finding.path.lstat()
@@ -397,7 +430,6 @@ def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
             reason=f"{finding.dest.name} already exists",
         )
     # Cross-kind shadow guard: skip if the opposite kind exists for the stem.
-    stem = finding.path.stem
     if finding.kind == "legacy-profile":
         if config.bundle_exists(stem):
             return RepairAction(
