@@ -453,16 +453,24 @@ def test_name_lock_refuses_a_fifo_at_the_lock_path(tmp_path):
     macOS), which without this check takes the degrade branch and makes the
     lock a silent no-op for that name — verified by having a second process
     acquire the same path while the first believed it held the lock.
+
+    The mode is asserted afterwards because it also pins the order of the two
+    steps on this side of the open: the type check runs before the 0666
+    re-apply, so a plant is refused rather than widened. Reversing them leaves
+    the suite green otherwise, and hands anyone who plants a FIFO in a shared
+    root a mode change on it for free.
     """
     lock_path = tmp_path / ".locks" / "stem-x.lock"
     lock_path.parent.mkdir(parents=True)
-    os.mkfifo(lock_path)
+    os.mkfifo(lock_path, 0o644)
+    os.chmod(lock_path, 0o644)  # mkfifo's mode is subject to the umask; this is not
 
     with pytest.raises(ConfigError) as excinfo:
         with name_lock(lock_path, "x"):
             pytest.fail("entered with a FIFO at the lock path")
 
     assert "not a regular file" in str(excinfo.value)
+    assert stat.S_IMODE(os.lstat(lock_path).st_mode) == 0o644, "the refused plant was chmod'd"
 
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
@@ -714,7 +722,8 @@ def test_name_lock_refuses_an_unwritable_fifo_without_waiting(tmp_path):
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
 @pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
-def test_name_lock_refuses_a_regular_lock_file_it_cannot_open(tmp_path):
+@pytest.mark.parametrize("mode", [0o000, 0o200])
+def test_name_lock_refuses_a_regular_lock_file_it_cannot_open(tmp_path, mode):
     """A descriptor is the mechanism, so no descriptor has to mean no entry.
 
     A regular file at the lock path that neither open can obtain is the one
@@ -724,11 +733,16 @@ def test_name_lock_refuses_a_regular_lock_file_it_cannot_open(tmp_path):
     what it actually does is hand every process that meets the file a lock that
     excludes nobody, silently and permanently, which is the whole failure this
     context manager exists to prevent. Refuse, and say so.
+
+    0200 is the second mode because it denies the two opens separately rather
+    than at a stroke: the O_RDWR create needs read as well as write, and the
+    read-only retry needs the read it does not have. 0000 alone would leave a
+    create widened to O_WRONLY passing this test.
     """
     lock_path = tmp_path / ".locks" / "stem-x.lock"
     lock_path.parent.mkdir(parents=True)
     lock_path.write_text("")
-    os.chmod(lock_path, 0o000)
+    os.chmod(lock_path, mode)
 
     with pytest.raises(ConfigError) as excinfo:
         with name_lock(lock_path, "x", timeout=0.2):
@@ -760,6 +774,80 @@ def test_name_lock_widens_its_own_lock_file_past_a_restrictive_umask(tmp_path):
 
     mode = stat.S_IMODE(lock_path.stat().st_mode)
     assert mode == 0o666, f"a 077 umask left the lock file {oct(mode)}, unopenable by others"
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_still_locks_when_the_mode_re_apply_is_refused(tmp_path, monkeypatch):
+    """The widening above is a courtesy to the next user, never this one's business.
+
+    It can be refused. POSIX reserves ``chmod`` to the file's owner and to root,
+    so another user's lock file is one way; a file this user owns is another,
+    since the owner can be refused too — macOS does it for a file flagged
+    ``uchg``, measured here on a descriptor this process had just opened
+    read-only. By then the descriptor is in hand, so letting the error out would
+    fail a create whose lock was there for the taking. The refusal is injected
+    rather than planted because what produces it is platform-specific.
+
+    A live competitor is checked first: it is what says the lock was really
+    taken, rather than the acquisition having quietly degraded past the flock.
+    """
+
+    def _refuse(fd, mode):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchmod", _refuse)
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+
+    with _lock_held_by_another_process(lock_path):
+        with pytest.raises(ConfigError) as excinfo:
+            with name_lock(lock_path, "x", timeout=0.2):
+                pytest.fail("entered while another process held the lock")
+    assert "another stack process" in str(excinfo.value)
+
+    entered = False
+    with name_lock(lock_path, "x", timeout=0.2):
+        entered = True
+    assert entered, "a refused mode re-apply was allowed to fail the acquisition"
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_widens_the_descriptor_it_holds_not_the_path(tmp_path, monkeypatch):
+    """The mode goes to the open file, so a swap after the open cannot redirect it.
+
+    ``.locks`` is writable by every user of a shared root, so the name can be
+    replaced between the open and the widening. Against a path, the widening
+    would follow the symlink now sitting there and chmod its target 0666 —
+    against the descriptor it reaches the file that was actually opened, whatever
+    the name points at afterwards. ``O_NOFOLLOW`` does not cover this: it refuses
+    a symlink standing there at open time, not one planted a moment later.
+
+    The swap is driven from the ``fstat`` immediately before the widening, which
+    is the only hook between the two.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    victim = tmp_path / "victim"
+    victim.write_text("")
+    os.chmod(victim, 0o600)
+
+    real_fstat = os.fstat
+    swapped = []
+
+    def _swap_in_a_symlink(fd, **kwargs):
+        found = real_fstat(fd, **kwargs)
+        if not swapped and lock_path.is_file() and os.path.samestat(found, os.lstat(lock_path)):
+            lock_path.unlink()
+            lock_path.symlink_to(victim)
+            swapped.append(True)
+        return found
+
+    monkeypatch.setattr(os, "fstat", _swap_in_a_symlink)
+
+    with name_lock(lock_path, "x", timeout=0.2):
+        pass
+
+    assert swapped, "the swap never happened, so nothing was exercised"
+    mode = stat.S_IMODE(victim.stat().st_mode)
+    assert mode == 0o600, f"the widening followed the planted symlink and left {oct(mode)}"
 
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")

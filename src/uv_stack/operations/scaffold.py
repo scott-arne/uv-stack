@@ -200,12 +200,10 @@ def write_profile(
     :returns: The path written.
     :raises ConfigError: If the profile already exists, would shadow an existing bundle,
         or the stem lock cannot be used — another process holds it past the timeout, or
-        something stack did not create occupies the lock path. Not every such object is
-        refused this way; the rest raise ``OSError`` below.
-    :raises OSError: If the lock file cannot be opened for a reason other than
-        permission. A permission failure degrades to no locking only where
-        nothing is found at the lock path; whatever is there and cannot be
-        opened is refused above, whatever its type and whatever its mode.
+        what stands at the lock path is something :func:`uv_stack.fsutil.name_lock`
+        refuses, which includes a plain file no open could obtain a descriptor for.
+    :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
+        neither refuses nor degrades to no locking on; its docstring has the rule.
     """
     _validate_name("profile", name)
     shadow_message = (
@@ -248,13 +246,11 @@ def write_bundle(
     :returns: The path written.
     :raises ConfigError: If the bundle already exists, references itself, would be
         shadowed by an existing profile, or the stem lock cannot be used — another
-        process holds it past the timeout, or something stack did not create occupies
-        the lock path. Not every such object is refused this way; the rest raise
-        ``OSError`` below.
-    :raises OSError: If the lock file cannot be opened for a reason other than
-        permission. A permission failure degrades to no locking only where
-        nothing is found at the lock path; whatever is there and cannot be
-        opened is refused above, whatever its type and whatever its mode.
+        process holds it past the timeout, or what stands at the lock path is something
+        :func:`uv_stack.fsutil.name_lock` refuses, which includes a plain file no open
+        could obtain a descriptor for.
+    :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
+        neither refuses nor degrades to no locking on; its docstring has the rule.
     """
     _validate_name("bundle", name)
     self_refs = bundle_self_references(name, tokens)
@@ -387,12 +383,10 @@ def write_env_sources(
         on the terms above, if the ``stack.txt`` publish was itself refused and the
         ``python.txt`` this call published could not then be withdrawn, or if the
         per-name lock cannot be used — another process holds it past the timeout, or
-        something stack did not create occupies the lock path. Not every such object is
-        refused this way; the rest raise ``OSError`` below.
-    :raises OSError: If the lock file cannot be opened for a reason other than
-        permission. A permission failure degrades to no locking only where
-        nothing is found at the lock path; whatever is there and cannot be
-        opened is refused above, whatever its type and whatever its mode.
+        what stands at the lock path is something :func:`uv_stack.fsutil.name_lock`
+        refuses, which includes a plain file no open could obtain a descriptor for.
+    :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
+        neither refuses nor degrades to no locking on; its docstring has the rule.
     """
     _validate_name("environment", name)
     # Preflight, adoption, both publishes and the withdrawal are one operation.
@@ -517,12 +511,11 @@ def write_starter_profile(config: ConfigRoot) -> Path:
     :returns: The path written.
     :raises ConfigError: If a starter profile already exists, would shadow an existing
         bundle, or the stem lock cannot be used — another process holds it past the
-        timeout, or something stack did not create occupies the lock path. Not every
-        such object is refused this way; the rest raise ``OSError`` below.
-    :raises OSError: If the lock file cannot be opened for a reason other than
-        permission. A permission failure degrades to no locking only where
-        nothing is found at the lock path; whatever is there and cannot be
-        opened is refused above, whatever its type and whatever its mode.
+        timeout, or what stands at the lock path is something
+        :func:`uv_stack.fsutil.name_lock` refuses, which includes a plain file no open
+        could obtain a descriptor for.
+    :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
+        neither refuses nor degrades to no locking on; its docstring has the rule.
     """
     shadow_message = (
         "Profile 'starter' would shadow the existing bundle: "

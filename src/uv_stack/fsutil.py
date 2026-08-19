@@ -262,12 +262,17 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
     that neither open could obtain a descriptor for, whatever its type. Without
     a descriptor there is no exclusion, so degrading would hand back a lock that
     does not lock, silently, for as long as that object sits there — and it
-    costs nothing to save. Only a ``.locks`` this user may not even search hides
-    such an object, and that hides the whole directory. So that this strictness
-    never falls on a lock ``stack`` itself created, each acquisition re-applies
-    mode ``0o666`` to the file: the create is subject to whichever umask reached
-    the name first, and a ``077`` would otherwise leave every other user of a
-    shared root locked out of it.
+    costs nothing to save. Two things hide such an object from that refusal: a
+    ``.locks`` this user may not even search, which hides the whole directory
+    with it, and a platform without the open guards, where the read-only retry
+    is never taken and so a regular file is never shown to be unopenable. To
+    keep the strictness off a lock ``stack`` itself created, each acquisition
+    re-applies mode ``0o666`` to the file: the create is subject to whichever
+    umask reached the name first, and a ``077`` would otherwise leave every
+    other user of a shared root locked out of it. That re-apply is best effort
+    — a mode change can be refused even to the file's own owner, as macOS does
+    for a file flagged ``uchg`` — and where it does not take, a ``0600`` lock
+    keeps that mode, and whoever cannot open it then meets the refusal above.
 
     :param path: Lock file. Its parent directory is created if absent and if
         this user may create it.
@@ -290,8 +295,9 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         past its link budget. A FIFO is the shape that never escapes, at any
         mode. Two cases neither refuse nor raise: a parent this user may not
         search, which hides whatever stands below it so the whole directory
-        degrades, and a platform without the open guards, which declines the
-        read-only retry before it can learn whether the file was readable.
+        degrades, and a *regular* file on a platform without the open guards,
+        which declines the read-only retry before it can learn whether the file
+        was readable. A non-regular one is still refused there, on its type.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
         symlink planted at ``path``, a socket or a device node the kernel will
@@ -415,7 +421,7 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
             raise ConfigError(
                 f"Cannot open the lock file: {path}",
                 hint=(
-                    "Its owner must make it readable, or it must be removed; "
+                    "Remove it and retry, or make it readable to this user; "
                     "stack cannot serialize this name without opening it."
                 ),
             )
@@ -451,9 +457,13 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         # — which costs every one of them their exclusion, since a descriptor is
         # the whole mechanism. The mode is not for this process, which already
         # holds the fd; it is for the next user, and it is why the refusal above
-        # can be strict without breaking a shared root. Failure means the file is
-        # someone else's, and it was openable enough to get here, so there is
-        # nothing to fix and nothing worth reporting.
+        # can be strict without breaking a shared root. The descriptor and not
+        # the path, so that an object swapped in after the open is never what
+        # gets widened. Failure does not mean the file is someone else's — a
+        # mode change can be refused to the owner too, as macOS does for a file
+        # flagged uchg — but the descriptor is in hand either way, so raising
+        # here would fail this create over a courtesy to the next user. What
+        # that costs them is in the docstring.
         with suppress(OSError):
             os.fchmod(fd, 0o666)
         deadline = time.monotonic() + limit
