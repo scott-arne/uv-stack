@@ -200,8 +200,8 @@ def write_profile(
     :returns: The path written.
     :raises ConfigError: If the profile already exists, would shadow an existing bundle,
         or the stem lock cannot be used — another process holds it past the timeout, or
-        what stands at the lock path is something :func:`uv_stack.fsutil.name_lock`
-        refuses, which includes a plain file no open could obtain a descriptor for.
+        what stands at the lock path, or at a directory it needs, is something
+        :func:`uv_stack.fsutil.name_lock` refuses; its docstring has the rule.
     :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
         neither refuses nor degrades to no locking on; its docstring has the rule.
     """
@@ -246,9 +246,9 @@ def write_bundle(
     :returns: The path written.
     :raises ConfigError: If the bundle already exists, references itself, would be
         shadowed by an existing profile, or the stem lock cannot be used — another
-        process holds it past the timeout, or what stands at the lock path is something
-        :func:`uv_stack.fsutil.name_lock` refuses, which includes a plain file no open
-        could obtain a descriptor for.
+        process holds it past the timeout, or what stands at the lock path, or at a
+        directory it needs, is something :func:`uv_stack.fsutil.name_lock` refuses;
+        its docstring has the rule.
     :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
         neither refuses nor degrades to no locking on; its docstring has the rule.
     """
@@ -383,8 +383,8 @@ def write_env_sources(
         on the terms above, if the ``stack.txt`` publish was itself refused and the
         ``python.txt`` this call published could not then be withdrawn, or if the
         per-name lock cannot be used — another process holds it past the timeout, or
-        what stands at the lock path is something :func:`uv_stack.fsutil.name_lock`
-        refuses, which includes a plain file no open could obtain a descriptor for.
+        what stands at the lock path, or at a directory it needs, is something
+        :func:`uv_stack.fsutil.name_lock` refuses; its docstring has the rule.
     :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
         neither refuses nor degrades to no locking on; its docstring has the rule.
     """
@@ -511,9 +511,9 @@ def write_starter_profile(config: ConfigRoot) -> Path:
     :returns: The path written.
     :raises ConfigError: If a starter profile already exists, would shadow an existing
         bundle, or the stem lock cannot be used — another process holds it past the
-        timeout, or what stands at the lock path is something
-        :func:`uv_stack.fsutil.name_lock` refuses, which includes a plain file no open
-        could obtain a descriptor for.
+        timeout, or what stands at the lock path, or at a directory it needs, is
+        something :func:`uv_stack.fsutil.name_lock` refuses; its docstring has the
+        rule.
     :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
         neither refuses nor degrades to no locking on; its docstring has the rule.
     """

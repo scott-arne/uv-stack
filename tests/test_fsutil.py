@@ -811,20 +811,33 @@ def test_name_lock_still_locks_when_the_mode_re_apply_is_refused(tmp_path, monke
 
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
-def test_name_lock_widens_the_descriptor_it_holds_not_the_path(tmp_path, monkeypatch):
+@pytest.mark.parametrize("swap", ["rename", "symlink"])
+def test_name_lock_widens_the_descriptor_it_holds_not_the_path(tmp_path, monkeypatch, swap):
     """The mode goes to the open file, so a swap after the open cannot redirect it.
 
-    ``.locks`` is writable by every user of a shared root, so the name can be
-    replaced between the open and the widening. Against a path, the widening
-    would follow the symlink now sitting there and chmod its target 0666 —
-    against the descriptor it reaches the file that was actually opened, whatever
-    the name points at afterwards. ``O_NOFOLLOW`` does not cover this: it refuses
-    a symlink standing there at open time, not one planted a moment later.
+    Who can replace the name depends on the umask that created ``.locks`` — it is
+    ``0o777 & ~umask``, measured 0o755 under a 022 and 0o775 under a 002 — but its
+    owner always can, and a rename is atomic. Against the path the widening would
+    reach whatever answers to the name by then and chmod that 0666; against the
+    descriptor it reaches the file that was actually opened. ``O_NOFOLLOW`` does
+    not cover this: it refuses a symlink standing there at open time, not an
+    object put there a moment later.
 
-    The swap is driven from the ``fstat`` immediately before the widening, which
-    is the only hook between the two.
+    Both replacements are kept because a path-based widening harms them
+    differently: a renamed-in regular file is left 0666 even by a rewrite that
+    declines to follow symlinks, while a symlink swap costs only the link's own
+    mode. So the rename is the shape the assertion on the name catches alone; the
+    symlink is caught only by the hard link.
+
+    That hard link, taken from the open file just before the swap, is what says
+    the widening happened at all — the assertion on the swapped-in file is an
+    absence, which a widening that does nothing satisfies just as well. The umask
+    is forced so the create cannot already leave the mode the widening would set,
+    and the swap is driven from the ``fstat`` immediately before the widening, the
+    only hook between it and the open.
     """
     lock_path = tmp_path / ".locks" / "stem-x.lock"
+    held = tmp_path / "held"
     victim = tmp_path / "victim"
     victim.write_text("")
     os.chmod(victim, 0o600)
@@ -832,22 +845,34 @@ def test_name_lock_widens_the_descriptor_it_holds_not_the_path(tmp_path, monkeyp
     real_fstat = os.fstat
     swapped = []
 
-    def _swap_in_a_symlink(fd, **kwargs):
+    def _swap_the_name(fd, **kwargs):
         found = real_fstat(fd, **kwargs)
         if not swapped and lock_path.is_file() and os.path.samestat(found, os.lstat(lock_path)):
-            lock_path.unlink()
-            lock_path.symlink_to(victim)
+            os.link(lock_path, held)
+            if swap == "rename":
+                os.rename(victim, lock_path)
+            else:
+                lock_path.unlink()
+                lock_path.symlink_to(victim)
             swapped.append(True)
         return found
 
-    monkeypatch.setattr(os, "fstat", _swap_in_a_symlink)
+    monkeypatch.setattr(os, "fstat", _swap_the_name)
 
-    with name_lock(lock_path, "x", timeout=0.2):
-        pass
+    previous = os.umask(0o077)
+    try:
+        with name_lock(lock_path, "x", timeout=0.2):
+            pass
+    finally:
+        os.umask(previous)
 
     assert swapped, "the swap never happened, so nothing was exercised"
-    mode = stat.S_IMODE(victim.stat().st_mode)
-    assert mode == 0o600, f"the widening followed the planted symlink and left {oct(mode)}"
+    opened = stat.S_IMODE(held.stat().st_mode)
+    assert opened == 0o666, f"the widening never reached the file it held open: {oct(opened)}"
+    # Resolves to the renamed-in file directly, and to the symlink's target
+    # otherwise, so one assertion covers both swaps.
+    planted = stat.S_IMODE(lock_path.stat().st_mode)
+    assert planted == 0o600, f"the widening followed the name and left {oct(planted)}"
 
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")

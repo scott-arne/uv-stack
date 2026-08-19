@@ -293,11 +293,14 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         will not open, a device node with no driver behind it, a directory, and
         a symlink above the parent it will not resolve — a loop, or a chain
         past its link budget. A FIFO is the shape that never escapes, at any
-        mode. Two cases neither refuse nor raise: a parent this user may not
-        search, which hides whatever stands below it so the whole directory
-        degrades, and a *regular* file on a platform without the open guards,
-        which declines the read-only retry before it can learn whether the file
-        was readable. A non-regular one is still refused there, on its type.
+        mode. A parent this user may not search hides whatever stands below it,
+        so the whole directory degrades rather than refusing or raising. All of
+        that is what both open guards produce; without them a symlink at
+        ``path`` is resolved rather than turned away, so it stops being an entry
+        of its own and takes the one for what it resolves to — the same
+        ``OSError`` where it will not resolve at all — and a regular file this
+        user cannot open degrades instead of being refused, the read-only retry
+        never having been tried.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
         symlink planted at ``path``, a socket or a device node the kernel will
