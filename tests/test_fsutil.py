@@ -1113,6 +1113,10 @@ def _still_locked_against_a_fresh_open(path: Path) -> bool:
     """
     import fcntl
 
+    # Not inside the try: an implementation that left the lock on a file since
+    # unlinked would otherwise fail its caller with a bare FileNotFoundError
+    # from here rather than the caller's own message.
+    assert path.exists(), f"nothing stands at {path} to test the lock against"
     fd = os.open(path, os.O_RDWR)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1240,3 +1244,38 @@ def test_name_lock_gives_up_when_the_lock_file_keeps_being_replaced(tmp_path, mo
     assert "keeps being replaced" in str(excinfo.value)
     # Generous against a loaded CI box while still failing an unbounded retry.
     assert elapsed < 5.0, f"the retry outlived the timeout it was given: {elapsed:.1f}s"
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_keeps_a_lock_whose_name_cannot_be_examined(tmp_path, monkeypatch):
+    """A name that cannot be stat-ed is not evidence of a swap, so the lock stands.
+
+    Only a name that is gone means the next process will open something else.
+    Every other ``lstat`` failure — a parent that stopped being searchable, a
+    mount answering ESTALE — leaves the question unanswered, and answering it
+    "swapped" costs a lock that was verifiably held: the reopen meets the same
+    obstacle and degrades to no lock at all, which is the one outcome this
+    context manager exists to prevent.
+
+    Refusing on every call rather than once is what makes this discriminate.
+    Treating the failure as a swap then reopens, hits it again, and burns the
+    whole timeout — so the mistake shows up as a raise, not as a lock silently
+    downgraded somewhere the assertions cannot see it.
+    """
+    lock_path = tmp_path / ".locks" / "stem-x.lock"
+    real_lstat = Path.lstat
+    refusals: list[bool] = []
+
+    def _refuse(self: Path, *args, **kwargs):
+        if self == lock_path:
+            refusals.append(True)
+            raise PermissionError("Permission denied")
+        return real_lstat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", _refuse)
+
+    with name_lock(lock_path, "x", timeout=0.2):
+        assert refusals, "the post-grant identity check never ran"
+        assert _still_locked_against_a_fresh_open(lock_path), (
+            "a name that could not be examined threw away a lock that was held"
+        )

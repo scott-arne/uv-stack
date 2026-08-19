@@ -305,7 +305,7 @@ def _open_lock_file(path: Path) -> int:
         # help — it cannot reach a file stack neither created nor owns, which
         # is precisely this case. (On a CPython build without HAVE_FLOCK the
         # F_SETLK emulation needs a writable fd and reports EBADF, reaching
-        # the same degrade as an unlockable filesystem below.)
+        # the same degrade as an unlockable filesystem does in name_lock.)
         #
         # O_NONBLOCK is load-bearing on this open in a way it is not on the
         # create: a read-only open of a FIFO waits for a writer, and nothing
@@ -380,15 +380,24 @@ def _swapped_out(fd: int, path: Path) -> bool:
 
     :param fd: Descriptor held on the lock file.
     :param path: Lock file the descriptor was opened from.
-    :returns: ``True`` if ``path`` now names something else or cannot be
-        stat-ed at all — either way the descriptor is no longer reachable by
-        name, which is what the next process will open.
+    :returns: ``True`` if ``path`` names something else, or nothing at all —
+        either way the next process opens an object this descriptor does not
+        cover. ``False`` when the question cannot be answered.
     """
     held = os.fstat(fd)
     try:
         current = path.lstat()
-    except OSError:
+    except FileNotFoundError:
         return True
+    except OSError:
+        # Some other reason the name cannot be examined — a parent that stopped
+        # being searchable, a network mount answering ESTALE — which says
+        # nothing about identity. Report no swap: a caller here already holds a
+        # verified lock, and releasing it buys nothing, since whatever hid the
+        # name from lstat hides it from the reopen too and the reopen would
+        # then degrade to no lock at all. Keeping it is at worst the behaviour
+        # from before this check existed.
+        return False
     return (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino)
 
 
@@ -449,31 +458,25 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         timeout message.
     :param timeout: Seconds to wait. ``None`` reads the module default at call
         time.
-    :raises ConfigError: If the lock is still held when the timeout expires, if
-        the timeout expires with ``path`` still being replaced faster than a
-        descriptor can be confirmed on it, if
-        something stands at ``path`` that this user cannot obtain a descriptor
-        for and the kernel refused only on this user's permissions while still
-        letting them search the parent, if something other than a regular file
-        stands there and the kernel let this user open it, or if any
-        non-directory — including a symlink to nowhere or to a non-directory —
-        stands at ``path``'s parent or at any ancestor of it that would have to
-        be created. The offender is named, which is not always the parent. What
-        the kernel declines to open for a reason of its own escapes this and
-        raises ``OSError`` below: a symlink at ``path``, a socket whose type it
-        will not open, a device node with no driver behind it, a directory, and
-        a symlink above the parent it will not resolve — a loop, or a chain
-        past its link budget. A FIFO is the shape that never escapes, at any
-        mode. A parent this user may not search hides whatever stands below it,
-        so the whole directory degrades rather than refusing or raising. All of
-        that assumes both open guards, and so does every promise above it.
-        POSIX requires both, and ``fcntl`` — which gates this function entirely
-        — ships only where POSIX does, so the guardless arm below is defensive
-        rather than reachable; the suite drives it by substituting the
-        constants. Which shape it refuses there is deliberately not promised
-        here: the open resolves a symlink that the ``lstat`` behind it does
-        not, so the two halves of that arm disagree about what is standing at
-        the path, and no single rule covers both.
+    :raises ConfigError: If the lock is still held when the timeout expires, if the timeout expires
+        with ``path`` still being replaced faster than a descriptor can be confirmed on it, if
+        something stands at ``path`` that this user cannot obtain a descriptor for and the kernel
+        refused only on this user's permissions while still letting them search the parent, if
+        something other than a regular file stands there and the kernel let this user open it, or if
+        any non-directory — including a symlink to nowhere or to a non-directory — stands at
+        ``path``'s parent or at any ancestor of it that would have to be created. The offender is
+        named, which is not always the parent. What the kernel declines to open for a reason of its
+        own escapes this and raises ``OSError`` below: a symlink at ``path``, a socket whose type it
+        will not open, a device node with no driver behind it, a directory, and a symlink above the
+        parent it will not resolve — a loop, or a chain past its link budget. A FIFO is the shape
+        that never escapes, at any mode. A parent this user may not search hides whatever stands
+        below it, so the whole directory degrades rather than refusing or raising. All of that
+        assumes both open guards, and so does every promise above it. POSIX requires both, and
+        ``fcntl`` — which gates this function entirely — ships only where POSIX does, so the
+        guardless arm is defensive rather than reachable; the suite drives it by substituting the
+        constants. Which shape it refuses there is deliberately not promised here: the open resolves
+        a symlink that the ``lstat`` behind it does not, so the two halves of that arm disagree
+        about what is standing at the path, and no single rule covers both.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
         symlink planted at ``path``, a socket or a device node the kernel will

@@ -400,8 +400,12 @@ def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
         # itself: contended past its timeout, or standing on something
         # name_lock refuses. Skip this one finding and say why. Letting it out
         # would abort the whole pass — repair() catches only OSError — and cost
-        # every later finding its fix over one unavailable stem.
-        return RepairAction(finding, description, applied=False, reason=str(error))
+        # every later finding its fix over one unavailable stem. The hint
+        # carries the actionable half of every one of these — which process to
+        # look for, what not to delete — and the skip line is the only place
+        # the user ever sees this error, so fold it in rather than drop it.
+        reason = error.message if error.hint is None else f"{error.message}. {error.hint}"
+        return RepairAction(finding, description, applied=False, reason=reason)
 
 
 def _convert_under_stem_lock(
