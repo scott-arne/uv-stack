@@ -133,3 +133,41 @@ def test_run_with_pty_missing_binary_raises():
     with pytest.raises(ToolError) as exc:
         runner._run_with_pty(Command(["uv-stack-no-such-binary-xyz"]))
     assert exc.value.returncode == 127
+
+
+@pytest.mark.skipif(not _PTY_AVAILABLE, reason="pty unavailable on this platform")
+def test_run_with_pty_cleans_up_fds_on_spawn_failure():
+    # The OSError path in _run_with_pty must close both master and slave to
+    # prevent fd leaks when the spawn fails. Without cleanup, N failed spawns
+    # leak 2N descriptors.
+    import os
+    import resource
+
+    def count_open_fds():
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        count = 0
+        for fd in range(soft):
+            try:
+                os.fstat(fd)
+                count += 1
+            except OSError:
+                pass
+        return count
+
+    runner = SubprocessRunner()
+    baseline = count_open_fds()
+
+    # Run multiple failed spawns; each would leak 2 fds without the cleanup.
+    failures = 10
+    for _ in range(failures):
+        with pytest.raises(ToolError):
+            runner._run_with_pty(Command(["uv-stack-no-such-binary-xyz"]))
+
+    after = count_open_fds()
+    leaked = after - baseline
+
+    # Allow a small margin for test-framework noise, but reject a 2*failures leak.
+    assert leaked < failures, (
+        f"fd leak detected: {leaked} fds leaked after {failures} failed spawns "
+        f"(expected < {failures}, got {after} - {baseline} = {leaked})"
+    )
