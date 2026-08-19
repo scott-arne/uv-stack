@@ -256,13 +256,20 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
     # from ours — so it must not be the condition. See the docstring for what
     # this condition does not establish, and the windows it cannot close.
     ours = {moved_ident, (current.st_dev, current.st_ino)}
+    withdrew = False
     try:
         dst_now = dst.lstat()
         if (dst_now.st_dev, dst_now.st_ino) in ours:
             dst.unlink(missing_ok=True)
+            withdrew = True
     except FileNotFoundError:
         pass
-    raise OSError(f"{src} changed during move; {dst} withdrawn or already gone")
+    # Report the withdrawal that happened rather than a rule about when one
+    # does: this branch leaves dst deleted, absent, or holding a third party's
+    # file, and in the convert case the deleted one was the moved inode's last
+    # name. A caller told "nothing deleted" there would be told wrong.
+    outcome = f"{dst} withdrawn" if withdrew else "nothing deleted"
+    raise OSError(f"{src} changed during move; {outcome}")
 
 
 def _move_no_replace(src: Path, dst: Path) -> None:
