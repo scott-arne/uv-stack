@@ -103,6 +103,22 @@ _LOCK_CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCE
 _LOCK_UNOBTAINABLE_ERRNOS = frozenset({errno.ENOENT, errno.EACCES, errno.EPERM})
 
 
+def nofollow_read_flags() -> int | None:
+    """Open flags for a read that must not follow a symlink or block.
+
+    ``O_NOFOLLOW`` refuses a symlink at the path and ``O_NONBLOCK`` keeps the
+    open from blocking on a FIFO. Both are required for the read to be safe,
+    so a platform missing either gets ``None`` rather than a weaker flag set —
+    the caller declines the read instead of making an unsafe one.
+
+    :returns: Flags for :func:`os.open`, or ``None`` where this platform lacks
+        the guards the read needs.
+    """
+    if not _FASTPATH_AVAILABLE:
+        return None
+    return os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
+
+
 def atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically.
 
@@ -127,14 +143,14 @@ def atomic_write(path: Path, text: str) -> None:
     # be replaced — and the comparison is on exact bytes so newline
     # differences count as changes. The skip is bound to one file descriptor
     # and path identity is rechecked so a concurrent swap falls through to a
-    # real write. The whole path runs only when _FASTPATH_AVAILABLE: without
-    # both open flags the open can block on a FIFO or land on a symlink's
+    # real write. The whole path runs only when nofollow_read_flags() yields flags:
+    # without both open flags the open can block on a FIFO or land on a symlink's
     # target, and the recheck comes too late to prevent either. Declining the
     # skip costs a rewrite of unchanged content — a new inode and a fresh
     # mtime, which is exactly the phantom drift described above.
-    if _FASTPATH_AVAILABLE:
+    flags = nofollow_read_flags()
+    if flags is not None:
         try:
-            flags = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
             fd = os.open(path, flags)
             try:
                 st_fd = os.fstat(fd)
@@ -313,12 +329,14 @@ def _open_lock_file(path: Path) -> int:
         # user who owns the path parks every writer of that name forever —
         # past any timeout, the create having failed EACCES before the
         # regular-file check could refuse it. This open can be declined, unlike
-        # the create, so a platform missing either constant skips it and takes
-        # the degrade below rather than opening a target it cannot guard.
-        if _FASTPATH_AVAILABLE:
+        # the create, so a platform missing either constant — nofollow_read_flags
+        # returning None — skips it and takes the degrade below rather than
+        # opening a target it cannot guard.
+        retry_flags = nofollow_read_flags()
+        if retry_flags is not None:
             retried = True
             try:
-                fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK)
+                fd = os.open(path, retry_flags)
             except OSError as exc:
                 if exc.errno not in _LOCK_UNOBTAINABLE_ERRNOS:
                     # Not a permission problem after all: an object was swapped

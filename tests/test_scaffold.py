@@ -433,10 +433,14 @@ def test_write_env_sources_refuses_orphan_python_without_the_open_flags(
     what decides between the two outcomes: with it off, the file must meet the
     "already has a python.txt" refusal — the behavior that predates adoption —
     and be left untouched for the user to clear.
-    """
-    from uv_stack.operations import scaffold
 
-    monkeypatch.setattr(scaffold, "_FASTPATH_AVAILABLE", False)
+    Patching ``fsutil`` rather than ``scaffold`` is the point: the gate lives
+    in one place, and a caller that bound its own copy at import time would
+    not see this change.
+    """
+    from uv_stack import fsutil
+
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
     python_path = config_tree.env_python_path("noflags")
     python_path.parent.mkdir(parents=True, exist_ok=True)
     python_path.write_text("3.13\n")

@@ -1280,3 +1280,25 @@ def test_name_lock_keeps_a_lock_whose_name_cannot_be_examined(tmp_path, monkeypa
         assert _still_locked_against_a_fresh_open(lock_path), (
             "a name that could not be examined threw away a lock that was held"
         )
+
+
+def test_nofollow_read_flags_composes_both_guards():
+    """Both guard flags plus O_RDONLY, so one function is the single decision point."""
+    from uv_stack import fsutil
+
+    flags = fsutil.nofollow_read_flags()
+    assert flags is not None
+    assert flags == os.O_RDONLY | fsutil._O_NOFOLLOW | fsutil._O_NONBLOCK
+
+
+def test_nofollow_read_flags_declines_without_both_guards(monkeypatch):
+    """A platform missing either flag gets None, never a weakened flag set.
+
+    The caller's contract is "decline the read rather than make an unsafe
+    one", so returning O_RDONLY alone would silently convert every guarded
+    read into an unguarded one.
+    """
+    from uv_stack import fsutil
+
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
+    assert fsutil.nofollow_read_flags() is None

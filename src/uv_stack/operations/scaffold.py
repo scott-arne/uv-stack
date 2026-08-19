@@ -17,13 +17,7 @@ import yaml
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
-from uv_stack.fsutil import (
-    _FASTPATH_AVAILABLE,
-    _O_NOFOLLOW,
-    _O_NONBLOCK,
-    atomic_write_new,
-    name_lock,
-)
+from uv_stack.fsutil import atomic_write_new, name_lock, nofollow_read_flags
 from uv_stack.resolver import bundle_self_references
 
 _OVERWRITE_HINT = "Edit the file directly or choose another name."
@@ -409,22 +403,26 @@ def write_env_sources(
         if python_text is not None and python_path.exists():
             # Adoption may only take a regular file: a non-regular python.txt (FIFO,
             # directory, socket, device node) is not something this code could have
-            # written, and reading one can block indefinitely or fail in ways refusing
-            # it does not. Anything other than a regular file falls through to the
+            # written. Anything other than a regular file falls through to the
             # existing "already has a python.txt" refusal — the pre-change behavior.
-            # A symlink is refused by the open itself, which carries O_NOFOLLOW.
-            # Where either open flag does not exist on the platform, the preflight is
-            # not attempted: adoption is impossible and every existing python.txt
-            # reaches that same refusal, which costs the user a manual edit or delete
-            # but is recoverable, unlike an open that blocks on a FIFO.
-            if _FASTPATH_AVAILABLE:
+            # A symlink is refused by the open itself, which carries O_NOFOLLOW, and
+            # a FIFO is kept from parking the open by O_NONBLOCK: those two flags,
+            # not the S_ISREG check below, are what make the read safe. The check is
+            # belt and braces — mutating it to `if True` during the 0.4.3 review left
+            # the suite green, because every shape it would refuse is already refused
+            # by the open or by the byte comparison — and it stays because it is
+            # correct, cheap, and O_NONBLOCK's behavior on a FIFO open is
+            # platform-defined. Where either flag does not exist on the platform the
+            # preflight is not attempted at all: adoption is impossible and every
+            # existing python.txt reaches that same refusal, which costs the user a
+            # manual edit or delete but is recoverable, unlike an open that blocks.
+            flags = nofollow_read_flags()
+            if flags is not None:
                 try:
-                    # O_NOFOLLOW and O_NONBLOCK keep the open itself from following a
-                    # symlink or blocking on a FIFO, and binding the check to the
-                    # descriptor means the bytes compared are the ones fstat approved.
-                    # Both flags and the gate above come from fsutil, so one place
-                    # decides whether this open is safe to make.
-                    flags = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
+                    # Binding the check to the descriptor means the bytes compared are
+                    # the ones fstat approved. fsutil composes both the flags and the
+                    # decision to make this open at all, and it is read here at call
+                    # time rather than bound at import, so one place decides.
                     fd = os.open(python_path, flags)
                     try:
                         st_fd = os.fstat(fd)
