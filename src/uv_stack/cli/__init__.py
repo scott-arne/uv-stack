@@ -54,7 +54,15 @@ def _redirect_stream_to_devnull(stream: TextIO | None) -> None:
     # the caller's broken-pipe arm and turn its 141 into 120.
     if stream is not None:
         with suppress(OSError, ValueError):
-            os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            # dup2 duplicates the description onto the stream's descriptor, so
+            # this one has no further use. The finally covers fileno() raising
+            # as well. Leaking it went unnoticed while every caller exited
+            # immediately afterwards; main()'s preserve branch does not.
+            try:
+                os.dup2(devnull, stream.fileno())
+            finally:
+                os.close(devnull)
 
 
 def _redirect_streams_to_devnull() -> None:

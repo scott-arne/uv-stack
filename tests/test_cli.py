@@ -1039,6 +1039,31 @@ def test_a_broken_pipe_at_exit_does_not_swallow_an_internal_exception(tmp_path: 
     assert "Exception ignored" not in stderr
 
 
+def test_the_devnull_redirect_closes_the_descriptor_it_opened(tmp_path: Path):
+    """The redirect leaves no descriptor behind for the branch that keeps running.
+
+    Every other caller exits within a few statements, so the open devnull went
+    unnoticed; the guard's preserve branch redirects and then returns to an
+    unwinding exception. POSIX hands out the lowest free descriptor, so opening
+    one before and after the redirects reads the leak directly: unclosed, each
+    call consumes another number and the second probe lands higher.
+
+    A throwaway file stands in for the real stream. Handing this pytest process
+    its own sys.stdout would dup2 devnull onto fd 1 for the rest of the session.
+    """
+    from uv_stack.cli import _redirect_stream_to_devnull
+
+    with (tmp_path / "target").open("w") as stream:
+        before = os.open(os.devnull, os.O_WRONLY)
+        os.close(before)
+        for _ in range(5):
+            _redirect_stream_to_devnull(stream)
+        after = os.open(os.devnull, os.O_WRONLY)
+        os.close(after)
+
+    assert after == before
+
+
 # ---------------------------------------------------------------------------
 # clean-break guards: the old noun groups must no longer exist
 # ---------------------------------------------------------------------------
