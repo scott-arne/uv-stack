@@ -3,8 +3,8 @@
 Defines the root group, the shared ``--root`` option (stored on the Click
 context), version output, and the error wrapper that renders
 :class:`UvStackError` and any bare :class:`OSError` as a panel and exits
-non-zero — except a broken pipe met while running a command, which exits
-quietly with the shell's conventional signal status.
+non-zero — except a broken pipe met while emitting help or running a command,
+which exits quietly with the shell's conventional signal status.
 """
 
 from __future__ import annotations
@@ -31,6 +31,21 @@ from uv_stack.errors import UvStackError
 # with the Options descriptions for the current option set; widen it if a
 # longer option name or metavar pushes the Options column further right.
 _COMMAND_NAME_COLUMN_WIDTH = 15
+
+
+def _redirect_streams_to_devnull() -> None:
+    """Redirect stdout and stderr to devnull so shutdown flush succeeds.
+
+    A downstream reader closed the pipe, which is ordinary shell usage. Without
+    this redirect the interpreter's shutdown flush meets the dead pipe and
+    CPython prints "Exception ignored on flushing sys.stdout" to stderr, exit
+    status 120. Best effort: a caller that replaced either stream with a
+    non-file object has no descriptor to redirect, and no shutdown flush of a
+    real pipe to protect either.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        with suppress(OSError, ValueError):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
 
 
 class _AlignedCommandPanel(RichCommandPanel):
@@ -85,15 +100,10 @@ class UvStackGroup(click.RichGroup):
             # is ordinary shell usage and not an error. Redirect both streams to
             # devnull so the interpreter's shutdown flush has somewhere to go,
             # then exit with the shell's conventional status for the signal.
-            # Best effort: a caller that replaced either stream with a non-file
-            # object has no descriptor to redirect, and no shutdown flush of a
-            # real pipe to protect either. signal.SIGPIPE is POSIX-only, so it
-            # is read with getattr — dereferencing it unconditionally would
-            # replace a clean exit with an AttributeError on the one platform
-            # the fallback exists for.
-            for stream in (sys.stdout, sys.stderr):
-                with suppress(OSError, ValueError):
-                    os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
+            # signal.SIGPIPE is POSIX-only, so it is read with getattr —
+            # dereferencing it unconditionally would replace a clean exit with an
+            # AttributeError on the one platform the fallback exists for.
+            _redirect_streams_to_devnull()
             sigpipe = getattr(signal, "SIGPIPE", None)
             sys.exit(1 if sigpipe is None else 128 + int(sigpipe))
         except OSError as error:
@@ -151,4 +161,29 @@ _register()
 
 def main() -> None:
     """Console-script entry point."""
-    cli()
+    try:
+        cli()
+    finally:
+        # Click emits --help from an eager parameter callback, before
+        # Group.invoke ever runs — so the BrokenPipeError arm there never sees
+        # it. The rendered help text is still sitting in stdout's buffer at
+        # interpreter shutdown, where CPython's final flush meets a dead pipe,
+        # prints "Exception ignored on flushing sys.stdout", and sets status 120.
+        # Flush now: a broken pipe raises here, where the guard below can catch
+        # it, instead of at shutdown, where it cannot.
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except BrokenPipeError:
+            # The invoke arm already redirected streams to devnull on the path
+            # that caught BrokenPipeError, so the flush succeeds there and this
+            # arm is a no-op. Only help/version output that never entered invoke
+            # triggers this — redirect and exit with the same signal status the
+            # invoke arm uses. Raising SystemExit here deliberately replaces the
+            # in-flight SystemExit(0) from cli(); that is the intended behavior
+            # on the broken-pipe path only. Never `return` here: a bare return
+            # from finally silently swallows the in-flight SystemExit, turning
+            # every sys.exit(1) error path into status 0.
+            _redirect_streams_to_devnull()
+            sigpipe = getattr(signal, "SIGPIPE", None)
+            raise SystemExit(1 if sigpipe is None else 128 + int(sigpipe)) from None

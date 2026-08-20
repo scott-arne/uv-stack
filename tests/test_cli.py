@@ -727,6 +727,43 @@ def test_broken_pipe_from_stderr_exits_with_signal_status(tmp_path: Path):
     assert proc.returncode == 128 + int(signal.SIGPIPE)
 
 
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
+)
+def test_help_into_a_closed_pipe_exits_without_exception_ignored():
+    """Help output into a closed pipe exits cleanly, not with status 120.
+
+    Click emits --help from an eager parameter callback, before Group.invoke
+    runs — so the BrokenPipeError arm in invoke never sees it. Without the guard
+    in main(), the rendered help text sits in stdout's buffer at interpreter
+    shutdown, where CPython's final flush meets the dead pipe and prints
+    "Exception ignored on flushing sys.stdout" to stderr, exit status 120. The
+    guard flushes before shutdown so the BrokenPipeError can be caught.
+
+    CliRunner cannot reproduce this: it hands the command an in-memory buffer,
+    so no write ever meets a closed pipe and there is no shutdown flush to
+    protect. Only a child process writing down a real pipe exercises the guard.
+    """
+    import subprocess
+    import sys
+
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", "from uv_stack.cli import main; main()", "--help"],
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+        )
+    finally:
+        os.close(write_fd)
+
+    stderr = proc.stderr.decode()
+    assert proc.returncode == 128 + int(signal.SIGPIPE)
+    assert "Exception ignored" not in stderr
+    assert "Traceback" not in stderr
+
+
 # ---------------------------------------------------------------------------
 # clean-break guards: the old noun groups must no longer exist
 # ---------------------------------------------------------------------------
