@@ -11,3 +11,9 @@ file = "tests/test_cli.py"
 type = "custom"
 label = "version test assertion"
 template = 'stack, version {version}'
+
+[[locations]]
+file = "uv.lock"
+type = "custom"
+label = "uv.lock root package"
+template = "name = \"uv-stack\"\nversion = \"{version}\""
