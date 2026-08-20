@@ -12,6 +12,7 @@ from uv_stack.runner import (
     CommandResult,
     RecordingRunner,
     SubprocessRunner,
+    _spawn_error,
 )
 
 
@@ -158,3 +159,27 @@ def test_run_with_pty_cleans_up_fds_on_spawn_failure():
     # One descriptor of slack for anything the interpreter opens incidentally;
     # a single missing close costs ten.
     assert leaked <= 1, f"{leaked} descriptors leaked over {failures} failed spawns"
+
+
+def test_spawn_error_hints_chmod_for_a_non_executable_binary(tmp_path):
+    """The message says Permission denied; the hint must not say "install it"."""
+    import errno
+
+    shim = tmp_path / "uv"
+    shim.write_text("#!/bin/sh\n")
+    command = Command([str(shim), "pip", "compile"])
+    error = OSError(errno.EACCES, "Permission denied", str(shim))
+    tool_error = _spawn_error(command, error)
+    assert tool_error.returncode == 127
+    assert "not executable" in tool_error.hint
+    assert f"chmod +x {shim}" in tool_error.hint
+
+
+def test_spawn_error_hints_path_for_a_missing_binary():
+    """The pre-existing hint is unchanged for the case it was written for."""
+    import errno
+
+    command = Command(["nosuchtool", "--version"])
+    error = OSError(errno.ENOENT, "No such file or directory", "nosuchtool")
+    tool_error = _spawn_error(command, error)
+    assert tool_error.hint == "Is nosuchtool installed and on PATH?"

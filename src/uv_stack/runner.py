@@ -8,6 +8,7 @@ is the single mock point for the otherwise side-effect-free core.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import subprocess
@@ -72,11 +73,17 @@ def _spawn_error(command: Command, error: OSError) -> ToolError:
         for a command that could not be executed.
     """
     exe = command.args[0] if command.args else "<empty command>"
+    if error.errno == errno.EACCES:
+        # The message here reads "Permission denied", so the PATH hint below
+        # would contradict it: the binary was found, it just cannot be run.
+        hint = f"{exe} is not executable. Try: chmod +x {exe}"
+    else:
+        hint = f"Is {exe} installed and on PATH?"
     return ToolError(
         f"Could not run {exe}: {error.strerror or error}.",
         command=command.args,
         returncode=127,
-        hint=f"Is {exe} installed and on PATH?",
+        hint=hint,
     )
 
 
