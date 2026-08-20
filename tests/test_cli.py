@@ -730,11 +730,60 @@ def test_broken_pipe_from_stderr_exits_with_signal_status(tmp_path: Path):
 @pytest.mark.skipif(
     not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
 )
+def test_broken_pipe_from_stderr_survives_stdout_closed_at_startup(tmp_path: Path):
+    """The redirect handles a stream CPython replaced with None, not a stream.
+
+    Closing fd 1 before the interpreter starts leaves sys.stdout as None, so the
+    redirect's stream.fileno() has nothing to call. AttributeError is not one of
+    the shapes the redirect suppresses, so unguarded it escapes the arm entirely
+    and the shutdown flush of the still-dead stderr turns 141 into 120. Both
+    conditions are needed: a live stderr would make the escape invisible.
+    """
+    import subprocess
+    import sys
+
+    root = _seeded_root(tmp_path)
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        driver = (
+            "from uv_stack.cli import cli, main\n"
+            "from uv_stack.cli._render import render_warnings\n"
+            "@cli.command('emit-warning')\n"
+            "def _emit_warning():\n"
+            "    render_warnings(['pipe probe'])\n"
+            "main()\n"
+        )
+        # subprocess cannot hand a child a *closed* fd 1 — passing None or
+        # DEVNULL both leave it open — so go through the shell, whose `>&-`
+        # closes it before exec. That is what makes CPython set sys.stdout None.
+        proc = subprocess.run(
+            [
+                "/bin/sh",
+                "-c",
+                'exec "$1" -c "$2" --root "$3" emit-warning >&-',
+                "sh",
+                sys.executable,
+                driver,
+                str(root),
+            ],
+            stderr=write_fd,
+        )
+    finally:
+        os.close(write_fd)
+
+    assert proc.returncode == 128 + int(signal.SIGPIPE)
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
+)
 def test_help_into_a_closed_pipe_exits_without_exception_ignored():
     """Help output into a closed pipe exits cleanly, not with status 120.
 
-    Click emits --help from an eager parameter callback, before Group.invoke
-    runs — so the BrokenPipeError arm in invoke never sees it. Without the guard
+    rich-click emits --help from an eager parameter callback, before
+    Group.invoke runs — so the BrokenPipeError arm in invoke never sees it — and
+    it writes with the builtin print(), which does not flush. Without the guard
     in main(), the rendered help text sits in stdout's buffer at interpreter
     shutdown, where CPython's final flush meets the dead pipe and prints
     "Exception ignored on flushing sys.stdout" to stderr, exit status 120. The
@@ -781,11 +830,17 @@ def test_help_into_a_closed_pipe_falls_back_to_status_1_without_sigpipe():
     (test_broken_pipe_falls_back_to_status_1_without_sigpipe); this pins the
     main() arm's equivalent.
 
-    Popping PYTHONUNBUFFERED is what makes the assertion mean anything. Status
-    1 with clean stderr is also the signature of Click's own EPIPE arm, which
-    is what handles help output when stdout is unbuffered — the break surfaces
-    during rendering and the guard is never reached. Only with stdout buffered
-    does the help text survive to the guard's flush, so only then does this
+    An unguarded status expression exits 1 as well, so the returncode alone
+    proves nothing: the traceback assertion is what separates the two. It only
+    discriminates because the arm reads the status before redirecting stderr to
+    devnull — reverse that order and both shapes exit 1 in silence.
+
+    Popping PYTHONUNBUFFERED is what makes the assertions mean anything. Status
+    1 with clean stderr is also the signature of rich-click's own EPIPE arm,
+    which is what handles help output when stdout is unbuffered: the write
+    reaches the fd immediately, so the break surfaces inside the help callback
+    and the guard's flush finds nothing left to fail on. Only with stdout
+    buffered does the help text survive to the guard, so only then does this
     test observe the arm it names. The child pops rather than deletes SIGPIPE
     so it does not raise on a platform that never had it.
     """
