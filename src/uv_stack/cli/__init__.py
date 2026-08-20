@@ -5,9 +5,10 @@ context), version output, the error wrapper in ``UvStackGroup.invoke`` that
 renders :class:`UvStackError` and any bare :class:`OSError` as a panel and
 exits non-zero, and the shutdown guard in ``main()`` that flushes buffered
 output. A broken pipe met while running a command is caught by the wrapper; one
-met while emitting help, or on any output still buffered at exit, is caught by
-the guard. Either way the process exits quietly with the shell's conventional
-signal status.
+met on output still buffered at exit — help text above all — is caught by the
+guard. Both exit quietly with the shell's conventional signal status. A break
+met at write time inside Click's or rich-click's own eager callbacks is caught
+by neither: their EPIPE handling swallows it and exits 1.
 """
 
 from __future__ import annotations
@@ -48,8 +49,10 @@ def _redirect_streams_to_devnull() -> None:
     """
     for stream in (sys.stdout, sys.stderr):
         # CPython sets the attribute to None outright when the descriptor was
-        # already closed at startup, which is not a stream with nothing to
-        # redirect but no stream at all.
+        # already closed at startup. That is not a stream with nothing to
+        # redirect; it is no stream at all, and AttributeError is not one of
+        # the shapes suppressed below, so an unguarded .fileno() would escape
+        # the caller's broken-pipe arm and turn its 141 into 120.
         if stream is not None:
             with suppress(OSError, ValueError):
                 os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
@@ -122,8 +125,12 @@ class UvStackGroup(click.RichGroup):
             # is ordinary shell usage and not an error. Redirect both streams to
             # devnull so the interpreter's shutdown flush has somewhere to go,
             # then exit with the shell's conventional status for the signal.
+            # Read the status first: after the redirect stderr points at
+            # devnull, so a failure inside _sigpipe_status would exit 1 with its
+            # traceback discarded, indistinguishable from the intended fallback.
+            status = _sigpipe_status()
             _redirect_streams_to_devnull()
-            sys.exit(_sigpipe_status())
+            sys.exit(status)
         except OSError as error:
             render_os_error(error)
             sys.exit(1)
@@ -182,13 +189,17 @@ def main() -> None:
     try:
         cli()
     finally:
-        # Click emits --help from an eager parameter callback, before
+        # rich-click emits --help from an eager parameter callback, before
         # Group.invoke ever runs — so the BrokenPipeError arm there never sees
-        # it. The rendered help text is still sitting in stdout's buffer at
-        # interpreter shutdown, where CPython's final flush meets a dead pipe,
-        # prints "Exception ignored on flushing sys.stdout", and sets status 120.
-        # Flush now: a broken pipe raises here, where the guard below can catch
-        # it, instead of at shutdown, where it cannot.
+        # it — and it writes with the builtin print() rather than click.echo,
+        # to keep its console settings. print() does not flush, so with stdout
+        # buffered, the default down a pipe, the rendered help is still in that
+        # buffer at interpreter shutdown, where CPython's final flush meets the
+        # dead pipe, prints "Exception ignored on flushing sys.stdout", and sets
+        # status 120. Flush now: the broken pipe raises here, where the guard
+        # below can catch it, instead of at shutdown, where it cannot. Unbuffered
+        # there is nothing left to flush — the break happened at the print() and
+        # rich-click's own EPIPE arm took it.
         try:
             for stream in (sys.stdout, sys.stderr):
                 if stream is not None:
@@ -197,20 +208,22 @@ def main() -> None:
             # What reaches this arm is anything that left bytes in stdout's
             # buffer and never flushed them — help output above all. Output
             # written through click.echo does not, because echo flushes, so the
-            # break surfaces at the write instead: inside a command the invoke
-            # arm above catches it and exits 141, and from Click's own eager
-            # callbacks — --version — Click's EPIPE handling swaps in a
-            # pacifying wrapper and exits 1. Neither reaches here: the invoke
-            # arm redirected both streams to devnull and Click's wrapper
-            # swallows the flush, so this arm is a no-op on both. Redirect and
-            # exit with the same signal status the invoke arm uses. Raising
-            # SystemExit here deliberately
-            # replaces the in-flight SystemExit from cli(); that is the intended
-            # behavior on the broken-pipe path only. Never `return` here: a bare
-            # return from finally silently swallows the in-flight SystemExit,
-            # turning every sys.exit(1) error path into status 0.
+            # break surfaces at the echo call instead: inside a command the
+            # invoke arm above catches it and exits 141, and from an eager
+            # callback outside invoke — --version — rich-click's EPIPE arm (its
+            # own copy of Click's) swaps in a pacifying wrapper and exits 1.
+            # Neither reaches here: the invoke arm redirected both streams to
+            # devnull and the pacifying wrapper swallows the flush, so this arm
+            # is a no-op on both. Exit with the same signal status the invoke
+            # arm uses, read before the redirect for the reason given there.
+            # Raising SystemExit here deliberately replaces the in-flight
+            # SystemExit from cli(); that is the intended behavior on the
+            # broken-pipe path only. Never `return` here: a bare return from
+            # finally silently swallows the in-flight SystemExit, turning every
+            # sys.exit(1) error path into status 0.
+            status = _sigpipe_status()
             _redirect_streams_to_devnull()
-            raise SystemExit(_sigpipe_status()) from None
+            raise SystemExit(status) from None
         except (OSError, ValueError):
             # A flush failure that is not a pipe break — EBADF (bad file
             # descriptor), ENOSPC (no space), or a ValueError on a closed stream.
