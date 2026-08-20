@@ -1662,6 +1662,42 @@ def test_probe_locking_reports_contention_as_success(tmp_path):
         assert probe_locking(lock_path) is True
 
 
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_probe_locking_declines_on_nfs_without_lockd(tmp_path, monkeypatch):
+    """ENOLCK from flock is NFS without a lock daemon running."""
+    import fcntl
+
+    from uv_stack.fsutil import probe_locking
+
+    real_flock = fcntl.flock
+
+    def flock_raises_enolck(fd, operation):
+        if operation & fcntl.LOCK_NB:
+            raise OSError(errno.ENOLCK, "No locks available")
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", flock_raises_enolck)
+    assert probe_locking(tmp_path / ".locks" / "probe.lock") is False
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_probe_locking_declines_on_fuse_mount(tmp_path, monkeypatch):
+    """EOPNOTSUPP from flock is a FUSE mount that does not implement locking."""
+    import fcntl
+
+    from uv_stack.fsutil import probe_locking
+
+    real_flock = fcntl.flock
+
+    def flock_raises_eopnotsupp(fd, operation):
+        if operation & fcntl.LOCK_NB:
+            raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", flock_raises_eopnotsupp)
+    assert probe_locking(tmp_path / ".locks" / "probe.lock") is False
+
+
 def test_probe_locking_declines_without_fcntl(tmp_path, monkeypatch):
     from uv_stack import fsutil
 
