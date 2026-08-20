@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -399,7 +400,6 @@ def test_finish_move_dst_replaced_after_link(tmp_path: Path):
 
 def test_move_no_replace_identity_check_in_rename(config_tree: ConfigRoot, monkeypatch):
     """File rename with source replaced after link → skipped, replacement survives."""
-    import os
 
     env_dir = config_tree.env_dir("race")
     env_dir.mkdir(parents=True)
@@ -600,6 +600,110 @@ def test_same_bytes_compares_content_not_timestamps(tmp_path: Path):
     assert _same_bytes(a, b)
     assert not _same_bytes(a, c)
     assert not _same_bytes(a, d)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
+def test_move_no_replace_copy_path_refuses_a_fifo_source_during_same_bytes(
+    tmp_path: Path, monkeypatch
+):
+    """A FIFO swapped for src during the byte comparison is refused, not hung on.
+
+    The FIFO must be empty (st_size == 0) to reach the open — a non-empty source
+    short-circuits the comparison to False. The guarded open refuses it rather
+    than blocking.
+    """
+    import os
+
+    from uv_stack.operations import doctor
+
+    _link_less(monkeypatch)
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("")  # Empty so size check passes.
+    real_same_bytes = doctor._same_bytes
+
+    def same_bytes_then_fifo(left, right):
+        # Replace src with a FIFO before calling the real comparison.
+        src.unlink()
+        os.mkfifo(src)
+        return real_same_bytes(left, right)
+
+    monkeypatch.setattr(doctor, "_same_bytes", same_bytes_then_fifo)
+    with pytest.raises(OSError) as excinfo:
+        doctor._move_no_replace(src, dst)
+    assert "changed during move" in str(excinfo.value)
+    # FIFO survives, dst is withdrawn.
+    assert src.exists()
+    assert not dst.exists()
+
+
+def test_move_no_replace_copy_path_refuses_a_symlink_source_during_same_bytes(
+    tmp_path: Path, monkeypatch
+):
+    """A symlink swapped for src during the byte comparison is refused via O_NOFOLLOW."""
+
+    from uv_stack.operations import doctor
+
+    _link_less(monkeypatch)
+    src = tmp_path / "source.txt"
+    target = tmp_path / "target.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("content\n")
+    target.write_text("content\n")
+    real_same_bytes = doctor._same_bytes
+
+    def same_bytes_then_symlink(left, right):
+        # Replace src with a symlink before calling the real comparison.
+        src.unlink()
+        src.symlink_to(target)
+        return real_same_bytes(left, right)
+
+    monkeypatch.setattr(doctor, "_same_bytes", same_bytes_then_symlink)
+    with pytest.raises(OSError) as excinfo:
+        doctor._move_no_replace(src, dst)
+    assert "changed during move" in str(excinfo.value)
+    # Symlink survives, dst is withdrawn.
+    assert src.is_symlink()
+    assert not dst.exists()
+
+
+def test_move_no_replace_copy_path_refuses_a_chmod_after_same_bytes(
+    tmp_path: Path, monkeypatch
+):
+    """A chmod after the byte comparison but before the mode check withdraws dst.
+
+    The mode check now re-stats src immediately before the unlink, so a chmod
+    landing after the byte comparison is caught.
+    """
+    import os
+    import stat
+
+    from uv_stack.operations import doctor
+
+    _link_less(monkeypatch)
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("content\n")
+    os.chmod(src, 0o640)
+    src_ident = (src.stat().st_dev, src.stat().st_ino)
+    real_same_bytes = doctor._same_bytes
+
+    def same_bytes_then_chmod(left, right):
+        result = real_same_bytes(left, right)
+        # chmod after the byte comparison returns.
+        os.chmod(src, 0o600)
+        return result
+
+    monkeypatch.setattr(doctor, "_same_bytes", same_bytes_then_chmod)
+    with pytest.raises(OSError) as excinfo:
+        doctor._move_no_replace(src, dst)
+    assert "changed during move" in str(excinfo.value)
+    # The source survives with the post-chmod mode.
+    assert src.read_text() == "content\n"
+    assert (src.stat().st_dev, src.stat().st_ino) == src_ident
+    assert stat.S_IMODE(src.stat().st_mode) == 0o600
+    # The stale snapshot is withdrawn.
+    assert not dst.exists()
 
 
 def test_move_no_replace_copy_path_refuses_a_chmod_under_the_copy(tmp_path: Path, monkeypatch):

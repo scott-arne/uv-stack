@@ -25,6 +25,7 @@ from uv_stack.fsutil import (
     atomic_write_new,
     link_or_copy_no_replace,
     name_lock,
+    nofollow_read_flags,
 )
 from uv_stack.parse import read_clean_lines
 
@@ -195,21 +196,49 @@ def _same_bytes(left: Path, right: Path) -> bool:
     deliberately not :func:`filecmp.cmp`, whose module-level cache is keyed on a
     stat signature containing mtime: the same weakness by another route.
 
+    The comparison reads through guarded descriptors (``O_NOFOLLOW`` plus
+    ``O_NONBLOCK``) so a symlink or FIFO planted after the caller's validation
+    is refused rather than followed or hung on.
+
     :param left: First file.
     :param right: Second file.
     :returns: ``True`` when both hold the same bytes.
-    :raises OSError: If either file cannot be stat'd or read.
+    :raises OSError: If the read guards are unavailable on this platform, if
+        either path is not a regular file at open time, or if either file
+        cannot be opened or read.
     """
-    if left.stat().st_size != right.stat().st_size:
-        return False
-    with open(left, "rb") as left_handle, open(right, "rb") as right_handle:
-        while True:
-            left_chunk = left_handle.read(io.DEFAULT_BUFFER_SIZE)
-            right_chunk = right_handle.read(io.DEFAULT_BUFFER_SIZE)
-            if left_chunk != right_chunk:
-                return False
-            if not left_chunk:
-                return True
+    flags = nofollow_read_flags()
+    if flags is None:
+        raise OSError("cannot compare safely on this platform")
+    lfd = os.open(left, flags)
+    try:
+        rfd = os.open(right, flags)
+    except BaseException:
+        os.close(lfd)
+        raise
+    try:
+        lstat = os.fstat(lfd)
+        rstat = os.fstat(rfd)
+        if not (stat.S_ISREG(lstat.st_mode) and stat.S_ISREG(rstat.st_mode)):
+            raise OSError("not a regular file")
+        if lstat.st_size != rstat.st_size:
+            return False
+        with os.fdopen(lfd, "rb") as left_handle:
+            lfd = -1  # ownership transferred to the file object
+            with os.fdopen(rfd, "rb") as right_handle:
+                rfd = -1  # ownership transferred to the file object
+                while True:
+                    left_chunk = left_handle.read(io.DEFAULT_BUFFER_SIZE)
+                    right_chunk = right_handle.read(io.DEFAULT_BUFFER_SIZE)
+                    if left_chunk != right_chunk:
+                        return False
+                    if not left_chunk:
+                        return True
+    finally:
+        if lfd != -1:
+            os.close(lfd)
+        if rfd != -1:
+            os.close(rfd)
 
 
 def _finish_move(
@@ -383,11 +412,21 @@ def _finish_copy_move(
             # a swap, a mode change. Not provably safe to unlink src, so take
             # the withdrawal path rather than guess.
             identical = False
-        if identical and stat.S_IMODE(current.st_mode) == stat.S_IMODE(
-            published.stat.st_mode
-        ):
-            src.unlink(missing_ok=True)
-            return
+        if identical:
+            # Re-stat after the comparison, not before it: a chmod or a
+            # replacement landing while we read would otherwise be judged
+            # against state we captured before the read began. The window
+            # between this lstat and the unlink cannot be closed without
+            # unlinkat-with-identity, which Python does not expose portably.
+            try:
+                final = src.lstat()
+            except FileNotFoundError:
+                return
+            if (final.st_dev, final.st_ino) == moved_ident and stat.S_IMODE(
+                final.st_mode
+            ) == stat.S_IMODE(published.stat.st_mode):
+                src.unlink(missing_ok=True)
+                return
     # src was replaced, or its bytes changed under the copy we published. Either
     # way dst is a stale snapshot. Withdraw it only while it still names the
     # inode the exclusive create made: that inode is provably ours, and unlike
