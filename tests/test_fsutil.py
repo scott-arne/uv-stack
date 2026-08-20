@@ -1471,6 +1471,71 @@ def test_link_or_copy_no_replace_withdraws_a_partial_copy(tmp_path, monkeypatch)
     assert opened == ["wb", "rb"]
 
 
+def test_link_or_copy_no_replace_withdraws_only_the_inode_it_created(tmp_path, monkeypatch):
+    """Rollback must not delete a file some other writer put at dst.
+
+    The sibling test above pins that a partial copy *this* call created is
+    withdrawn; it would pass just as well against an unconditional unlink. This
+    pins the other half of the docstring's promise — the withdrawal happens
+    "only while dst still names the inode the exclusive create made" — because
+    an unconditional unlink on a durable publication path destroys a concurrent
+    writer's file.
+
+    The swap runs inside the failing write, so it lands in the window between
+    the exclusive create and the rollback, exactly where the race is. The
+    exclusive-create fd is still open at that point, which is what guarantees
+    the replacement gets a different inode rather than a reused one; the test
+    asserts that anyway, since a same-inode swap would make it vacuous.
+    """
+    import errno as _errno
+    import os as _os
+
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    def _no_link(a, b, **kwargs):
+        raise OSError(_errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(_os, "link", _no_link)
+
+    src = tmp_path / "src.txt"
+    dst = tmp_path / "dst.txt"
+    src.write_text("content\n")
+    foreign = "written by somebody else\n"
+    inodes = []
+
+    real_fdopen = _os.fdopen
+
+    class _SwappingWriter:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+            return False
+
+        def write(self, data):
+            inodes.append(dst.lstat().st_ino)
+            dst.unlink()
+            dst.write_text(foreign)
+            inodes.append(dst.lstat().st_ino)
+            raise OSError("disk full")
+
+    def _fdopen(fd, mode, *args, **kwargs):
+        real = real_fdopen(fd, mode, *args, **kwargs)
+        if mode == "wb":
+            return _SwappingWriter(real)
+        return real
+
+    monkeypatch.setattr(_os, "fdopen", _fdopen)
+    with pytest.raises(OSError):
+        link_or_copy_no_replace(src, dst)
+    assert inodes[0] != inodes[1]
+    assert dst.read_text() == foreign
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
 def test_link_or_copy_no_replace_refuses_a_fifo_source_on_the_copy_path(tmp_path, monkeypatch):
     """A FIFO planted between the fallback and the guarded open is refused, not hung.
