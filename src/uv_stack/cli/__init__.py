@@ -15,6 +15,7 @@ caught by neither: rich-click's EPIPE arm takes both and exits 1.
 from __future__ import annotations
 
 import os
+import select
 import signal
 import sys
 from contextlib import suppress
@@ -77,6 +78,44 @@ def _redirect_streams_to_devnull() -> None:
     """
     for stream in (sys.stdout, sys.stderr):
         _redirect_stream_to_devnull(stream)
+
+
+def _stream_can_report(stream: TextIO | None) -> bool:
+    """Report whether a stream could still carry a traceback to the user.
+
+    A successful ``flush()`` does not answer this: stderr is line-buffered, so
+    its buffer is normally empty by the time the shutdown guard runs, and an
+    empty buffer flushes cleanly down a pipe whose reader is gone. Ask the
+    descriptor instead — a pipe with no reader polls ``POLLHUP`` here and
+    ``POLLERR`` on Linux, and a closed descriptor polls ``POLLNVAL``, as does
+    ``/dev/null`` on macOS. That last one is not a false negative worth
+    chasing: a traceback sent to devnull is discarded either way.
+
+    Fails open: anything that stops the probe from running — no ``select.poll``
+    (Windows), no descriptor behind the stream, an ``OSError`` from the poll
+    itself — returns ``True``. Reporting an unprobed stream as unusable would
+    send tracebacks to devnull on platforms that never had the problem, so this
+    predicate may only ever subtract confidence.
+
+    :param stream: Stream to probe, or ``None`` for the object CPython leaves
+        behind when the descriptor was already closed at startup.
+    :returns: ``False`` only when the descriptor is measurably unusable.
+    """
+    if stream is None:
+        return False
+    poll = getattr(select, "poll", None)
+    if poll is None:
+        return True
+    try:
+        poller = poll()
+        # POLLOUT is what is being asked about; the three failure flags below
+        # are reported whether or not they were requested.
+        poller.register(stream.fileno(), select.POLLOUT)
+        events = poller.poll(0)
+    except (OSError, ValueError):
+        return True
+    unusable = select.POLLERR | select.POLLHUP | select.POLLNVAL
+    return not any(revents & unusable for _fd, revents in events)
 
 
 def _sigpipe_status() -> int:
@@ -290,21 +329,37 @@ def main() -> None:
                 # finally would replace the in-flight status with a traceback.
                 pass
         if broken:
-            if in_flight is None or isinstance(in_flight, SystemExit):
+            # A BrokenPipeError joins the empty unwind and the SystemExit here:
+            # it *is* the break, not a failure worth reporting, and it has no
+            # traceback anyone wants. It reaches this guard through rich-click,
+            # whose ClickException arm renders usage errors with
+            # print(..., file=sys.stderr) and so cannot dispatch a break there
+            # to its own sibling EPIPE arm — the same shape as the inner
+            # catches in UvStackGroup.invoke above.
+            #
+            # Stderr is asked directly whether it could carry a report, because
+            # a clean flush of it does not say so: line-buffered, its buffer is
+            # normally empty at exit, and an empty buffer flushes cleanly down a
+            # dead pipe. Left to the branch below, such a stderr keeps the
+            # traceback pointed at the dead pipe and the shutdown flush turns
+            # the status into 120.
+            if (
+                in_flight is None
+                or isinstance(in_flight, SystemExit | BrokenPipeError)
+                or not _stream_can_report(sys.stderr)
+            ):
                 # Exit through the same helper the invoke arm uses, which reads
                 # the status before the redirect for the reason documented
                 # there. Raising SystemExit here deliberately replaces the
-                # in-flight SystemExit from cli(); that is the intended behavior
-                # on the broken-pipe path only, hence the guard admitting
-                # nothing but a SystemExit or an empty unwind. Never `return`
-                # here: a bare return from finally silently swallows the
-                # in-flight SystemExit, turning every sys.exit(1) error path
-                # into status 0.
+                # in-flight exception from cli(); that is the intended behavior
+                # on the broken-pipe path only, hence the conditions above.
+                # Never `return` here: a bare return from finally silently
+                # swallows the in-flight SystemExit, turning every sys.exit(1)
+                # error path into status 0.
                 _exit_broken_pipe()
-            # A real exception is unwinding, so it keeps the status and its
-            # traceback. Redirect only the stream that broke, so its shutdown
-            # flush cannot turn that status into 120: redirecting both would
-            # send the traceback to devnull whenever the live stream was the
-            # other one, which is the failure this branch exists to prevent.
+            # A real exception is unwinding and stderr can still print it, so it
+            # keeps its status and its traceback. Redirect only the stream that
+            # broke: redirecting stderr as well would send that traceback to
+            # devnull, which is the failure this branch exists to prevent.
             for stream in broken:
                 _redirect_stream_to_devnull(stream)

@@ -1042,6 +1042,163 @@ def test_a_broken_pipe_at_exit_does_not_swallow_an_internal_exception(tmp_path: 
 @pytest.mark.skipif(
     not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
 )
+def test_a_broken_pipe_at_exit_takes_over_when_stderr_cannot_report(tmp_path: Path):
+    """`stack explode 2>&1 | head`: with nowhere to report, the pipe wins again.
+
+    The test above yields to the RuntimeError because stderr is live and can
+    print its traceback. Here both streams are the same dead pipe, and stderr
+    flushing cleanly proves nothing: it is line-buffered, so its buffer is empty
+    by the time the guard runs, and an empty buffer flushes cleanly down a pipe
+    with no reader. It therefore never joins the broken list, and the guard has
+    to ask the descriptor itself whether it could still report.
+
+    Skip that question and the guard yields as it does above, the interpreter
+    writes the traceback to the dead pipe, and the shutdown flush that follows
+    fails: status 120, which this assertion rejects. Status 1 would mean the
+    exception kept a status nobody could read the traceback for, and 0 that the
+    command stopped raising at all.
+    """
+    import subprocess
+    import sys
+
+    root = _seeded_root(tmp_path)
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    env = os.environ.copy()
+    env.pop("PYTHONUNBUFFERED", None)
+    try:
+        driver = (
+            "import sys\n"
+            "from uv_stack.cli import cli, main\n"
+            "@cli.command('explode')\n"
+            "def _explode():\n"
+            "    print('buffered output')\n"
+            "    raise RuntimeError('a real internal bug')\n"
+            # Guard against silent vacuity: unbuffered, the print() breaks
+            # inside the command and the invoke arm exits 141 too, so the
+            # assertion below would pass without the guard running at all.
+            "assert not sys.stdout.write_through\n"
+            "main()\n"
+        )
+        # One dead pipe for both streams, as `2>&1 | head` produces.
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                driver,
+                "--root",
+                str(root),
+                "explode",
+            ],
+            stdout=write_fd,
+            stderr=write_fd,
+            env=env,
+        )
+    finally:
+        os.close(write_fd)
+
+    assert proc.returncode == 128 + int(signal.SIGPIPE)
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
+)
+def test_a_broken_pipe_printing_a_usage_error_exits_with_the_signal_status(tmp_path: Path):
+    """A break met while printing a usage error is still just a broken pipe.
+
+    rich-click renders a usage error with print(..., file=sys.stderr) from
+    inside its own `except ClickException` arm, so a break there cannot reach
+    that arm's sibling EPIPE arm — the same shape the inner catches in
+    UvStackGroup.invoke exist for — and a bare BrokenPipeError reaches the flush
+    guard in main(). Treated there as a real exception it keeps its own status
+    and exits 1, which this assertion rejects: the break is the pipe closing,
+    not a bug to report.
+
+    Two clauses of the takeover condition each cover this case, so removing
+    either one alone still exits 141: the in-flight BrokenPipeError is admitted
+    outright, and this stderr also fails the can-report probe. The test below
+    takes the probe away, as Windows does, to pin the first clause on its own.
+
+    Popping PYTHONUNBUFFERED is again what makes the assertion mean anything.
+    Written straight through, the failed write leaves stderr's buffer empty, the
+    guard's flush of it succeeds, and the BrokenPipeError propagates out of
+    main() untouched for status 1 — the same behavior as before this guard
+    existed, and not what this test is about.
+    """
+    import subprocess
+    import sys
+
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    env = os.environ.copy()
+    env.pop("PYTHONUNBUFFERED", None)
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from uv_stack.cli import main; main()",
+                "--root",
+                str(tmp_path),
+                "nosuchcommand",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=write_fd,
+            env=env,
+        )
+    finally:
+        os.close(write_fd)
+
+    assert proc.returncode == 128 + int(signal.SIGPIPE)
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
+)
+def test_a_broken_pipe_printing_a_usage_error_exits_141_without_poll(tmp_path: Path):
+    """Without the descriptor probe, the in-flight break alone must still decide.
+
+    select.poll is POSIX-only, so on Windows _stream_can_report fails open and
+    calls even a dead stderr reportable — deliberately, since a probe that
+    cannot run may not subtract confidence. The other clause is what
+    keeps the status right there: a BrokenPipeError in flight is the break
+    itself. Take it away and the guard preserves that BrokenPipeError instead,
+    for status 1 and a traceback discarded down the dead pipe.
+
+    The child pops poll rather than deleting it so it does not raise on a
+    platform that never had it, the same way the no-SIGPIPE test above does.
+    """
+    import subprocess
+    import sys
+
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    env = os.environ.copy()
+    env.pop("PYTHONUNBUFFERED", None)
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                'import select; select.__dict__.pop("poll", None); '
+                "from uv_stack.cli import main; main()",
+                "--root",
+                str(tmp_path),
+                "nosuchcommand",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=write_fd,
+            env=env,
+        )
+    finally:
+        os.close(write_fd)
+
+    assert proc.returncode == 128 + int(signal.SIGPIPE)
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
+)
 def test_a_broken_pipe_at_exit_ignores_an_enclosing_handlers_exception(tmp_path: Path):
     """Only what cli() unwinds counts, not what the caller happens to be handling.
 
