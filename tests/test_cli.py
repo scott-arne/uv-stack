@@ -776,10 +776,18 @@ def test_help_into_a_closed_pipe_falls_back_to_status_1_without_sigpipe():
     """The main() guard's no-SIGPIPE fallback works for help output.
 
     signal.SIGPIPE is POSIX-only; reaching for it unguarded would replace a
-    clean exit with an AttributeError on the one platform the fallback exists
-    for (embedders and pythonw with no stdout). The invoke arm's no-SIGPIPE
-    fallback has a dedicated test (test_broken_pipe_falls_back_to_status_1_
-    without_sigpipe); this pins the main() arm's equivalent.
+    clean exit with an AttributeError on the non-POSIX platforms the fallback
+    exists for. The invoke arm's no-SIGPIPE fallback has a dedicated test
+    (test_broken_pipe_falls_back_to_status_1_without_sigpipe); this pins the
+    main() arm's equivalent.
+
+    Popping PYTHONUNBUFFERED is what makes the assertion mean anything. Status
+    1 with clean stderr is also the signature of Click's own EPIPE arm, which
+    is what handles help output when stdout is unbuffered — the break surfaces
+    during rendering and the guard is never reached. Only with stdout buffered
+    does the help text survive to the guard's flush, so only then does this
+    test observe the arm it names. The child pops rather than deletes SIGPIPE
+    so it does not raise on a platform that never had it.
     """
     import subprocess
     import sys
@@ -793,7 +801,7 @@ def test_help_into_a_closed_pipe_falls_back_to_status_1_without_sigpipe():
             [
                 sys.executable,
                 "-c",
-                "import signal; del signal.SIGPIPE; "
+                'import signal; signal.__dict__.pop("SIGPIPE", None); '
                 "from uv_stack.cli import main; main()",
                 "--help",
             ],
