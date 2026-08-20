@@ -188,12 +188,14 @@ def main() -> None:
                 if stream is not None:
                     stream.flush()
         except BrokenPipeError:
-            # The invoke arm already redirected streams to devnull on the path
-            # that caught BrokenPipeError, so the flush succeeds there and this
-            # arm is a no-op. Help output and some error paths that left buffered
-            # stdout reach this: --help, --version that fails to render (version
-            # string lookup error), and any command that exited through the error
-            # arms before ever writing. Redirect and exit with the same signal
+            # What reaches this arm is anything that left bytes in stdout's
+            # buffer and never flushed them — help output above all. Output
+            # written through click.echo does not: echo flushes, so the break
+            # surfaces inside Click, whose own EPIPE handling swaps in a
+            # pacifying wrapper and exits 1 (this is why --version never gets
+            # here). Neither does a path the invoke arm already caught: it
+            # redirected both streams to devnull, so the flush above succeeds
+            # and this arm is a no-op. Redirect and exit with the same signal
             # status the invoke arm uses. Raising SystemExit here deliberately
             # replaces the in-flight SystemExit from cli(); that is the intended
             # behavior on the broken-pipe path only. Never `return` here: a bare
