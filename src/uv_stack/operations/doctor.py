@@ -454,7 +454,9 @@ def _finish_copy_move(
     except FileNotFoundError:
         pass
     outcome = f"{dst} withdrawn" if withdrew else "nothing deleted"
-    raise OSError(f"source or destination changed during move; {outcome}")
+    # Name both: this arm is reached from a source-side or a destination-side
+    # mismatch, and the reason string reaches the user as the whole diagnostic.
+    raise OSError(f"{src} or {dst} changed during move; {outcome}")
 
 
 def _move_no_replace(src: Path, dst: Path) -> None:
