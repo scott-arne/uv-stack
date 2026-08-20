@@ -91,18 +91,22 @@ def _stream_can_report(stream: TextIO | None) -> bool:
     empty buffer flushes cleanly down a pipe whose reader is gone. Ask the
     descriptor instead — a pipe with no reader polls ``POLLHUP`` here and
     ``POLLERR`` on Linux, and a closed descriptor polls ``POLLNVAL``, as does
-    ``/dev/null`` on macOS. That last one is not a false negative worth
-    chasing: a traceback sent to devnull is discarded either way.
+    ``/dev/null`` on macOS. That last one is a false negative, and it decides
+    the status as well as the traceback: ``2>/dev/null`` on a dead stdout pipe
+    exits 141 where the exception's own status would have been kept. It is not
+    worth chasing, because nobody can read what was bound for devnull anyway.
 
     Fails open: anything that stops the probe from running — no ``select.poll``
-    (Windows), no descriptor behind the stream, an ``OSError`` from the poll
-    itself — returns ``True``. Reporting an unprobed stream as unusable would
-    send tracebacks to devnull on platforms that never had the problem, so this
-    predicate may only ever subtract confidence.
+    (Windows), a stream with no working ``fileno()``, an ``OSError`` from the
+    poll itself — returns ``True``. Reporting an unprobed stream as unusable
+    would send tracebacks to devnull on platforms that never had the problem,
+    so this predicate may only ever subtract confidence.
 
-    :param stream: Stream to probe, or ``None`` for the object CPython leaves
-        behind when the descriptor was already closed at startup.
-    :returns: ``False`` only when the descriptor is measurably unusable.
+    :param stream: Stream to probe. ``None`` — what CPython leaves in place of
+        a stream whose descriptor was already closed at startup — is no stream
+        at all and can report nothing.
+    :returns: ``True`` unless the stream is absent or its descriptor is
+        measurably unusable.
     """
     if stream is None:
         return False
@@ -115,7 +119,7 @@ def _stream_can_report(stream: TextIO | None) -> bool:
         # are reported whether or not they were requested.
         poller.register(stream.fileno(), select.POLLOUT)
         events = poller.poll(0)
-    except (OSError, ValueError):
+    except (AttributeError, OSError, ValueError):
         return True
     unusable = select.POLLERR | select.POLLHUP | select.POLLNVAL
     return not any(revents & unusable for _fd, revents in events)
