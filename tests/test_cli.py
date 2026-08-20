@@ -975,6 +975,70 @@ def test_help_into_a_closed_pipe_falls_back_to_status_1_without_sigpipe():
     assert "Traceback" not in stderr
 
 
+def test_a_broken_pipe_at_exit_does_not_swallow_an_internal_exception(tmp_path: Path):
+    """The flush guard yields to a genuine bug instead of taking its status.
+
+    A command that leaves bytes in stdout's buffer and then raises a
+    non-SystemExit exception, with stdout dead but stderr live, must still
+    report itself. Replacing an in-flight *SystemExit* with the signal status is
+    the guard's job — `stack list | head` depends on it — but doing the same to
+    a RuntimeError exits 141 with the traceback destroyed on a stderr that
+    would have shown it.
+
+    All three assertions are load-bearing, because each failure mode has a
+    distinct signature. Taking over the status gives 141 and empty stderr. No
+    guard at all leaves the buffer for the interpreter's shutdown flush, which
+    meets the dead pipe, prints "Exception ignored on flushing sys.stdout" and
+    exits 120 — so the surviving redirect of the broken stream is pinned too.
+    Only yielding to the exception while redirecting the stream that actually
+    broke gives 1 with the traceback on stderr.
+
+    Buffered stdout is the precondition, hence the PYTHONUNBUFFERED pop: written
+    straight through, the print() itself would break inside the command and the
+    invoke arm would exit 141, which these assertions also reject rather than
+    passing vacuously on.
+    """
+    import subprocess
+    import sys
+
+    root = _seeded_root(tmp_path)
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    env = os.environ.copy()
+    env.pop("PYTHONUNBUFFERED", None)
+    try:
+        # builtin print(), not click.echo: echo flushes, so the break would
+        # surface inside the command rather than at the guard.
+        driver = (
+            "from uv_stack.cli import cli, main\n"
+            "@cli.command('explode')\n"
+            "def _explode():\n"
+            "    print('buffered output')\n"
+            "    raise RuntimeError('a real internal bug')\n"
+            "main()\n"
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                driver,
+                "--root",
+                str(root),
+                "explode",
+            ],
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+    finally:
+        os.close(write_fd)
+
+    stderr = proc.stderr.decode()
+    assert proc.returncode == 1
+    assert "RuntimeError: a real internal bug" in stderr
+    assert "Exception ignored" not in stderr
+
+
 # ---------------------------------------------------------------------------
 # clean-break guards: the old noun groups must no longer exist
 # ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ import os
 import signal
 import sys
 from contextlib import suppress
-from typing import NoReturn
+from typing import NoReturn, TextIO
 
 import rich_click as click
 from rich_click.rich_help_formatter import RichHelpFormatter
@@ -39,6 +39,24 @@ from uv_stack.errors import UvStackError
 _COMMAND_NAME_COLUMN_WIDTH = 15
 
 
+def _redirect_stream_to_devnull(stream: TextIO | None) -> None:
+    """Redirect one stream to devnull so a later flush of it succeeds.
+
+    Callers that must keep the other stream reportable — an exception is in
+    flight and still has to print itself — redirect only the one that broke.
+
+    :param stream: Stream to redirect, or ``None`` for a no-op.
+    """
+    # CPython sets the attribute to None outright when the descriptor was
+    # already closed at startup. That is not a stream with nothing to
+    # redirect; it is no stream at all, and AttributeError is not one of
+    # the shapes suppressed below, so an unguarded .fileno() would escape
+    # the caller's broken-pipe arm and turn its 141 into 120.
+    if stream is not None:
+        with suppress(OSError, ValueError):
+            os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
+
+
 def _redirect_streams_to_devnull() -> None:
     """Redirect stdout and stderr to devnull so shutdown flush succeeds.
 
@@ -50,14 +68,7 @@ def _redirect_streams_to_devnull() -> None:
     real pipe to protect either.
     """
     for stream in (sys.stdout, sys.stderr):
-        # CPython sets the attribute to None outright when the descriptor was
-        # already closed at startup. That is not a stream with nothing to
-        # redirect; it is no stream at all, and AttributeError is not one of
-        # the shapes suppressed below, so an unguarded .fileno() would escape
-        # the caller's broken-pipe arm and turn its 141 into 120.
-        if stream is not None:
-            with suppress(OSError, ValueError):
-                os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
+        _redirect_stream_to_devnull(stream)
 
 
 def _sigpipe_status() -> int:
@@ -224,38 +235,59 @@ def main() -> None:
         # below can catch it, instead of at shutdown, where it cannot. Unbuffered
         # there is nothing left to flush — the break happened at the print() and
         # rich-click's own EPIPE arm took it.
-        try:
-            for stream in (sys.stdout, sys.stderr):
-                if stream is not None:
-                    stream.flush()
-        except BrokenPipeError:
-            # What reaches this arm is anything that left bytes in stdout's
-            # buffer and never flushed them — help output above all. Output
-            # written through click.echo does not, because echo flushes, so the
-            # break surfaces at the echo call instead: inside a command the
-            # invoke arm above catches it and exits 141, and from an eager
-            # callback outside invoke — --version — rich-click's EPIPE arm (its
-            # own copy of Click's) swaps in a pacifying wrapper and exits 1.
-            # Neither reaches here: the invoke arm redirected both streams to
-            # devnull and the pacifying wrapper swallows the flush, so this arm
-            # is a no-op on both. Exit with the same signal status the invoke
-            # arm uses, read before the redirect for the reason given there.
-            # Raising SystemExit here deliberately replaces the in-flight
-            # SystemExit from cli(); that is the intended behavior on the
-            # broken-pipe path only. Never `return` here: a bare return from
-            # finally silently swallows the in-flight SystemExit, turning every
-            # sys.exit(1) error path into status 0.
-            status = _sigpipe_status()
-            _redirect_streams_to_devnull()
-            raise SystemExit(status) from None
-        except (OSError, ValueError):
-            # A flush failure that is not a pipe break — EBADF (bad file
-            # descriptor), ENOSPC (no space), or a ValueError on a closed stream.
-            # Swallow it silently, which restores the pre-guard behavior exactly
-            # in both shapes: for the OSErrors the interpreter's own shutdown
-            # flush meets the same failure, reports it, and sets status 120, and
-            # for a closed stream CPython skips it at shutdown, so it was silent
-            # before this guard existed and stays silent now. Letting either
-            # escape the finally would replace the in-flight status with a
-            # traceback.
-            pass
+        #
+        # What cli() is unwinding decides whether the pipe gets to set the
+        # status, so read it before anything below can raise its own.
+        in_flight = sys.exc_info()[1]
+        # Each stream gets its own try so a break is attributed to the stream it
+        # came from: the preserve-the-exception branch below must redirect only
+        # that one. A shared try would also stop at the first failure and leave
+        # the second stream unflushed.
+        broken: list[TextIO] = []
+        for stream in (sys.stdout, sys.stderr):
+            if stream is None:
+                continue
+            try:
+                stream.flush()
+            except BrokenPipeError:
+                # What reaches this arm is anything that left bytes in stdout's
+                # buffer and never flushed them — help output above all. Output
+                # written through click.echo does not, because echo flushes, so
+                # the break surfaces at the echo call instead: inside a command
+                # the invoke arm above catches it and exits 141, and from an
+                # eager callback outside invoke — --version — rich-click's EPIPE
+                # arm (its own copy of Click's) swaps in a pacifying wrapper and
+                # exits 1. Neither reaches here: the invoke arm redirected both
+                # streams to devnull and the pacifying wrapper swallows the
+                # flush, so this arm is a no-op on both.
+                broken.append(stream)
+            except (OSError, ValueError):
+                # A flush failure that is not a pipe break — EBADF (bad file
+                # descriptor), ENOSPC (no space), or a ValueError on a closed
+                # stream. Swallow it silently, which restores the pre-guard
+                # behavior exactly in both shapes: for the OSErrors the
+                # interpreter's own shutdown flush meets the same failure,
+                # reports it, and sets status 120, and for a closed stream
+                # CPython skips it at shutdown, so it was silent before this
+                # guard existed and stays silent now. Letting either escape the
+                # finally would replace the in-flight status with a traceback.
+                pass
+        if broken:
+            if in_flight is None or isinstance(in_flight, SystemExit):
+                # Exit through the same helper the invoke arm uses, which reads
+                # the status before the redirect for the reason documented
+                # there. Raising SystemExit here deliberately replaces the
+                # in-flight SystemExit from cli(); that is the intended behavior
+                # on the broken-pipe path only, hence the guard admitting
+                # nothing but a SystemExit or an empty unwind. Never `return`
+                # here: a bare return from finally silently swallows the
+                # in-flight SystemExit, turning every sys.exit(1) error path
+                # into status 0.
+                _exit_broken_pipe()
+            # A real exception is unwinding, so it keeps the status and its
+            # traceback. Redirect only the stream that broke, so its shutdown
+            # flush cannot turn that status into 120: redirecting both would
+            # send the traceback to devnull whenever the live stream was the
+            # other one, which is the failure this branch exists to prevent.
+            for stream in broken:
+                _redirect_stream_to_devnull(stream)
