@@ -106,7 +106,7 @@ class ConfigRoot:
     def env_requirements_in(self, name: str) -> Path:
         return self.env_dir(name) / "requirements.in"
 
-    def env_lock(self, name: str) -> Path:
+    def env_requirements_lock(self, name: str) -> Path:
         return self.env_dir(name) / "requirements.lock.txt"
 
     def env_environment_yml(self, name: str) -> Path:

@@ -73,7 +73,7 @@ def env_status(config: ConfigRoot, runner: Runner, name: str) -> EnvStatus:
     :param name: Environment name.
     :returns: The computed :class:`EnvStatus`.
     """
-    lock = config.env_lock(name)
+    lock = config.env_requirements_lock(name)
     lock_present = lock.is_file()
 
     try:

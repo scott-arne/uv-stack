@@ -55,7 +55,7 @@ def test_status_sources_changed(config_tree: ConfigRoot):
 
 def test_status_lock_stale(config_tree: ConfigRoot):
     _built(config_tree)
-    lock = config_tree.env_lock("main")
+    lock = config_tree.env_requirements_lock("main")
     req = config_tree.env_requirements_in("main")
     old = req.stat().st_mtime - 100
     os.utime(lock, (old, old))
@@ -67,7 +67,7 @@ def test_status_lock_stale(config_tree: ConfigRoot):
 
 def test_status_never_built(config_tree: ConfigRoot):
     _built(config_tree)
-    config_tree.env_lock("main").unlink()
+    config_tree.env_requirements_lock("main").unlink()
     status = env_status(
         config_tree, RecordingRunner(responder=_existing_env_responder), "main"
     )
@@ -76,7 +76,7 @@ def test_status_never_built(config_tree: ConfigRoot):
 
 def test_status_not_created_wins_over_never_built(config_tree: ConfigRoot):
     _built(config_tree)
-    config_tree.env_lock("main").unlink()
+    config_tree.env_requirements_lock("main").unlink()
     status = env_status(
         config_tree, RecordingRunner(responder=_missing_env_responder), "main"
     )
@@ -126,7 +126,7 @@ def test_status_local_requirements_change_makes_lock_stale(config_tree: ConfigRo
     local_req.parent.mkdir(parents=True, exist_ok=True)
     local_req.write_text("httpx\n")
     # Bump mtime explicitly to ensure it exceeds the lock's mtime.
-    future = config_tree.env_lock("main").stat().st_mtime + 100
+    future = config_tree.env_requirements_lock("main").stat().st_mtime + 100
     os.utime(local_req, (future, future))
     status = env_status(
         config_tree, RecordingRunner(responder=_existing_env_responder), "main"
@@ -171,7 +171,7 @@ def test_status_requirements_in_deleted_after_build_is_sources_changed(
 def test_status_lock_deleted_after_build_is_never_built(config_tree: ConfigRoot):
     """Lock deleted but sources unchanged → never built (not ok)."""
     _built(config_tree)
-    lock = config_tree.env_lock("main")
+    lock = config_tree.env_requirements_lock("main")
     # Sanity check: lock exists.
     assert lock.is_file()
     lock.unlink()
@@ -193,7 +193,7 @@ def test_status_lock_race_condition(config_tree: ConfigRoot):
     from unittest.mock import patch
 
     _built(config_tree)
-    lock = config_tree.env_lock("main")
+    lock = config_tree.env_requirements_lock("main")
     assert lock.is_file()
 
     # Monkeypatch Path.stat to raise FileNotFoundError on the call from _mtime_or_none(lock)

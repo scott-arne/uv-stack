@@ -145,7 +145,7 @@ def test_upgrade_dry_run(tmp_path: Path):
 
     cfg = ConfigRoot(root)
     assert cfg.env_requirements_in("main").is_file()
-    assert not cfg.env_lock("main").is_file()
+    assert not cfg.env_requirements_lock("main").is_file()
 
 
 def test_upgrade_all_dry_run_targets_every_env(tmp_path: Path):

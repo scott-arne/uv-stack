@@ -100,7 +100,7 @@ def upgrade_env(
 
     upgrade_all = _should_upgrade_all(options)
     requirements_in = config.env_requirements_in(env_name)
-    lock = config.env_lock(env_name)
+    lock = config.env_requirements_lock(env_name)
 
     if options.dry_run:
         planned: list[Command] = []

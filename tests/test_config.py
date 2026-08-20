@@ -71,7 +71,10 @@ def test_path_helpers(config_tree: ConfigRoot):
     assert config_tree.profile_path("ds") == root / "profiles" / "ds.yaml"
     assert config_tree.bundle_path("qsar") == root / "bundles" / "qsar.yaml"
     assert config_tree.env_stack_path("main") == root / "envs" / "main" / "stack.txt"
-    assert config_tree.env_lock("main") == root / "envs" / "main" / "requirements.lock.txt"
+    assert (
+        config_tree.env_requirements_lock("main")
+        == root / "envs" / "main" / "requirements.lock.txt"
+    )
     assert config_tree.locks_dir == root / ".locks"
     assert config_tree.stem_lock_path("x") == root / ".locks" / "stem-x.lock"
     assert config_tree.env_lock_path("myenv") == root / ".locks" / "env-myenv.lock"

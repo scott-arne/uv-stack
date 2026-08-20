@@ -128,7 +128,7 @@ def test_upgrade_writes_generated_files_and_runs_sequence(config_tree: ConfigRoo
     # Generated files are written.
     assert config_tree.env_requirements_in("main").is_file()
     assert config_tree.env_environment_yml("main").is_file()
-    assert config_tree.env_lock("main").is_file()
+    assert config_tree.env_requirements_lock("main").is_file()
 
     # Command sequence: probe -> compile -> sync -> check.
     argv = [" ".join(c.args) for c in rec.commands]
@@ -168,7 +168,7 @@ def test_upgrade_dry_run_writes_files_but_runs_nothing(config_tree: ConfigRoot):
     assert result.planned
     assert any("compile" in c.args for c in result.planned)
     # Dry run never wrote a lock file.
-    assert not config_tree.env_lock("main").is_file()
+    assert not config_tree.env_requirements_lock("main").is_file()
 
 
 # ============================================================================
