@@ -3,8 +3,8 @@
 Defines the root group, the shared ``--root`` option (stored on the Click
 context), version output, and the error wrapper that renders
 :class:`UvStackError` and any bare :class:`OSError` as a panel and exits
-non-zero — except a broken pipe, which exits quietly with the shell's
-conventional signal status.
+non-zero — except a broken pipe met while running a command, which exits
+quietly with the shell's conventional signal status.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ class UvStackGroup(click.RichGroup):
             sys.exit(1)
         except BrokenPipeError:
             # A downstream reader closed the pipe (`stack list | head`), which
-            # is ordinary shell usage and not an error. Redirect stdout to
+            # is ordinary shell usage and not an error. Redirect both streams to
             # devnull so the interpreter's shutdown flush has somewhere to go,
             # then exit with the shell's conventional status for the signal.
             # Best effort: a caller that replaced sys.stdout with a non-file
@@ -91,9 +91,9 @@ class UvStackGroup(click.RichGroup):
             # is read with getattr — dereferencing it unconditionally would
             # replace a clean exit with an AttributeError on the one platform
             # the fallback exists for.
-            with suppress(OSError, ValueError):
-                target = sys.stdout.fileno()
-                os.dup2(os.open(os.devnull, os.O_WRONLY), target)
+            for stream in (sys.stdout, sys.stderr):
+                with suppress(OSError, ValueError):
+                    os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
             sigpipe = getattr(signal, "SIGPIPE", None)
             sys.exit(1 if sigpipe is None else 128 + int(sigpipe))
         except OSError as error:

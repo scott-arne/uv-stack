@@ -633,6 +633,57 @@ def test_list_into_a_closed_pipe_exits_without_a_panel(tmp_path: Path):
     assert "Exception ignored" not in stderr
 
 
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
+)
+def test_broken_pipe_from_stderr_exits_with_signal_status(tmp_path: Path):
+    """A broken pipe originating on stderr also exits 141, not 120.
+
+    When a BrokenPipeError is raised by error_console writing to a closed
+    stderr, the arm must redirect both stdout and stderr. Without redirecting
+    stderr, the interpreter's exit flush meets the same dead pipe and turns
+    the arm's intended exit code 141 into 120 with an "Exception ignored"
+    message on stderr. This test pins that both streams are redirected.
+    """
+    import subprocess
+    import sys
+
+    root = _seeded_root(tmp_path)
+    # Close the read end of the stderr pipe before the child starts, but pass
+    # stdout to a normal PIPE — we want the break to originate from stderr.
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        # Drive render_warnings through a throwaway command registered on the
+        # real group to exercise the real chain: render_warnings ->
+        # error_console -> _ConsoleWithBrokenPipePropagation -> arm.
+        driver = (
+            "import rich_click as click\n"
+            "from uv_stack.cli import cli, main\n"
+            "from uv_stack.cli._render import render_warnings\n"
+            "@cli.command('emit-warning')\n"
+            "def _emit_warning():\n"
+            "    render_warnings(['pipe probe'])\n"
+            "main()\n"
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                driver,
+                "--root",
+                str(root),
+                "emit-warning",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=write_fd,
+        )
+    finally:
+        os.close(write_fd)
+
+    assert proc.returncode == 128 + int(signal.SIGPIPE)
+
+
 # ---------------------------------------------------------------------------
 # clean-break guards: the old noun groups must no longer exist
 # ---------------------------------------------------------------------------
