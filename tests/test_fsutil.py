@@ -1493,8 +1493,8 @@ def test_link_or_copy_no_replace_refuses_a_fifo_source_on_the_copy_path(tmp_path
     with _deadline(5.0):
         with pytest.raises(OSError) as excinfo:
             link_or_copy_no_replace(src, dst)
-        assert "not a regular file" in str(excinfo.value)
-        assert not dst.exists()
+    assert "not a regular file" in str(excinfo.value)
+    assert not dst.exists()
 
 
 def test_link_or_copy_no_replace_refuses_a_symlink_source_on_the_copy_path(tmp_path, monkeypatch):

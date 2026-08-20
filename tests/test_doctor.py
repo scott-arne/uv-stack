@@ -634,10 +634,10 @@ def test_move_no_replace_copy_path_refuses_a_fifo_source_during_same_bytes(
     with _deadline(5.0):
         with pytest.raises(OSError) as excinfo:
             doctor._move_no_replace(src, dst)
-        assert "changed during move" in str(excinfo.value)
-        # FIFO survives, dst is withdrawn.
-        assert src.exists()
-        assert not dst.exists()
+    assert "changed during move" in str(excinfo.value)
+    # FIFO survives, dst is withdrawn.
+    assert src.exists()
+    assert not dst.exists()
 
 
 def test_move_no_replace_copy_path_refuses_a_symlink_source_during_same_bytes(

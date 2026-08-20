@@ -749,17 +749,63 @@ def test_help_into_a_closed_pipe_exits_without_exception_ignored():
 
     read_fd, write_fd = os.pipe()
     os.close(read_fd)
+    # Remove PYTHONUNBUFFERED so the test pins the buffered-shutdown path the
+    # guard was written for. With stdout unbuffered, the pipe break surfaces
+    # during rendering and Click's own EPIPE arm handles it (rc 1, clean stderr).
+    # The product behavior is still correct there, but this test is verifying
+    # the guard's behavior specifically, so hand the child a sanitized env.
+    env = os.environ.copy()
+    env.pop("PYTHONUNBUFFERED", None)
     try:
         proc = subprocess.run(
             [sys.executable, "-c", "from uv_stack.cli import main; main()", "--help"],
             stdout=write_fd,
             stderr=subprocess.PIPE,
+            env=env,
         )
     finally:
         os.close(write_fd)
 
     stderr = proc.stderr.decode()
     assert proc.returncode == 128 + int(signal.SIGPIPE)
+    assert "Exception ignored" not in stderr
+    assert "Traceback" not in stderr
+
+
+def test_help_into_a_closed_pipe_falls_back_to_status_1_without_sigpipe():
+    """The main() guard's no-SIGPIPE fallback works for help output.
+
+    signal.SIGPIPE is POSIX-only; reaching for it unguarded would replace a
+    clean exit with an AttributeError on the one platform the fallback exists
+    for (embedders and pythonw with no stdout). The invoke arm's no-SIGPIPE
+    fallback has a dedicated test (test_broken_pipe_falls_back_to_status_1_
+    without_sigpipe); this pins the main() arm's equivalent.
+    """
+    import subprocess
+    import sys
+
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    env = os.environ.copy()
+    env.pop("PYTHONUNBUFFERED", None)
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import signal; del signal.SIGPIPE; "
+                "from uv_stack.cli import main; main()",
+                "--help",
+            ],
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+    finally:
+        os.close(write_fd)
+
+    stderr = proc.stderr.decode()
+    assert proc.returncode == 1
     assert "Exception ignored" not in stderr
     assert "Traceback" not in stderr
 
