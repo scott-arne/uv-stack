@@ -1479,7 +1479,7 @@ def test_link_or_copy_no_replace_withdraws_a_partial_copy(tmp_path, monkeypatch)
     def _fdopen(fd, mode, *args, **kwargs):
         opened.append(mode)
         real = real_fdopen(fd, mode, *args, **kwargs)
-        # First fdopen is "rb" for the source, second is "wb" for the destination.
+        # First fdopen is "wb" for the destination, second is "rb" for the source.
         # Only explode on the write.
         if mode == "wb":
             return _ExplodingWriter(real)
@@ -1492,6 +1492,7 @@ def test_link_or_copy_no_replace_withdraws_a_partial_copy(tmp_path, monkeypatch)
     with pytest.raises(OSError):
         link_or_copy_no_replace(src, dst)
     assert not dst.exists()
+    assert opened == ["wb", "rb"]
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
@@ -1584,3 +1585,51 @@ def test_atomic_write_new_still_falls_back_on_eperm(tmp_path, monkeypatch):
     path = tmp_path / "out.txt"
     atomic_write_new(path, "content\n")
     assert path.read_text() == "content\n"
+
+
+def test_link_or_copy_no_replace_closes_source_fd_when_destination_create_fails(
+    tmp_path, monkeypatch
+):
+    """The source descriptor is closed even when the destination exclusive create fails.
+
+    Failure scenario: dst races into existence between the failed os.link and the
+    exclusive create. The source fd must be closed before the FileExistsError raise,
+    or stack doctor --fix leaks one descriptor per failed publish.
+    """
+    import errno
+    import os
+
+    from uv_stack import fsutil
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    def _no_link(a, b, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(os, "link", _no_link)
+
+    real_open = os.open
+    source_fd = None
+
+    def _record_source_fd(path, flags, *args, **kwargs):
+        nonlocal source_fd
+        fd = real_open(path, flags, *args, **kwargs)
+        # The guarded source open is O_RDONLY|O_NOFOLLOW|O_NONBLOCK (260 on macOS).
+        # The destination create is O_CREAT|O_EXCL|O_WRONLY (2561).
+        # O_RDONLY is 0, so distinguish by the absence of write flags.
+        if not (flags & (os.O_WRONLY | os.O_RDWR)):
+            source_fd = fd
+        return fd
+
+    monkeypatch.setattr(fsutil.os, "open", _record_source_fd)
+
+    src = tmp_path / "src.txt"
+    dst = tmp_path / "dst.txt"
+    src.write_text("content\n")
+    dst.write_text("occupied\n")  # Plant the race before the exclusive create.
+    with pytest.raises(FileExistsError):
+        link_or_copy_no_replace(src, dst)
+    assert source_fd is not None, "the source fd was never recorded"
+    # If the fd is closed, fstat raises EBADF. If it leaked, fstat succeeds.
+    with pytest.raises(OSError) as excinfo:
+        os.fstat(source_fd)
+    assert excinfo.value.errno == errno.EBADF

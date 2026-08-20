@@ -196,11 +196,16 @@ def link_or_copy_no_replace(
     if flags is None:
         raise OSError("cannot copy safely on this platform")
     sfd = os.open(src, flags)
-    if not stat.S_ISREG(os.fstat(sfd).st_mode):
+    try:
+        if not stat.S_ISREG(os.fstat(sfd).st_mode):
+            raise OSError(f"{src} is not a regular file")
+        fd = os.open(dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        created = os.fstat(fd)
+    except BaseException:
         os.close(sfd)
-        raise OSError(f"{src} is not a regular file")
-    fd = os.open(dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    created = os.fstat(fd)
+        raise
+    # Separate from the arm below: 'created' and 'fd' do not exist yet if we
+    # reach that one, and dst must not be withdrawn when we never created it.
     try:
         # The mode comes from src, not the umask: this publishes an existing
         # file, so the copy must carry the permission bits the source held at
