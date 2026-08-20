@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import io
 import os
 import stat
 import tempfile
@@ -10,6 +11,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import Literal, NamedTuple
 
 from uv_stack.errors import ConfigError
 
@@ -119,6 +121,97 @@ def nofollow_read_flags() -> int | None:
     return os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
 
 
+class Published(NamedTuple):
+    """How :func:`link_or_copy_no_replace` published a file, and what it saw.
+
+    :ivar kind: ``"link"`` when ``dst`` is a second name for ``src``'s own
+        inode, ``"copy"`` when it is a fresh inode holding a copy of the bytes.
+        This field, and only this field, tells a caller which mechanism ran.
+    :ivar stat: For ``"copy"``, the stat of the inode this call created — an
+        exclusive create, so it is proven ours, and it is the identity ``dst``
+        was given. For ``"link"``, merely an observation of what ``src`` named
+        at the moment this call read it. It is **not** proof of what
+        :func:`os.link` published: if ``src`` is replaced between that read and
+        the link, the replacement is what appears at ``dst`` and this stat
+        describes the inode that no longer holds the name. A caller that must
+        reason about identity across a concurrent replacement of ``src`` gets
+        no stronger guarantee here than :func:`os.link` itself offers, and must
+        keep the same defensive rules it would use around a bare
+        :func:`os.link`.
+    """
+
+    kind: Literal["link", "copy"]
+    stat: os.stat_result
+
+
+def link_or_copy_no_replace(src: Path | str, dst: Path) -> Published:
+    """Publish the regular file at ``src`` under ``dst``, refusing to clobber.
+
+    Prefers :func:`os.link`, which publishes ``src``'s own inode under a second
+    name. On a filesystem without hard links (FAT/exFAT, some network mounts)
+    it copies the bytes into a fresh ``O_CREAT|O_EXCL`` file instead, which is
+    still no-clobber but publishes a *different* inode. The mechanism is
+    reported rather than left to be inferred from a stat comparison: two
+    identities that happen to differ do not prove a copy ran, because ``src``
+    can be replaced between this call's stat and its link.
+
+    The source's permission bits are carried over on the copy path; the link
+    path preserves them inherently.
+
+    :param src: An existing regular file.
+    :param dst: The destination, which must not exist.
+    :returns: The publication mechanism and the identity described above.
+    :raises FileExistsError: If ``dst`` exists at publication time, from either
+        path.
+    :raises OSError: If the link fails for a reason outside the link-less set,
+        or the copy fails. A partial copy is withdrawn before the raise, but
+        only while ``dst`` still names the inode the exclusive create made.
+    """
+    # Before publishing, not after: on the link path dst and src name one inode,
+    # so a stat taken through either name afterwards records whatever that name
+    # holds at that moment — the very thing an identity check must not assume.
+    src_stat = os.stat(src)
+    try:
+        os.link(src, dst)
+    except FileExistsError:
+        raise
+    except OSError as error:
+        if error.errno not in _LINK_FALLBACK_ERRNOS:
+            raise
+    else:
+        return Published("link", src_stat)
+
+    fd = os.open(dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    created = os.fstat(fd)
+    try:
+        # The mode comes from src, not the umask: this publishes an existing
+        # file, so the copy must be that file in every respect a caller can
+        # observe. The 0o600 above is only the create mode, narrowed until
+        # fchmod runs and before any byte is written.
+        os.fchmod(fd, stat.S_IMODE(src_stat.st_mode))
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1  # ownership transferred to the file object
+            with open(src, "rb") as source:
+                while chunk := source.read(io.DEFAULT_BUFFER_SIZE):
+                    handle.write(chunk)
+            handle.flush()
+            # Post-write stat: the same inode as 'created', with the size and
+            # mtime the content gave it.
+            return Published("copy", os.fstat(handle.fileno()))
+    except BaseException:
+        if fd != -1:
+            os.close(fd)
+        # Never leave a partial no-clobber target behind: withdraw only while
+        # dst still names the inode the exclusive create made.
+        try:
+            current = dst.lstat()
+            if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
+                dst.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically.
 
@@ -191,16 +284,21 @@ def atomic_write_new(path: Path, text: str) -> os.stat_result:
     """Write ``text`` to ``path`` atomically, failing if ``path`` exists.
 
     The content is written to a temporary file and published with
-    :func:`os.link`, which refuses to replace an existing target — the
-    no-clobber counterpart of :func:`atomic_write` for user-authored files.
-    Falls back to an exclusive O_CREAT|O_EXCL create on filesystems without
-    hard links; FileExistsError semantics are identical on both paths.
+    :func:`link_or_copy_no_replace`, which prefers :func:`os.link` — refusing
+    to replace an existing target — and copies the bytes into an exclusive
+    create on a filesystem without hard links. ``FileExistsError`` semantics
+    are identical on both paths; only the link path publishes the temporary
+    file's own inode.
 
     Writes are byte-exact: UTF-8, no newline translation.
 
     :param path: Destination file (must not exist).
     :param text: Content to write.
-    :returns: The stat of the published inode, captured race-free from the temporary file.
+    :returns: The stat of the published inode, captured race-free: the
+        temporary file's own stat on the link path, the created inode's on the
+        copy path. This function ignores :attr:`Published.kind`, which is sound
+        only because its source is a private ``mkstemp`` name no other process
+        can replace — a caller publishing a user-visible source must not.
     :raises FileExistsError: If ``path`` already exists at publication time.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,39 +309,7 @@ def atomic_write_new(path: Path, text: str) -> os.stat_result:
         umask = os.umask(0)
         os.umask(umask)
         os.chmod(tmp_name, 0o666 & ~umask)
-        # Capture the identity before linking: the temp file IS the published inode
-        # once linked — os.link creates a second name for the same inode.
-        identity = os.stat(tmp_name)
-        try:
-            os.link(tmp_name, path)
-        except FileExistsError:
-            raise
-        except OSError as error:
-            if error.errno not in _LINK_FALLBACK_ERRNOS:
-                raise
-            # Link-less filesystem (FAT/exFAT, some network mounts): fall
-            # back to exclusive create — still no-clobber, losing only the
-            # write-then-publish atomicity of the content.
-            fallback_fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
-            created = os.fstat(fallback_fd)
-            try:
-                with os.fdopen(fallback_fd, "w", encoding="utf-8", newline="") as handle:
-                    handle.write(text)
-                    handle.flush()
-                    # Return post-write stat: same inode as 'created', but with
-                    # correct size/mtime after content flush.
-                    return os.fstat(handle.fileno())
-            except BaseException:
-                # Never leave a partial no-clobber target behind: withdraw
-                # only while the path still names the inode we created.
-                try:
-                    current = path.lstat()
-                    if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
-                        path.unlink(missing_ok=True)
-                except FileNotFoundError:
-                    pass
-                raise
-        return identity
+        return link_or_copy_no_replace(tmp_name, path).stat
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)

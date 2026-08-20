@@ -1302,3 +1302,186 @@ def test_nofollow_read_flags_declines_without_both_guards(monkeypatch):
 
     monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
     assert fsutil.nofollow_read_flags() is None
+
+
+def test_link_or_copy_no_replace_reports_link(tmp_path):
+    """The normal path publishes src's own inode and says so."""
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    src = tmp_path / "src.txt"
+    dst = tmp_path / "dst.txt"
+    src.write_text("content\n")
+    published = link_or_copy_no_replace(src, dst)
+    assert published.kind == "link"
+    assert (published.stat.st_dev, published.stat.st_ino) == (
+        dst.stat().st_dev,
+        dst.stat().st_ino,
+    )
+    assert dst.read_text() == "content\n"
+
+
+def test_link_or_copy_no_replace_reports_link_even_when_src_was_replaced(tmp_path, monkeypatch):
+    """A pre-link replacement of src does not turn a link into a reported copy.
+
+    This is the misclassification the returned ``kind`` exists to prevent: the
+    two identities differ, but os.link still published a second name for an
+    inode this call did not create, so the caller must keep the link path's
+    weaker provenance rules.
+    """
+    import os as _os
+
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    src = tmp_path / "src.txt"
+    dst = tmp_path / "dst.txt"
+    src.write_text("original\n")
+    real_link = _os.link
+
+    def racing_link(a, b, **kwargs):
+        src.unlink()
+        src.write_text("replacement\n")
+        real_link(a, b, **kwargs)
+
+    monkeypatch.setattr(_os, "link", racing_link)
+    published = link_or_copy_no_replace(src, dst)
+    assert published.kind == "link"
+    # The stat is what src named when this call read it, NOT what got published.
+    assert (published.stat.st_dev, published.stat.st_ino) != (
+        dst.stat().st_dev,
+        dst.stat().st_ino,
+    )
+    assert dst.read_text() == "replacement\n"
+
+
+def test_link_or_copy_no_replace_reports_copy_on_a_link_less_filesystem(tmp_path, monkeypatch):
+    """Without hard links the bytes are copied into a fresh, provably-ours inode."""
+    import errno as _errno
+    import os as _os
+
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    def _no_link(a, b, **kwargs):
+        raise OSError(_errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(_os, "link", _no_link)
+    src = tmp_path / "src.txt"
+    dst = tmp_path / "dst.txt"
+    src.write_text("content\n")
+    published = link_or_copy_no_replace(src, dst)
+    assert published.kind == "copy"
+    assert dst.read_text() == "content\n"
+    assert (dst.stat().st_dev, dst.stat().st_ino) != (src.stat().st_dev, src.stat().st_ino)
+    assert (published.stat.st_dev, published.stat.st_ino) == (
+        dst.stat().st_dev,
+        dst.stat().st_ino,
+    )
+    assert published.stat.st_size == len(b"content\n")
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
+def test_link_or_copy_no_replace_copy_preserves_source_mode(tmp_path, monkeypatch):
+    """The copy is a publication of an existing file, so it keeps that file's bits."""
+    import errno as _errno
+    import os as _os
+    import stat as _stat
+
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    def _no_link(a, b, **kwargs):
+        raise OSError(_errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(_os, "link", _no_link)
+    src = tmp_path / "src.txt"
+    dst = tmp_path / "dst.txt"
+    src.write_text("content\n")
+    _os.chmod(src, 0o640)
+    link_or_copy_no_replace(src, dst)
+    assert _stat.S_IMODE(dst.stat().st_mode) == 0o640
+
+
+def test_link_or_copy_no_replace_refuses_an_existing_destination_on_both_paths(
+    tmp_path, monkeypatch
+):
+    """FileExistsError semantics are identical whichever mechanism would run."""
+    import errno as _errno
+    import os as _os
+
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    src = tmp_path / "src.txt"
+    src.write_text("content\n")
+    linked_dst = tmp_path / "linked.txt"
+    linked_dst.write_text("occupied\n")
+    with pytest.raises(FileExistsError):
+        link_or_copy_no_replace(src, linked_dst)
+    assert linked_dst.read_text() == "occupied\n"
+
+    def _no_link(a, b, **kwargs):
+        raise OSError(_errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(_os, "link", _no_link)
+    copied_dst = tmp_path / "copied.txt"
+    copied_dst.write_text("occupied\n")
+    with pytest.raises(FileExistsError):
+        link_or_copy_no_replace(src, copied_dst)
+    assert copied_dst.read_text() == "occupied\n"
+
+
+def test_link_or_copy_no_replace_propagates_an_unlisted_link_errno(tmp_path, monkeypatch):
+    """ENOSPC is not "this filesystem cannot hard-link", so it must not fall back."""
+    import errno as _errno
+    import os as _os
+
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    def _full(a, b, **kwargs):
+        raise OSError(_errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(_os, "link", _full)
+    src = tmp_path / "src.txt"
+    dst = tmp_path / "dst.txt"
+    src.write_text("content\n")
+    with pytest.raises(OSError) as excinfo:
+        link_or_copy_no_replace(src, dst)
+    assert excinfo.value.errno == _errno.ENOSPC
+    assert not dst.exists()
+
+
+def test_link_or_copy_no_replace_withdraws_a_partial_copy(tmp_path, monkeypatch):
+    """A mid-copy failure must not leave a truncated file at a no-clobber target."""
+    import errno as _errno
+    import os as _os
+
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    def _no_link(a, b, **kwargs):
+        raise OSError(_errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(_os, "link", _no_link)
+
+    real_fdopen = _os.fdopen
+
+    class _ExplodingWriter:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+            return False
+
+        def write(self, data):
+            raise OSError("disk full")
+
+    def _fdopen(fd, *args, **kwargs):
+        return _ExplodingWriter(real_fdopen(fd, *args, **kwargs))
+
+    monkeypatch.setattr(_os, "fdopen", _fdopen)
+    src = tmp_path / "src.txt"
+    dst = tmp_path / "dst.txt"
+    src.write_text("content\n")
+    with pytest.raises(OSError):
+        link_or_copy_no_replace(src, dst)
+    assert not dst.exists()
