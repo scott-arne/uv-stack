@@ -7,8 +7,9 @@ exits non-zero, and the shutdown guard in ``main()`` that flushes buffered
 output. A broken pipe met while running a command is caught by the wrapper; one
 met on output still buffered at exit — help text above all — is caught by the
 guard. Both exit quietly with the shell's conventional signal status. A break
-met at write time inside Click's or rich-click's own eager callbacks is caught
-by neither: their EPIPE handling swallows it and exits 1.
+met at write time inside an eager callback — Click's ``--version``,
+rich-click's ``--help`` — is caught by neither: rich-click's EPIPE arm takes
+both and exits 1.
 """
 
 from __future__ import annotations

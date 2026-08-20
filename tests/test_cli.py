@@ -737,7 +737,8 @@ def test_broken_pipe_from_stderr_survives_stdout_closed_at_startup(tmp_path: Pat
     redirect's stream.fileno() has nothing to call. AttributeError is not one of
     the shapes the redirect suppresses, so unguarded it escapes the arm entirely
     and the shutdown flush of the still-dead stderr turns 141 into 120. Both
-    conditions are needed: a live stderr would make the escape invisible.
+    conditions are needed: with a live stderr nothing raises BrokenPipeError, so
+    the arm never runs and the redirect is never reached (rc 0).
     """
     import subprocess
     import sys
@@ -747,11 +748,16 @@ def test_broken_pipe_from_stderr_survives_stdout_closed_at_startup(tmp_path: Pat
     os.close(read_fd)
     try:
         driver = (
+            "import sys\n"
             "from uv_stack.cli import cli, main\n"
             "from uv_stack.cli._render import render_warnings\n"
             "@cli.command('emit-warning')\n"
             "def _emit_warning():\n"
             "    render_warnings(['pipe probe'])\n"
+            # Guard against silent vacuity: if `>&-` ever stopped producing a
+            # None stdout, the ordinary two-stream redirect would still exit
+            # 141 and this test would pass while covering nothing.
+            "assert sys.stdout is None\n"
             "main()\n"
         )
         # subprocess cannot hand a child a *closed* fd 1 — passing None or
@@ -830,10 +836,12 @@ def test_help_into_a_closed_pipe_falls_back_to_status_1_without_sigpipe():
     (test_broken_pipe_falls_back_to_status_1_without_sigpipe); this pins the
     main() arm's equivalent.
 
-    An unguarded status expression exits 1 as well, so the returncode alone
-    proves nothing: the traceback assertion is what separates the two. It only
-    discriminates because the arm reads the status before redirecting stderr to
-    devnull — reverse that order and both shapes exit 1 in silence.
+    Reading the status before redirecting stderr to devnull is what makes a
+    broken fallback loud. Reverse that order and an unguarded status expression
+    also exits 1 in silence, indistinguishable from the intended fallback and
+    passing every assertion below. In the order the arm actually uses, the
+    AttributeError reaches the live stderr and the shutdown flush of the
+    still-dead stdout turns the status into 120, so all three assertions fire.
 
     Popping PYTHONUNBUFFERED is what makes the assertions mean anything. Status
     1 with clean stderr is also the signature of rich-click's own EPIPE arm,
