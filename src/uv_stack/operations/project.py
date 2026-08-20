@@ -362,6 +362,8 @@ def resolve_project_python(
     :param flag: The raw ``--python`` value, or ``None`` when unset.
     :returns: A version, path, or resolved interpreter path suitable for uv.
     :raises EnvError: If the spec names a micromamba env that cannot be probed.
+    :raises ToolError: If ``micromamba`` cannot be started while probing for
+        the environment.
     """
     spec = select_project_python(config, flag)
     if _is_python_passthrough(spec):

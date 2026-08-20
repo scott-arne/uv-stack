@@ -13,8 +13,11 @@ class UvStackError(Exception):
 
     :param message: Human-readable description of what went wrong.
     :param hint: Optional remediation hint shown alongside the message.
-    :ivar resolution_warnings: Non-fatal resolver advisories attached when a
-        downstream step fails after resolution succeeded.
+    :ivar resolution_warnings: Non-fatal advisories attached by the layer that
+        raised, when an earlier step succeeded with caveats worth reporting
+        alongside the failure. Named for the resolver, which was the first
+        producer, but not limited to it — adoption notices, unverifiable-name
+        warnings, and skipped-removal notices travel here too.
     """
 
     def __init__(self, message: str, hint: str | None = None) -> None:
@@ -46,10 +49,15 @@ class EnvError(UvStackError):
 
 
 class ToolError(UvStackError):
-    """An external ``uv`` or ``micromamba`` command exited non-zero.
+    """An external ``uv`` or ``micromamba`` command failed.
+
+    Covers both shapes: a process that ran and exited non-zero, and one that
+    could never be started at all — a missing or non-executable binary, which
+    :func:`~uv_stack.runner._spawn_error` reports here with a synthetic status.
 
     :param command: The argv list of the command that failed.
-    :param returncode: The process exit code.
+    :param returncode: The process exit code, or 127 — the shell's conventional
+        status for a command that could not be executed — when no process ran.
     :param detail: A concise tail of the command's stderr, when captured, so the
         CLI can report *why* it failed rather than only the exit code.
     """

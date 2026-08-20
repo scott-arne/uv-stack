@@ -22,6 +22,8 @@ def env_micromamba_exists(config: ConfigRoot, runner: Runner, env_name: str) -> 
     :param config: Configuration root (unused beyond signature symmetry).
     :param runner: Command runner.
     :param env_name: Environment name.
+    :returns: ``True`` when the probe found a usable interpreter in the env.
+    :raises ToolError: If the ``micromamba`` binary cannot be started.
     """
     result = runner.run(micromamba_python_path(env_name), capture=True, check=False)
     return result.returncode == 0 and bool(result.stdout.strip())
@@ -46,6 +48,7 @@ def ensure_env(
     :param recreate: Remove (if present) and recreate the env.
     :raises EnvError: If the env is missing and neither ``create`` nor
         ``recreate`` was requested.
+    :raises ToolError: If ``micromamba`` cannot be started, or exits non-zero.
     """
     environment_yml = config.env_environment_yml(env_name)
     exists = env_micromamba_exists(config, runner, env_name)
