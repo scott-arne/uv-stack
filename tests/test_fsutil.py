@@ -1460,6 +1460,7 @@ def test_link_or_copy_no_replace_withdraws_a_partial_copy(tmp_path, monkeypatch)
     monkeypatch.setattr(_os, "link", _no_link)
 
     real_fdopen = _os.fdopen
+    opened = []
 
     class _ExplodingWriter:
         def __init__(self, handle):
@@ -1475,8 +1476,14 @@ def test_link_or_copy_no_replace_withdraws_a_partial_copy(tmp_path, monkeypatch)
         def write(self, data):
             raise OSError("disk full")
 
-    def _fdopen(fd, *args, **kwargs):
-        return _ExplodingWriter(real_fdopen(fd, *args, **kwargs))
+    def _fdopen(fd, mode, *args, **kwargs):
+        opened.append(mode)
+        real = real_fdopen(fd, mode, *args, **kwargs)
+        # First fdopen is "rb" for the source, second is "wb" for the destination.
+        # Only explode on the write.
+        if mode == "wb":
+            return _ExplodingWriter(real)
+        return real
 
     monkeypatch.setattr(_os, "fdopen", _fdopen)
     src = tmp_path / "src.txt"
@@ -1485,3 +1492,95 @@ def test_link_or_copy_no_replace_withdraws_a_partial_copy(tmp_path, monkeypatch)
     with pytest.raises(OSError):
         link_or_copy_no_replace(src, dst)
     assert not dst.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
+def test_link_or_copy_no_replace_refuses_a_fifo_source_on_the_copy_path(tmp_path, monkeypatch):
+    """A FIFO planted between the fallback and the guarded open is refused, not hung.
+
+    The unguarded open(src, "rb") that preceded the fix would block on a FIFO
+    with no writer, parking doctor --fix forever. The guarded open refuses it.
+    """
+    import errno as _errno
+    import os as _os
+
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    def _no_link(a, b, **kwargs):
+        raise OSError(_errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(_os, "link", _no_link)
+    src = tmp_path / "src.txt"
+    dst = tmp_path / "dst.txt"
+    _os.mkfifo(src)
+    with pytest.raises(OSError) as excinfo:
+        link_or_copy_no_replace(src, dst)
+    assert "not a regular file" in str(excinfo.value)
+    assert not dst.exists()
+
+
+def test_link_or_copy_no_replace_refuses_a_symlink_source_on_the_copy_path(tmp_path, monkeypatch):
+    """A symlink planted between the fallback and the guarded open is refused.
+
+    The unguarded open(src, "rb") followed symlinks. The guarded open refuses
+    them via O_NOFOLLOW.
+    """
+    import errno as _errno
+    import os as _os
+
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    def _no_link(a, b, **kwargs):
+        raise OSError(_errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(_os, "link", _no_link)
+    src = tmp_path / "src.txt"
+    target = tmp_path / "target.txt"
+    dst = tmp_path / "dst.txt"
+    target.write_text("target content\n")
+    src.symlink_to(target)
+    with pytest.raises(OSError):
+        link_or_copy_no_replace(src, dst)
+    assert not dst.exists()
+
+
+def test_link_or_copy_no_replace_declines_the_copy_path_without_guards(tmp_path, monkeypatch):
+    """Without both guard flags the copy path raises rather than falling back unguarded."""
+    import errno as _errno
+    import os as _os
+
+    from uv_stack import fsutil
+    from uv_stack.fsutil import link_or_copy_no_replace
+
+    def _no_link(a, b, **kwargs):
+        raise OSError(_errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(_os, "link", _no_link)
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
+    src = tmp_path / "src.txt"
+    dst = tmp_path / "dst.txt"
+    src.write_text("content\n")
+    with pytest.raises(OSError) as excinfo:
+        link_or_copy_no_replace(src, dst)
+    assert "cannot copy safely" in str(excinfo.value)
+    assert not dst.exists()
+
+
+def test_atomic_write_new_still_falls_back_on_eperm(tmp_path, monkeypatch):
+    """atomic_write_new uses the full fallback set including EPERM.
+
+    Its source is a private temp file, so EPERM cannot be a protected_hardlinks
+    denial — it means the filesystem genuinely has no hard links.
+    """
+    import errno as _errno
+    import os as _os
+
+    from uv_stack.fsutil import atomic_write_new
+
+    def _eperm(a, b, **kwargs):
+        raise OSError(_errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(_os, "link", _eperm)
+    path = tmp_path / "out.txt"
+    atomic_write_new(path, "content\n")
+    assert path.read_text() == "content\n"

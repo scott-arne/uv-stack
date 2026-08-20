@@ -484,8 +484,8 @@ def test_move_no_replace_copy_path_refuses_an_in_place_rewrite(
     src_ident = (src.stat().st_dev, src.stat().st_ino)
     real_publish = doctor.link_or_copy_no_replace
 
-    def publish_then_mutate(a, b):
-        result = real_publish(a, b)
+    def publish_then_mutate(a, b, **kwargs):
+        result = real_publish(a, b, **kwargs)
         with open(src, "r+b") as handle:
             handle.write(mutation)
             handle.truncate()
@@ -515,8 +515,8 @@ def test_move_no_replace_link_path_survives_an_in_place_rewrite(tmp_path: Path, 
     src.write_text("original\n")
     real_publish = doctor.link_or_copy_no_replace
 
-    def publish_then_mutate(a, b):
-        result = real_publish(a, b)
+    def publish_then_mutate(a, b, **kwargs):
+        result = real_publish(a, b, **kwargs)
         with open(src, "r+b") as handle:
             handle.write(b"MUTATED!\n")
             handle.truncate()
@@ -540,8 +540,8 @@ def test_move_no_replace_copy_path_withdraws_when_the_source_is_replaced(
     src.write_text("original\n")
     real_publish = doctor.link_or_copy_no_replace
 
-    def publish_then_replace(a, b):
-        result = real_publish(a, b)
+    def publish_then_replace(a, b, **kwargs):
+        result = real_publish(a, b, **kwargs)
         src.unlink()
         src.write_text("replacement\n")
         return result
@@ -570,8 +570,8 @@ def test_move_no_replace_copy_path_leaves_a_foreign_destination_alone(
     src.write_text("original\n")
     real_publish = doctor.link_or_copy_no_replace
 
-    def publish_then_hijack(a, b):
-        result = real_publish(a, b)
+    def publish_then_hijack(a, b, **kwargs):
+        result = real_publish(a, b, **kwargs)
         src.unlink()
         src.write_text("replacement\n")
         dst.unlink()
@@ -600,6 +600,67 @@ def test_same_bytes_compares_content_not_timestamps(tmp_path: Path):
     assert _same_bytes(a, b)
     assert not _same_bytes(a, c)
     assert not _same_bytes(a, d)
+
+
+def test_move_no_replace_copy_path_refuses_a_chmod_under_the_copy(tmp_path: Path, monkeypatch):
+    """A chmod on src after publication leaves src in place and withdraws dst.
+
+    The copy is a snapshot of the pre-chmod bits. Unlinking src on identity and
+    bytes alone would discard the mode change.
+    """
+    import os
+    import stat
+
+    from uv_stack.operations import doctor
+
+    _link_less(monkeypatch)
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("content\n")
+    os.chmod(src, 0o640)
+    src_ident = (src.stat().st_dev, src.stat().st_ino)
+    real_publish = doctor.link_or_copy_no_replace
+
+    def publish_then_chmod(a, b, **kwargs):
+        result = real_publish(a, b, **kwargs)
+        os.chmod(src, 0o600)
+        return result
+
+    monkeypatch.setattr(doctor, "link_or_copy_no_replace", publish_then_chmod)
+    with pytest.raises(OSError) as excinfo:
+        doctor._move_no_replace(src, dst)
+    assert "changed during move" in str(excinfo.value)
+    # The source survives, still the same inode, holding the post-chmod mode.
+    assert src.read_text() == "content\n"
+    assert (src.stat().st_dev, src.stat().st_ino) == src_ident
+    assert stat.S_IMODE(src.stat().st_mode) == 0o600
+    # The stale snapshot is withdrawn.
+    assert not dst.exists()
+
+
+def test_move_no_replace_propagates_eperm_from_a_public_source(tmp_path: Path, monkeypatch):
+    """EPERM from os.link on a user-visible file is a denial, not a fallback trigger.
+
+    On Linux with fs.protected_hardlinks=1, EPERM means "you do not own this
+    file." Treating it as link-less turns a denial into copy-then-unlink.
+    """
+    import errno
+    import os
+
+    from uv_stack.operations.doctor import _move_no_replace
+
+    def _eperm(a, b, **kwargs):
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", _eperm)
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("content\n")
+    with pytest.raises(OSError) as excinfo:
+        _move_no_replace(src, dst)
+    assert excinfo.value.errno == errno.EPERM
+    assert src.read_text() == "content\n"
+    assert not dst.exists()
 
 
 def test_repair_conversion_source_replaced_between_read_and_move(

@@ -8,6 +8,7 @@ envs missing their source files.
 
 from __future__ import annotations
 
+import errno
 import io
 import os
 import stat
@@ -18,10 +19,23 @@ import yaml
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
-from uv_stack.fsutil import Published, atomic_write_new, link_or_copy_no_replace, name_lock
+from uv_stack.fsutil import (
+    _LINK_FALLBACK_ERRNOS,
+    Published,
+    atomic_write_new,
+    link_or_copy_no_replace,
+    name_lock,
+)
 from uv_stack.parse import read_clean_lines
 
 _KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib", ".locks"}
+
+# Public-source fallback: narrower than the temp-file set, because on Linux
+# with fs.protected_hardlinks=1, EPERM from os.link means "policy denies
+# hardlinking a file you do not own," not "this filesystem has no hard links."
+# Treating it as link-less turns a denial into copy-then-unlink. A caller
+# publishing its own temp file wants the full set.
+_PUBLIC_LINK_FALLBACK = _LINK_FALLBACK_ERRNOS - {errno.EPERM}
 
 
 @dataclass
@@ -346,7 +360,7 @@ def _finish_copy_move(
     :param published: The copy's own report; ``published.stat`` identifies the
         inode the exclusive create made.
     :raises OSError: If ``dst`` vanished or was replaced, or if ``src`` changed
-        identity or content under the copy.
+        identity, content, or mode under the copy.
     """
     published_ident = (published.stat.st_dev, published.stat.st_ino)
     try:
@@ -369,7 +383,9 @@ def _finish_copy_move(
             # a swap, a mode change. Not provably safe to unlink src, so take
             # the withdrawal path rather than guess.
             identical = False
-        if identical:
+        if identical and stat.S_IMODE(current.st_mode) == stat.S_IMODE(
+            published.stat.st_mode
+        ):
             src.unlink(missing_ok=True)
             return
     # src was replaced, or its bytes changed under the copy we published. Either
@@ -413,18 +429,19 @@ def _move_no_replace(src: Path, dst: Path) -> None:
         or is removed in the window between that check and the publication.
     :raises FileExistsError: If ``dst`` already exists.
     :raises OSError: If ``src`` is not a regular file, if ``src`` or ``dst``
-        changed identity during the move, or if ``src``'s bytes changed under a
-        copy publication. ``src`` is left in place on those paths, and anything
-        published at ``dst`` is withdrawn only under :func:`_finish_move`'s
-        rules — which, on the link path when ``src`` was replaced during the
-        move, can withdraw the last name of the moved inode or of the
-        replacement ``os.link`` published in its place. See that function's
-        docstring for the residual windows those rules narrow but cannot close.
+        changed identity during the move, or if ``src``'s bytes or mode changed
+        under a copy publication. ``src`` is left in place on those paths, and
+        anything published at ``dst`` is withdrawn only under
+        :func:`_finish_move`'s rules — which, on the link path when ``src`` was
+        replaced during the move, can withdraw the last name of the moved inode
+        or of the replacement ``os.link`` published in its place. See that
+        function's docstring for the residual windows those rules narrow but
+        cannot close.
     """
     moved = src.lstat()
     if not stat.S_ISREG(moved.st_mode):
         raise OSError(f"{src} is not a regular file; nothing moved")
-    published = link_or_copy_no_replace(src, dst)
+    published = link_or_copy_no_replace(src, dst, fallback_errnos=_PUBLIC_LINK_FALLBACK)
     _finish_move(src, dst, moved, published)
 
 

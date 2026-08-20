@@ -144,7 +144,9 @@ class Published(NamedTuple):
     stat: os.stat_result
 
 
-def link_or_copy_no_replace(src: Path | str, dst: Path) -> Published:
+def link_or_copy_no_replace(
+    src: Path | str, dst: Path, *, fallback_errnos: frozenset[int] = _LINK_FALLBACK_ERRNOS
+) -> Published:
     """Publish the regular file at ``src`` under ``dst``, refusing to clobber.
 
     Prefers :func:`os.link`, which publishes ``src``'s own inode under a second
@@ -160,12 +162,21 @@ def link_or_copy_no_replace(src: Path | str, dst: Path) -> Published:
 
     :param src: An existing regular file.
     :param dst: The destination, which must not exist.
+    :param fallback_errnos: The set of :func:`os.link` errnos that trigger the
+        copy fallback rather than being re-raised. A caller publishing an
+        existing user-visible file wants a narrower set than one publishing its
+        own temp file: on Linux with ``fs.protected_hardlinks=1``, ``EPERM``
+        means "policy denies hardlinking a file you do not own," not "this
+        filesystem has no hard links," so treating it as link-less turns a
+        denial into copy-then-unlink.
     :returns: The publication mechanism and the identity described above.
     :raises FileExistsError: If ``dst`` exists at publication time, from either
         path.
-    :raises OSError: If the link fails for a reason outside the link-less set,
-        or the copy fails. A partial copy is withdrawn before the raise, but
-        only while ``dst`` still names the inode the exclusive create made.
+    :raises OSError: If the link fails for a reason outside the fallback set,
+        if the copy-source guards are unavailable on this platform, if the copy
+        source is not a regular file at open time, or if the copy itself fails.
+        A partial copy is withdrawn before the raise, but only while ``dst``
+        still names the inode the exclusive create made.
     """
     # Before publishing, not after: on the link path dst and src name one inode,
     # so a stat taken through either name afterwards records whatever that name
@@ -176,22 +187,30 @@ def link_or_copy_no_replace(src: Path | str, dst: Path) -> Published:
     except FileExistsError:
         raise
     except OSError as error:
-        if error.errno not in _LINK_FALLBACK_ERRNOS:
+        if error.errno not in fallback_errnos:
             raise
     else:
         return Published("link", src_stat)
 
+    flags = nofollow_read_flags()
+    if flags is None:
+        raise OSError("cannot copy safely on this platform")
+    sfd = os.open(src, flags)
+    if not stat.S_ISREG(os.fstat(sfd).st_mode):
+        os.close(sfd)
+        raise OSError(f"{src} is not a regular file")
     fd = os.open(dst, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     created = os.fstat(fd)
     try:
         # The mode comes from src, not the umask: this publishes an existing
-        # file, so the copy must be that file in every respect a caller can
-        # observe. The 0o600 above is only the create mode, narrowed until
+        # file, so the copy must carry the permission bits the source held at
+        # publication. The 0o600 above is only the create mode, narrowed until
         # fchmod runs and before any byte is written.
         os.fchmod(fd, stat.S_IMODE(src_stat.st_mode))
         with os.fdopen(fd, "wb") as handle:
             fd = -1  # ownership transferred to the file object
-            with open(src, "rb") as source:
+            with os.fdopen(sfd, "rb") as source:
+                sfd = -1  # ownership transferred to the file object
                 while chunk := source.read(io.DEFAULT_BUFFER_SIZE):
                     handle.write(chunk)
             handle.flush()
@@ -199,6 +218,8 @@ def link_or_copy_no_replace(src: Path | str, dst: Path) -> Published:
             # mtime the content gave it.
             return Published("copy", os.fstat(handle.fileno()))
     except BaseException:
+        if sfd != -1:
+            os.close(sfd)
         if fd != -1:
             os.close(fd)
         # Never leave a partial no-clobber target behind: withdraw only while
