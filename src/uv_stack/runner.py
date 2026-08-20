@@ -131,8 +131,9 @@ class Runner(Protocol):
         :param capture: Capture and return stdout instead of streaming it.
         :param check: Raise :class:`ToolError` on a non-zero exit.
         :raises ToolError: If the command cannot be started at all — a missing
-            or non-executable binary. ``check`` does not suppress this: no
-            process ran, so there is no exit code to hand back.
+            or non-executable binary, or a working directory that cannot be
+            entered. ``check`` does not suppress this: no process ran, so there
+            is no exit code to hand back.
         """
         ...
 
