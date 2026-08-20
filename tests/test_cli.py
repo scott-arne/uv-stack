@@ -527,8 +527,12 @@ def test_bare_oserror_renders_a_panel_instead_of_a_traceback(tmp_path: Path, mon
     panel = _flat_panel(result)
     assert "No space left on device" in panel
     assert "ENOSPC" in panel
-    # Assembled as Text, so the bracketed path is not parsed as rich markup.
+    # Assembled as Text, so the bracketed path is not parsed as rich markup
+    # and appears on the Path: line. Long paths wrap, so check that the
+    # bracketed filename follows the Path: label in the flattened output.
+    assert "Path:" in panel
     assert "[tool.uv-stack]" in panel
+    assert panel.index("Path:") < panel.index("[tool.uv-stack]")
     assert "Traceback" not in panel
 
 
@@ -547,7 +551,11 @@ def test_broken_pipe_exits_quietly_with_the_signal_status(tmp_path: Path, monkey
 
 
 def test_broken_pipe_falls_back_to_status_1_without_sigpipe(tmp_path: Path, monkeypatch):
-    """signal.SIGPIPE is POSIX-only; reaching for it unguarded would raise."""
+    """signal.SIGPIPE is POSIX-only; reaching for it unguarded would raise.
+
+    CliRunner reports exit_code == 1 for both a clean sys.exit(1) and an
+    uncaught AttributeError, so the exception type is checked to separate them.
+    """
     from uv_stack.cli import doctor as cli_doctor
 
     def boom(config):
@@ -558,6 +566,7 @@ def test_broken_pipe_falls_back_to_status_1_without_sigpipe(tmp_path: Path, monk
     runner = CliRunner()
     result = runner.invoke(cli, ["--root", str(tmp_path), "doctor"])
     assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
     assert "uv-stack error" not in _flat_panel(result)
 
 
