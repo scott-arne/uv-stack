@@ -118,6 +118,15 @@ def test_version():
     assert "stack, version 0.4.3" in result.output
 
 
+def test_config_init_reports_the_locks_directory(tmp_path: Path):
+    """The printed list is init_config_root's return value, so .locks appears in it."""
+    root = tmp_path / "fresh-root"
+    result = CliRunner().invoke(cli, ["--root", str(root), "config", "init"])
+    assert result.exit_code == 0
+    assert str(root / ".locks") in _combined_output(result)
+    assert (root / ".locks").is_dir()
+
+
 # ---------------------------------------------------------------------------
 # upgrade
 # ---------------------------------------------------------------------------
@@ -910,6 +919,18 @@ def test_doctor_fix_json_shape(tmp_path: Path):
     assert payload["remaining"] == []
 
 
+def test_doctor_fix_terminates_with_a_permanently_unfixable_finding(tmp_path: Path, monkeypatch):
+    """The --fix loop exits when no action in a round reports applied."""
+    from uv_stack.operations import doctor
+
+    monkeypatch.setattr(doctor, "probe_locking", lambda path: False)
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "doctor", "--fix"])
+    assert result.exit_code in (0, 1)
+    assert "Name locking is unavailable" in _flat_panel(result)
+
+
 # ---------------------------------------------------------------------------
 # show env config and interpreter
 # ---------------------------------------------------------------------------
@@ -1292,6 +1313,19 @@ def test_init_yes_is_idempotent(tmp_path: Path, monkeypatch):
     # Nothing new was seeded: profiles existed, so no starter profile.
     assert not ConfigRoot(root).profile_exists("starter")
     assert "Config root:" in result.output
+
+
+def test_init_yes_reports_the_locks_directory(tmp_path: Path, monkeypatch):
+    """The guided surface is a second command body, not a wrapper around the first."""
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda config, names, options, **kw: None,
+    )
+    root = tmp_path / "python-envs"
+    result = CliRunner().invoke(cli, ["--root", str(root), "init", "--yes"])
+    assert result.exit_code == 0
+    assert str(root / ".locks") in _combined_output(result)
+    assert (root / ".locks").is_dir()
 
 
 def test_init_interactive_decline_build_prints_next_step(

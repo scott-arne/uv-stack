@@ -10,6 +10,8 @@ from uv_stack.config import ConfigRoot
 from uv_stack.fsutil import _LOCK_AVAILABLE
 from uv_stack.operations.doctor import diagnose, repair
 
+_IS_ROOT = getattr(os, "geteuid", lambda: -1)() == 0
+
 
 def test_clean_tree_has_no_errors(config_tree: ConfigRoot):
     findings = diagnose(config_tree)
@@ -1083,3 +1085,61 @@ def test_repair_conversion_serializes_against_a_concurrent_create(
     assert unrelated and unrelated[0].applied, (
         "one unavailable stem lock aborted the rest of the repair pass"
     )
+
+
+def test_diagnose_reports_degraded_locks(config_tree: ConfigRoot, monkeypatch):
+    """A root that cannot lock is reported once, as a warning, with no repair."""
+    from uv_stack.operations import doctor
+
+    monkeypatch.setattr(doctor, "probe_locking", lambda path: False)
+    findings = diagnose(config_tree)
+    degraded = [f for f in findings if f.kind == "degraded-locks"]
+    assert len(degraded) == 1
+    assert degraded[0].level == "warn"
+    assert str(config_tree.root) in degraded[0].message
+    assert "not serialized" in degraded[0].message
+    assert degraded[0].path == config_tree.locks_dir
+    assert degraded[0].kind not in doctor._REPAIRS
+
+
+def test_diagnose_is_silent_when_locking_works(config_tree: ConfigRoot):
+    findings = diagnose(config_tree)
+    assert [f for f in findings if f.kind == "degraded-locks"] == []
+
+
+def test_diagnose_never_raises_when_locks_is_a_plain_file(config_tree: ConfigRoot):
+    """The probe's non-raising contract, exercised through the caller that needs it."""
+    config_tree.locks_dir.write_text("not a directory\n")
+    findings = diagnose(config_tree)
+    assert any(f.kind == "degraded-locks" for f in findings)
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_diagnose_never_raises_on_an_unsearchable_locks_dir(config_tree: ConfigRoot):
+    """A .locks this user cannot traverse into: the degrade path with no exception."""
+    config_tree.locks_dir.mkdir()
+    os.chmod(config_tree.locks_dir, 0o600)
+    try:
+        findings = diagnose(config_tree)
+    finally:
+        # Restore, or tmp_path teardown cannot remove the directory.
+        os.chmod(config_tree.locks_dir, 0o700)
+    assert any(f.kind == "degraded-locks" for f in findings)
+
+
+def test_diagnose_never_raises_on_a_non_regular_probe_lock(config_tree: ConfigRoot):
+    """A planted FIFO at probe.lock is the shape name_lock refuses outright."""
+    config_tree.locks_dir.mkdir()
+    os.mkfifo(config_tree.probe_lock_path())
+    findings = diagnose(config_tree)
+    assert any(f.kind == "degraded-locks" for f in findings)
+
+
+def test_repair_leaves_degraded_locks_alone(config_tree: ConfigRoot, monkeypatch):
+    """Nothing here is machine-fixable, so --fix must report no action for it."""
+    from uv_stack.operations import doctor
+
+    monkeypatch.setattr(doctor, "probe_locking", lambda path: False)
+    findings = diagnose(config_tree)
+    actions = repair(config_tree, findings)
+    assert [a for a in actions if a.finding.kind == "degraded-locks"] == []

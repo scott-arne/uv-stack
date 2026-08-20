@@ -1,9 +1,11 @@
 """Detect-only diagnostics for a uv-stack config tree.
 
-``diagnose`` never mutates the filesystem; it returns a list of findings the CLI
+``diagnose`` writes nothing outside ``.locks/``, where it takes one probe lock
+to test whether locking works at all; it returns a list of findings the CLI
 prints with suggested fixes. It flags missing directories, legacy names
-(``*.in``, ``*.bundle``, ``profiles.txt``), env-like directories left at the root, and
-envs missing their source files.
+(``*.in``, ``*.bundle``, ``profiles.txt``), env-like directories left at the root,
+envs missing their source files, and a config root whose filesystem cannot serve
+the advisory locks that serialize concurrent creates.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from uv_stack.fsutil import (
     link_or_copy_no_replace,
     name_lock,
     nofollow_read_flags,
+    probe_locking,
 )
 from uv_stack.parse import read_clean_lines
 
@@ -165,6 +168,21 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                         path=env_dir / "python.txt",
                     )
                 )
+
+    if not probe_locking(config.probe_lock_path()):
+        findings.append(
+            Finding(
+                "warn",
+                f"Name locking is unavailable on {config.root}: concurrent "
+                "'stack create' is not serialized.",
+                fix=(
+                    "Move the config root to a local filesystem, or avoid running "
+                    "'stack create' concurrently against this root."
+                ),
+                kind="degraded-locks",
+                path=config.locks_dir,
+            )
+        )
 
     return findings
 

@@ -17,7 +17,7 @@ def config() -> None:
 @config.command("init")
 @click.pass_obj
 def config_init(config_root: ConfigRoot) -> None:
-    """Create missing config directories (profiles/, bundles/, envs/)."""
+    """Create missing config directories (profiles/, bundles/, envs/, .locks/)."""
     created = init_config_root(config_root)
     if not created:
         echo("Nothing to do — all config directories already exist.")

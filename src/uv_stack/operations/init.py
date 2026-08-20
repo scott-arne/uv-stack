@@ -1,7 +1,10 @@
 """The ``config init`` operation: create the config directory tree.
 
-Creates ``profiles/``, ``bundles/``, and ``envs/`` under the config root if they
-are absent. It seeds no profiles or bundles; those are authored by the user.
+Creates ``profiles/``, ``bundles/``, ``envs/``, and ``.locks/`` under the config
+root if they are absent. It seeds no profiles or bundles; those are authored by
+the user. ``.locks/`` would otherwise be created lazily by the first name lock
+taken against the root; creating it here means a fresh root has it with the
+initializing user's umask rather than whichever user happens to publish first.
 Existing directories are left untouched.
 """
 
@@ -19,7 +22,12 @@ def init_config_root(config: ConfigRoot) -> list[Path]:
     :returns: The directories actually created (absent ones only).
     """
     created: list[Path] = []
-    for directory in (config.profiles_dir, config.bundles_dir, config.envs_dir):
+    for directory in (
+        config.profiles_dir,
+        config.bundles_dir,
+        config.envs_dir,
+        config.locks_dir,
+    ):
         if not directory.is_dir():
             directory.mkdir(parents=True, exist_ok=True)
             created.append(directory)
