@@ -85,7 +85,7 @@ class UvStackGroup(click.RichGroup):
             # is ordinary shell usage and not an error. Redirect both streams to
             # devnull so the interpreter's shutdown flush has somewhere to go,
             # then exit with the shell's conventional status for the signal.
-            # Best effort: a caller that replaced sys.stdout with a non-file
+            # Best effort: a caller that replaced either stream with a non-file
             # object has no descriptor to redirect, and no shutdown flush of a
             # real pipe to protect either. signal.SIGPIPE is POSIX-only, so it
             # is read with getattr — dereferencing it unconditionally would

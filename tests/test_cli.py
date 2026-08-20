@@ -658,7 +658,6 @@ def test_broken_pipe_from_stderr_exits_with_signal_status(tmp_path: Path):
         # real group to exercise the real chain: render_warnings ->
         # error_console -> _ConsoleWithBrokenPipePropagation -> arm.
         driver = (
-            "import rich_click as click\n"
             "from uv_stack.cli import cli, main\n"
             "from uv_stack.cli._render import render_warnings\n"
             "@cli.command('emit-warning')\n"
