@@ -52,7 +52,8 @@ class ToolError(UvStackError):
     """An external ``uv`` or ``micromamba`` command failed.
 
     Covers both shapes: a process that ran and exited non-zero, and one that
-    could never be started at all — a missing or non-executable binary, which
+    could never be started at all — a missing or non-executable binary, or a
+    working directory that cannot be entered — which
     :func:`~uv_stack.runner._spawn_error` reports here with a synthetic status.
 
     :param command: The argv list of the command that failed.
