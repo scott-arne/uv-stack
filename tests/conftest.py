@@ -108,9 +108,9 @@ def _lock_held_by_another_process(lock_path: Path) -> Iterator[None]:
 def _deadline(seconds):
     """Fail rather than hang if the body blocks.
 
-    The defect the two tests below cover does not make them fail — it makes
-    them wait forever inside ``os.open``, which stalls the whole suite with no
-    output and no failing test to point at. SIGALRM turns that into an ordinary
+    The defects these callers cover do not make the test fail — they make it
+    wait forever inside ``os.open``, which stalls the whole suite with no output
+    and no failing test to point at. SIGALRM turns that into an ordinary
     assertion failure. The handler raises, so it interrupts the blocked syscall
     instead of letting PEP 475 retry it.
     """
