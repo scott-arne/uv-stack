@@ -15,6 +15,7 @@ the author controls. :func:`echo` is plain click output and is unaffected.
 
 from __future__ import annotations
 
+import errno
 import shlex
 from collections.abc import Iterable
 from pathlib import Path
@@ -28,8 +29,22 @@ from rich.text import Text
 
 from uv_stack.errors import UvStackError
 
-console = Console()
-error_console = Console(stderr=True)
+
+class _ConsoleWithBrokenPipePropagation(Console):
+    """Console that propagates BrokenPipeError instead of exiting.
+
+    Rich 15.0+ catches :exc:`BrokenPipeError` in its print machinery and
+    calls :meth:`on_broken_pipe`, whose default implementation exits with
+    status 1. Override it to re-raise so the CLI edge handler can apply the
+    shell's conventional ``128 + SIGPIPE`` status instead.
+    """
+
+    def on_broken_pipe(self) -> None:
+        raise BrokenPipeError(errno.EPIPE, "Broken pipe")
+
+
+console = _ConsoleWithBrokenPipePropagation()
+error_console = _ConsoleWithBrokenPipePropagation(stderr=True)
 
 
 def render_error(error: UvStackError) -> None:
@@ -46,6 +61,28 @@ def render_error(error: UvStackError) -> None:
         body.append("\n\n")
         body.append("Hint:", style="dim")
         body.append(f" {error.hint}")
+    error_console.print(Panel(body, title="uv-stack error", border_style="red"))
+
+
+def render_os_error(error: OSError) -> None:
+    """Print a bare :class:`OSError` as a red panel.
+
+    The counterpart to :func:`render_error` for failures no layer converted
+    into a :class:`UvStackError` — a full disk, an exhausted pty, a permission
+    the caller could not anticipate. The errno name is included because it is
+    the part a user can search for; ``filename`` is user data and is assembled
+    as :class:`~rich.text.Text` like everything else here.
+    """
+    body = Text(error.strerror or str(error))
+    code = errno.errorcode.get(error.errno) if error.errno is not None else None
+    if code:
+        body.append("\n\n")
+        body.append("System error:", style="dim")
+        body.append(f" {code}")
+    if error.filename:
+        body.append("\n")
+        body.append("Path:", style="dim")
+        body.append(f" {error.filename}")
     error_console.print(Panel(body, title="uv-stack error", border_style="red"))
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -500,6 +502,126 @@ def test_doctor_reports_missing_dirs(tmp_path: Path):
     result = CliRunner().invoke(cli, ["--root", str(root), "doctor"])
     assert result.exit_code == 0
     assert "Missing" in result.output
+
+
+# ---------------------------------------------------------------------------
+# error arms
+# ---------------------------------------------------------------------------
+
+
+def test_bare_oserror_renders_a_panel_instead_of_a_traceback(tmp_path: Path, monkeypatch):
+    """Every uncaught OSError below the CLI edge becomes the same panel shape."""
+    import errno
+
+    from uv_stack.cli import doctor as cli_doctor
+
+    bracketed = str(tmp_path / "[tool.uv-stack]")
+
+    def boom(config):
+        raise OSError(errno.ENOSPC, "No space left on device", bracketed)
+
+    monkeypatch.setattr(cli_doctor, "diagnose", boom)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(tmp_path), "doctor"])
+    assert result.exit_code == 1
+    panel = _flat_panel(result)
+    assert "No space left on device" in panel
+    assert "ENOSPC" in panel
+    # Assembled as Text, so the bracketed path is not parsed as rich markup.
+    assert "[tool.uv-stack]" in panel
+    assert "Traceback" not in panel
+
+
+def test_broken_pipe_exits_quietly_with_the_signal_status(tmp_path: Path, monkeypatch):
+    """`stack list | head` is ordinary shell usage, not an error to render."""
+    from uv_stack.cli import doctor as cli_doctor
+
+    def boom(config):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(cli_doctor, "diagnose", boom)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(tmp_path), "doctor"])
+    assert result.exit_code == 128 + int(signal.SIGPIPE)
+    assert "uv-stack error" not in _flat_panel(result)
+
+
+def test_broken_pipe_falls_back_to_status_1_without_sigpipe(tmp_path: Path, monkeypatch):
+    """signal.SIGPIPE is POSIX-only; reaching for it unguarded would raise."""
+    from uv_stack.cli import doctor as cli_doctor
+
+    def boom(config):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr(cli_doctor, "diagnose", boom)
+    monkeypatch.delattr(signal, "SIGPIPE", raising=False)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(tmp_path), "doctor"])
+    assert result.exit_code == 1
+    assert "uv-stack error" not in _flat_panel(result)
+
+
+def test_uvstackerror_arm_is_unaffected_by_the_new_arms(tmp_path: Path):
+    """The pre-existing arm still renders its own panel, ahead of the OSError one.
+
+    UvStackError is not an OSError, so ordering cannot break this — but the arm
+    is now one of three, and a regression here would be silent otherwise.
+    """
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "ghost"])
+    assert result.exit_code == 1
+    panel = _flat_panel(result)
+    assert "uv-stack error" in panel
+    assert "ghost" in panel
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
+)
+def test_list_into_a_closed_pipe_exits_without_a_panel(tmp_path: Path):
+    """The real `stack list | head`, not a simulated one.
+
+    ``CliRunner`` cannot produce this: it hands the command an in-memory buffer,
+    so no write ever meets a closed pipe and the ``dup2`` has no descriptor to
+    redirect. Only a child process writing down a real pipe exercises the arm
+    end to end — and the shutdown flush the ``dup2`` exists to protect happens
+    after the arm returns, so nothing short of a separate interpreter can
+    observe whether it was protected.
+    """
+    import subprocess
+    import sys
+
+    root = _seeded_root(tmp_path)
+    # Close the read end *before* the child starts: a pipe with no reader fails
+    # every write immediately, which makes this deterministic. Handing the child
+    # a live reader and closing it afterwards would race — `list profile` output
+    # fits in the pipe buffer, so the child would finish before the close.
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from uv_stack.cli import main; main()",
+                "--root",
+                str(root),
+                "list",
+                "profile",
+            ],
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+        )
+    finally:
+        os.close(write_fd)
+
+    stderr = proc.stderr.decode()
+    assert proc.returncode == 128 + int(signal.SIGPIPE)
+    assert "uv-stack error" not in stderr
+    assert "Traceback" not in stderr
+    # The dup2's whole job: without it the interpreter's shutdown flush meets
+    # the same dead pipe and CPython prints this to stderr, exit status 120.
+    assert "Exception ignored" not in stderr
 
 
 # ---------------------------------------------------------------------------

@@ -2,19 +2,24 @@
 
 Defines the root group, the shared ``--root`` option (stored on the Click
 context), version output, and the error wrapper that renders
-:class:`UvStackError` as a panel and exits non-zero.
+:class:`UvStackError` and any bare :class:`OSError` as a panel and exits
+non-zero — except a broken pipe, which exits quietly with the shell's
+conventional signal status.
 """
 
 from __future__ import annotations
 
+import os
+import signal
 import sys
+from contextlib import suppress
 
 import rich_click as click
 from rich_click.rich_help_formatter import RichHelpFormatter
 from rich_click.rich_panel import RichCommandPanel
 
 from uv_stack import __version__
-from uv_stack.cli._render import render_error
+from uv_stack.cli._render import render_error, render_os_error
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import UvStackError
 
@@ -67,13 +72,32 @@ click.rich_click.COMMAND_GROUPS = {
 
 
 class UvStackGroup(click.RichGroup):
-    """Custom group that catches UvStackError and renders it as a panel."""
+    """Custom group that renders UvStackError and bare OSError as panels."""
 
     def invoke(self, ctx: click.Context) -> None:
         try:
             super().invoke(ctx)
         except UvStackError as error:
             render_error(error)
+            sys.exit(1)
+        except BrokenPipeError:
+            # A downstream reader closed the pipe (`stack list | head`), which
+            # is ordinary shell usage and not an error. Redirect stdout to
+            # devnull so the interpreter's shutdown flush has somewhere to go,
+            # then exit with the shell's conventional status for the signal.
+            # Best effort: a caller that replaced sys.stdout with a non-file
+            # object has no descriptor to redirect, and no shutdown flush of a
+            # real pipe to protect either. signal.SIGPIPE is POSIX-only, so it
+            # is read with getattr — dereferencing it unconditionally would
+            # replace a clean exit with an AttributeError on the one platform
+            # the fallback exists for.
+            with suppress(OSError, ValueError):
+                target = sys.stdout.fileno()
+                os.dup2(os.open(os.devnull, os.O_WRONLY), target)
+            sigpipe = getattr(signal, "SIGPIPE", None)
+            sys.exit(1 if sigpipe is None else 128 + int(sigpipe))
+        except OSError as error:
+            render_os_error(error)
             sys.exit(1)
 
 
