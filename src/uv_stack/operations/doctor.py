@@ -1,11 +1,12 @@
-"""Detect-only diagnostics for a uv-stack config tree.
+"""Diagnostics for a uv-stack config tree.
 
-``diagnose`` writes nothing outside ``.locks/``, where it takes one probe lock
-to test whether locking works at all; it returns a list of findings the CLI
-prints with suggested fixes. It flags missing directories, legacy names
-(``*.in``, ``*.bundle``, ``profiles.txt``), env-like directories left at the root,
-envs missing their source files, and a config root whose filesystem cannot serve
-the advisory locks that serialize concurrent creates.
+``diagnose`` writes one probe lock at ``.locks/probe.lock`` to test whether
+locking works at all; the path is resolved the same way ``name_lock`` resolves it,
+so a symlinked ``.locks`` sends the write wherever the symlink points. It returns
+a list of findings the CLI prints with suggested fixes. It flags missing
+directories, legacy names (``*.in``, ``*.bundle``, ``profiles.txt``), env-like
+directories left at the root, envs missing their source files, and a config root
+whose filesystem cannot serve the advisory locks that serialize concurrent creates.
 """
 
 from __future__ import annotations

@@ -1785,3 +1785,26 @@ def test_probe_locking_survives_a_failing_close(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fsutil.os, "close", exploding_close)
     assert fsutil.probe_locking(tmp_path / ".locks" / "probe.lock") is True
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(not _O_NOFOLLOW, reason="requires O_NOFOLLOW")
+def test_probe_locking_declines_on_a_symlink_at_probe_lock(tmp_path):
+    """A symlink planted at probe.lock itself raises OSError from _open_lock_file.
+
+    O_NOFOLLOW on the final component makes os.open raise OSError ELOOP, which no
+    inner arm of _open_lock_file catches, so it reaches the probe's outer handler.
+    The probe returns False and the symlink target is not created, pinning the
+    O_NOFOLLOW protection the test depends on.
+    """
+    from uv_stack.fsutil import probe_locking
+
+    locks = tmp_path / ".locks"
+    locks.mkdir()
+    lock_path = locks / "probe.lock"
+    target = tmp_path / "planted-target"
+    lock_path.symlink_to(target)
+    assert not target.exists()
+
+    assert probe_locking(lock_path) is False
+    assert not target.exists(), "O_NOFOLLOW was bypassed and the target was created"
