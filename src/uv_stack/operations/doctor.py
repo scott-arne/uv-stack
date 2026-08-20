@@ -388,8 +388,8 @@ def _finish_copy_move(
     :param moved_ident: ``(st_dev, st_ino)`` of the inode measured before the copy.
     :param published: The copy's own report; ``published.stat`` identifies the
         inode the exclusive create made.
-    :raises OSError: If ``dst`` vanished or was replaced, or if ``src`` changed
-        identity, content, or mode under the copy.
+    :raises OSError: If ``src`` changed identity, content, or mode under the
+        copy, or if ``dst`` vanished or was replaced.
     """
     published_ident = (published.stat.st_dev, published.stat.st_ino)
     try:
@@ -413,25 +413,38 @@ def _finish_copy_move(
             # the withdrawal path rather than guess.
             identical = False
         if identical:
-            # Re-stat after the comparison, not before it: a chmod or a
-            # replacement landing while we read would otherwise be judged
-            # against state we captured before the read began. The window
-            # between this lstat and the unlink cannot be closed without
+            # Re-stat BOTH names after the comparison, not before it: a chmod
+            # or a replacement landing while we read would otherwise be judged
+            # against state captured before the read began. The window between
+            # these lstats and the unlink cannot be closed without
             # unlinkat-with-identity, which Python does not expose portably.
             try:
                 final = src.lstat()
             except FileNotFoundError:
+                # src vanished: no name of ours is left to remove, and dst
+                # holds the content.
                 return
-            if (final.st_dev, final.st_ino) == moved_ident and stat.S_IMODE(
-                final.st_mode
-            ) == stat.S_IMODE(published.stat.st_mode):
-                src.unlink(missing_ok=True)
-                return
-    # src was replaced, or its bytes changed under the copy we published. Either
-    # way dst is a stale snapshot. Withdraw it only while it still names the
-    # inode the exclusive create made: that inode is provably ours, and unlike
-    # the link branch there is no second candidate — we never published src's
-    # own inode, so whatever src names now cannot be at dst by our doing.
+            try:
+                dst_final = dst.lstat()
+            except FileNotFoundError:
+                # dst vanished: src still exists and the destination is gone, so
+                # the move did not complete. Fall through to the withdrawal
+                # block, which will find dst absent and raise.
+                pass
+            else:
+                if (
+                    (final.st_dev, final.st_ino) == moved_ident
+                    and stat.S_IMODE(final.st_mode) == stat.S_IMODE(published.stat.st_mode)
+                    and (dst_final.st_dev, dst_final.st_ino) == published_ident
+                ):
+                    src.unlink(missing_ok=True)
+                    return
+    # src was replaced, or its bytes or mode changed under the copy, or dst was
+    # replaced after the comparison. Either way dst is a stale snapshot. Withdraw
+    # it only while it still names the inode the exclusive create made: that
+    # inode is provably ours, and unlike the link branch there is no second
+    # candidate — we never published src's own inode, so whatever src names now
+    # cannot be at dst by our doing.
     withdrew = False
     try:
         dst_now = dst.lstat()
@@ -441,7 +454,7 @@ def _finish_copy_move(
     except FileNotFoundError:
         pass
     outcome = f"{dst} withdrawn" if withdrew else "nothing deleted"
-    raise OSError(f"{src} changed during move; {outcome}")
+    raise OSError(f"source or destination changed during move; {outcome}")
 
 
 def _move_no_replace(src: Path, dst: Path) -> None:

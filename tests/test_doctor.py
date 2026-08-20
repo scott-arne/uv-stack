@@ -706,6 +706,82 @@ def test_move_no_replace_copy_path_refuses_a_chmod_after_same_bytes(
     assert not dst.exists()
 
 
+def test_move_no_replace_copy_path_refuses_a_dst_replacement_after_same_bytes(
+    tmp_path: Path, monkeypatch
+):
+    """Dst replaced with a same-byte file after the comparison withdraws nothing.
+
+    The replacement is not ours to delete, and src survives.
+    """
+    import os
+    import stat
+
+    from uv_stack.operations import doctor
+
+    _link_less(monkeypatch)
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    replacement = tmp_path / "replacement.txt"
+    src.write_text("content\n")
+    replacement.write_text("content\n")  # Same bytes.
+    os.chmod(replacement, 0o600)  # Different mode from default.
+    src_ident = (src.stat().st_dev, src.stat().st_ino)
+    real_same_bytes = doctor._same_bytes
+
+    def same_bytes_then_replace_dst(left, right):
+        result = real_same_bytes(left, right)
+        # Replace dst after the comparison returns.
+        dst.unlink()
+        os.rename(replacement, dst)
+        return result
+
+    monkeypatch.setattr(doctor, "_same_bytes", same_bytes_then_replace_dst)
+    with pytest.raises(OSError) as excinfo:
+        doctor._move_no_replace(src, dst)
+    assert "changed during move" in str(excinfo.value)
+    assert "nothing deleted" in str(excinfo.value)
+    # The source survives unchanged.
+    assert src.read_text() == "content\n"
+    assert (src.stat().st_dev, src.stat().st_ino) == src_ident
+    # The replacement at dst survives (not ours to delete).
+    assert dst.read_text() == "content\n"
+    assert stat.S_IMODE(dst.stat().st_mode) == 0o600
+
+
+def test_move_no_replace_copy_path_refuses_when_dst_vanishes_after_same_bytes(
+    tmp_path: Path, monkeypatch
+):
+    """Dst vanishing after the comparison raises an error rather than silently succeeding.
+
+    Src still exists and the destination is gone, so the move did not complete.
+    """
+
+    from uv_stack.operations import doctor
+
+    _link_less(monkeypatch)
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("content\n")
+    src_ident = (src.stat().st_dev, src.stat().st_ino)
+    real_same_bytes = doctor._same_bytes
+
+    def same_bytes_then_remove_dst(left, right):
+        result = real_same_bytes(left, right)
+        # Remove dst after the comparison returns.
+        dst.unlink()
+        return result
+
+    monkeypatch.setattr(doctor, "_same_bytes", same_bytes_then_remove_dst)
+    with pytest.raises(OSError) as excinfo:
+        doctor._move_no_replace(src, dst)
+    assert "changed during move" in str(excinfo.value)
+    # The source survives.
+    assert src.read_text() == "content\n"
+    assert (src.stat().st_dev, src.stat().st_ino) == src_ident
+    # Dst is gone.
+    assert not dst.exists()
+
+
 def test_move_no_replace_copy_path_refuses_a_chmod_under_the_copy(tmp_path: Path, monkeypatch):
     """A chmod on src after publication leaves src in place and withdraws dst.
 
