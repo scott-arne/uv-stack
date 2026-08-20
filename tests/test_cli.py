@@ -1039,6 +1039,62 @@ def test_a_broken_pipe_at_exit_does_not_swallow_an_internal_exception(tmp_path: 
     assert "Exception ignored" not in stderr
 
 
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
+)
+def test_a_broken_pipe_at_exit_ignores_an_enclosing_handlers_exception(tmp_path: Path):
+    """Only what cli() unwinds counts, not what the caller happens to be handling.
+
+    The guard binds the exception cli() raised. Reading sys.exc_info() in the
+    finally instead would answer with the *enclosing* handler's exception
+    whenever nothing is in flight, so an embedding harness that calls main()
+    from inside its own `except` block would have its own error mistaken for
+    ours: the guard would take the preserve branch and return to the harness —
+    status 7 below — instead of exiting 141 for the pipe.
+
+    Click's standalone mode always leaves through SystemExit, so the console
+    script cannot reach this; a cli() that returns cleanly is what an embedding
+    harness looks like, and the marker file keeps the substitution honest —
+    without it, a main() that stopped calling this module's `cli` would run the
+    real one and exit 141 for the wrong reason.
+    """
+    import subprocess
+    import sys
+
+    marker = tmp_path / "cli-was-called"
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    env = os.environ.copy()
+    env.pop("PYTHONUNBUFFERED", None)
+    try:
+        driver = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "import uv_stack.cli as cli_module\n"
+            "def _returns_cleanly():\n"
+            f"    Path({str(marker)!r}).write_text('called')\n"
+            "cli_module.cli = _returns_cleanly\n"
+            # Buffered bytes on the dead stdout are what wake the guard at all.
+            "print('buffered output')\n"
+            "try:\n"
+            "    raise RuntimeError('the harness own failure')\n"
+            "except RuntimeError:\n"
+            "    cli_module.main()\n"
+            "sys.exit(7)\n"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", driver],
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+    finally:
+        os.close(write_fd)
+
+    assert marker.exists()
+    assert proc.returncode == 128 + int(signal.SIGPIPE)
+
+
 def test_the_devnull_redirect_closes_the_descriptor_it_opened(tmp_path: Path):
     """The redirect leaves no descriptor behind for the branch that keeps running.
 

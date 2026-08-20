@@ -229,8 +229,20 @@ _register()
 
 def main() -> None:
     """Console-script entry point."""
+    # What cli() is unwinding decides whether the pipe gets to set the status.
+    # Bind it here rather than reading sys.exc_info() in the finally, which
+    # reports the *enclosing* handler's exception when nothing is in flight:
+    # a wrapper entry point calling main() from inside its own except block
+    # would hand the guard that foreign exception, and a broken pipe would take
+    # the preserve branch and return to the wrapper instead of exiting 141.
+    # Click's standalone mode always leaves through SystemExit, so no console
+    # script reaches that today; binding costs nothing and does not rely on it.
+    in_flight: BaseException | None = None
     try:
         cli()
+    except BaseException as error:
+        in_flight = error
+        raise
     finally:
         # rich-click emits --help from an eager parameter callback, before
         # Group.invoke ever runs — so the BrokenPipeError arm there never sees
@@ -244,9 +256,6 @@ def main() -> None:
         # there is nothing left to flush — the break happened at the print() and
         # rich-click's own EPIPE arm took it.
         #
-        # What cli() is unwinding decides whether the pipe gets to set the
-        # status, so read it before anything below can raise its own.
-        in_flight = sys.exc_info()[1]
         # Each stream gets its own try so a break is attributed to the stream it
         # came from: the preserve-the-exception branch below must redirect only
         # that one. A shared try would also stop at the first failure and leave
