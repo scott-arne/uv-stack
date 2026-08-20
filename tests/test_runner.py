@@ -183,3 +183,53 @@ def test_spawn_error_hints_path_for_a_missing_binary():
     error = OSError(errno.ENOENT, "No such file or directory", "nosuchtool")
     tool_error = _spawn_error(command, error)
     assert tool_error.hint == "Is nosuchtool installed and on PATH?"
+
+
+def test_spawn_error_hints_directory_permission_when_cwd_unenterable(tmp_path):
+    """An EACCES naming the directory gets the cwd hint, not the chmod hint."""
+    import errno
+
+    blocked_dir = tmp_path / "blocked"
+    blocked_dir.mkdir()
+    some_exe = tmp_path / "uv"
+    some_exe.write_text("#!/bin/sh\n")
+    command = Command([str(some_exe)], cwd=blocked_dir)
+    error = OSError(errno.EACCES, "Permission denied", blocked_dir)
+    tool_error = _spawn_error(command, error)
+    assert tool_error.returncode == 127
+    assert str(blocked_dir) in tool_error.hint
+    assert "Cannot enter the working directory" in tool_error.hint
+    assert "chmod +x" not in tool_error.hint
+
+
+def test_spawn_error_hints_path_for_a_missing_cwd(tmp_path):
+    """A missing cwd gets the PATH hint, not the permissions hint."""
+    import errno
+
+    missing_dir = tmp_path / "does-not-exist"
+    some_exe = "uv"
+    command = Command([some_exe, "pip", "compile"], cwd=missing_dir)
+    error = OSError(errno.ENOENT, "No such file or directory", missing_dir)
+    tool_error = _spawn_error(command, error)
+    assert tool_error.hint == f"Is {some_exe} installed and on PATH?"
+    assert "permissions" not in tool_error.hint
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="root ignores directory permissions",
+)
+def test_subprocess_runner_unenterable_cwd_hints_the_directory(tmp_path):
+    """An unenterable working directory produces the cwd hint, not the chmod hint."""
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0o000)
+    runner = SubprocessRunner()
+    try:
+        with pytest.raises(ToolError) as exc:
+            runner.run(Command([sys.executable, "-c", "pass"], cwd=blocked), capture=True)
+    finally:
+        blocked.chmod(0o755)
+    assert exc.value.returncode == 127
+    assert "Cannot enter the working directory" in exc.value.hint
+    assert "chmod +x" not in exc.value.hint

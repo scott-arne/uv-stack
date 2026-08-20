@@ -61,11 +61,12 @@ def _tail(text: str) -> str:
 def _spawn_error(command: Command, error: OSError) -> ToolError:
     """Wrap a failure to *start* ``command`` as a user-facing error.
 
-    ``subprocess`` raises a bare :class:`OSError` when the binary is missing or
-    not executable. No process runs, so there is no exit code — and left
-    unwrapped it escapes every ``except UvStackError`` at the CLI edge, printing
-    a traceback for an ordinary "uv is not installed" condition and discarding
-    any advisories a handler would have attached on the way out.
+    ``subprocess`` raises a bare :class:`OSError` when the binary is missing,
+    not executable, or when the working directory cannot be entered. No process
+    runs, so there is no exit code — and left unwrapped it escapes every
+    ``except UvStackError`` at the CLI edge, printing a traceback for an
+    ordinary "uv is not installed" condition and discarding any advisories a
+    handler would have attached on the way out.
 
     :param command: The command that could not be started.
     :param error: The spawn failure.
@@ -73,7 +74,14 @@ def _spawn_error(command: Command, error: OSError) -> ToolError:
         for a command that could not be executed.
     """
     exe = command.args[0] if command.args else "<empty command>"
-    if error.errno == errno.EACCES:
+    cwd = command.cwd
+    # subprocess reports the cwd as ``filename`` when it cannot chdir into it,
+    # and passes the object through unchanged — a Path here, not a string. The
+    # errno guard matters: ENOENT names the directory too, and a directory that
+    # does not exist is not a permissions problem.
+    if cwd is not None and error.errno == errno.EACCES and str(error.filename) == str(cwd):
+        hint = f"Cannot enter the working directory {cwd}. Check its permissions."
+    elif error.errno == errno.EACCES:
         # The message here reads "Permission denied", so the PATH hint below
         # would contradict it: the binary was found, it just cannot be run.
         hint = f"{exe} is not executable. Try: chmod +x {exe}"
