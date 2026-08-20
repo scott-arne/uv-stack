@@ -3,14 +3,13 @@ from __future__ import annotations
 import contextlib
 import errno
 import os
-import signal
 import stat
 import time
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import _lock_held_by_another_process
+from tests.conftest import _deadline, _lock_held_by_another_process
 from uv_stack.errors import ConfigError
 from uv_stack.fsutil import (
     _LOCK_AVAILABLE,
@@ -669,29 +668,6 @@ def test_name_lock_surfaces_a_non_permission_error_from_the_read_only_retry(
 
     assert excinfo.value.errno == errno.ELOOP
     assert len(calls) == 2, "the retry never ran, so nothing was exercised"
-
-
-@contextlib.contextmanager
-def _deadline(seconds):
-    """Fail rather than hang if the body blocks.
-
-    The defect the two tests below cover does not make them fail — it makes
-    them wait forever inside ``os.open``, which stalls the whole suite with no
-    output and no failing test to point at. SIGALRM turns that into an ordinary
-    assertion failure. The handler raises, so it interrupts the blocked syscall
-    instead of letting PEP 475 retry it.
-    """
-
-    def _fire(signum, frame):
-        raise AssertionError(f"blocked for more than {seconds}s")
-
-    previous = signal.signal(signal.SIGALRM, _fire)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
 
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
@@ -1514,10 +1490,11 @@ def test_link_or_copy_no_replace_refuses_a_fifo_source_on_the_copy_path(tmp_path
     src = tmp_path / "src.txt"
     dst = tmp_path / "dst.txt"
     _os.mkfifo(src)
-    with pytest.raises(OSError) as excinfo:
-        link_or_copy_no_replace(src, dst)
-    assert "not a regular file" in str(excinfo.value)
-    assert not dst.exists()
+    with _deadline(5.0):
+        with pytest.raises(OSError) as excinfo:
+            link_or_copy_no_replace(src, dst)
+        assert "not a regular file" in str(excinfo.value)
+        assert not dst.exists()
 
 
 def test_link_or_copy_no_replace_refuses_a_symlink_source_on_the_copy_path(tmp_path, monkeypatch):

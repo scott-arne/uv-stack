@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import signal
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -101,3 +102,26 @@ def _lock_held_by_another_process(lock_path: Path) -> Iterator[None]:
             proc.kill()
             proc.wait()
             proc.stdout.close()
+
+
+@contextmanager
+def _deadline(seconds):
+    """Fail rather than hang if the body blocks.
+
+    The defect the two tests below cover does not make them fail — it makes
+    them wait forever inside ``os.open``, which stalls the whole suite with no
+    output and no failing test to point at. SIGALRM turns that into an ordinary
+    assertion failure. The handler raises, so it interrupts the blocked syscall
+    instead of letting PEP 475 retry it.
+    """
+
+    def _fire(signum, frame):
+        raise AssertionError(f"blocked for more than {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, _fire)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _lock_held_by_another_process
+from tests.conftest import _deadline, _lock_held_by_another_process
 from uv_stack.config import ConfigRoot
 from uv_stack.fsutil import _LOCK_AVAILABLE
 from uv_stack.operations.doctor import diagnose, repair
@@ -631,12 +631,13 @@ def test_move_no_replace_copy_path_refuses_a_fifo_source_during_same_bytes(
         return real_same_bytes(left, right)
 
     monkeypatch.setattr(doctor, "_same_bytes", same_bytes_then_fifo)
-    with pytest.raises(OSError) as excinfo:
-        doctor._move_no_replace(src, dst)
-    assert "changed during move" in str(excinfo.value)
-    # FIFO survives, dst is withdrawn.
-    assert src.exists()
-    assert not dst.exists()
+    with _deadline(5.0):
+        with pytest.raises(OSError) as excinfo:
+            doctor._move_no_replace(src, dst)
+        assert "changed during move" in str(excinfo.value)
+        # FIFO survives, dst is withdrawn.
+        assert src.exists()
+        assert not dst.exists()
 
 
 def test_move_no_replace_copy_path_refuses_a_symlink_source_during_same_bytes(
