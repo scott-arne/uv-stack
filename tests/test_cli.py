@@ -1103,6 +1103,66 @@ def test_a_broken_pipe_at_exit_takes_over_when_stderr_cannot_report(tmp_path: Pa
 @pytest.mark.skipif(
     not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
 )
+def test_a_broken_pipe_at_exit_takes_over_when_stderr_is_gone(tmp_path: Path):
+    """The same takeover, for the stderr CPython replaces with None.
+
+    Closing fd 2 before the interpreter starts leaves sys.stderr as None. That
+    is not a stream that happens to be silent but no stream at all, so the
+    can-report probe answers False without a descriptor to ask and the pipe
+    status wins.
+
+    Have it answer True instead and the guard yields to the RuntimeError, whose
+    traceback CPython then has nowhere to print: status 1, which this assertion
+    rejects.
+    """
+    import subprocess
+    import sys
+
+    root = _seeded_root(tmp_path)
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    env = os.environ.copy()
+    env.pop("PYTHONUNBUFFERED", None)
+    try:
+        driver = (
+            "import sys\n"
+            "from uv_stack.cli import cli, main\n"
+            "@cli.command('explode')\n"
+            "def _explode():\n"
+            "    print('buffered output')\n"
+            "    raise RuntimeError('a real internal bug')\n"
+            # Both guard against silent vacuity: unbuffered, the print() breaks
+            # inside the command and the invoke arm exits 141 without the guard
+            # running, and a stderr that was still a stream would reach the
+            # descriptor probe rather than the None branch this test covers.
+            "assert not sys.stdout.write_through\n"
+            "assert sys.stderr is None\n"
+            "main()\n"
+        )
+        # subprocess cannot hand a child a *closed* fd 2, so `2>&-` in the shell
+        # closes it before exec, the way the stdout sibling above uses `>&-`.
+        proc = subprocess.run(
+            [
+                "/bin/sh",
+                "-c",
+                'exec "$1" -c "$2" --root "$3" explode 2>&-',
+                "sh",
+                sys.executable,
+                driver,
+                str(root),
+            ],
+            stdout=write_fd,
+            env=env,
+        )
+    finally:
+        os.close(write_fd)
+
+    assert proc.returncode == 128 + int(signal.SIGPIPE)
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
+)
 def test_a_broken_pipe_printing_a_usage_error_exits_with_the_signal_status(tmp_path: Path):
     """A break met while printing a usage error is still just a broken pipe.
 
@@ -1163,7 +1223,8 @@ def test_a_broken_pipe_printing_a_usage_error_exits_141_without_poll(tmp_path: P
     cannot run may not subtract confidence. The other clause is what
     keeps the status right there: a BrokenPipeError in flight is the break
     itself. Take it away and the guard preserves that BrokenPipeError instead,
-    for status 1 and a traceback discarded down the dead pipe.
+    redirecting the stderr it just found broken to devnull and letting the
+    break print its own traceback there, for status 1.
 
     The child pops poll rather than deleting it so it does not raise on a
     platform that never had it, the same way the no-SIGPIPE test above does.
@@ -1275,6 +1336,32 @@ def test_the_devnull_redirect_closes_the_descriptor_it_opened(tmp_path: Path):
         os.close(after)
 
     assert after == before
+
+
+def test_the_can_report_probe_calls_an_unprobable_stream_reportable():
+    """A stream the probe cannot reach counts as able to report, and never raises.
+
+    The predicate may only ever subtract confidence: answering False for a
+    stream it merely failed to measure would send tracebacks to devnull. Both
+    shapes below reach it through an embedding harness that replaced sys.stderr
+    — io.StringIO raises UnsupportedOperation from fileno(), and a bare writer
+    has no fileno() to call at all. The second is also why AttributeError is
+    caught: raised from inside main()'s finally it would escape the guard and
+    replace the very exception the guard had just chosen to preserve.
+    """
+    import io
+
+    from uv_stack.cli import _stream_can_report
+
+    class _BareWriter:
+        def write(self, text: str) -> int:
+            return len(text)
+
+        def flush(self) -> None:
+            pass
+
+    assert _stream_can_report(io.StringIO()) is True
+    assert _stream_can_report(_BareWriter()) is True  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
