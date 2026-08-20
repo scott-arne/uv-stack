@@ -7,9 +7,12 @@ exits non-zero, and the shutdown guard in ``main()`` that flushes buffered
 output. A broken pipe met while running a command, or while the wrapper
 renders one of those panels, is caught by the wrapper; one met on output still
 buffered at exit — help text above all — is caught by the guard. Both exit
-quietly with the shell's conventional signal status. A break met at write time
-inside an eager callback — Click's ``--version``, rich-click's ``--help`` — is
-caught by neither: rich-click's EPIPE arm takes both and exits 1.
+quietly with the shell's conventional signal status, except that the guard
+stands aside for an internal exception that is unwinding past it while stderr
+can still print it: that exception keeps its own status and its traceback. A
+break met at write time inside an eager callback — Click's ``--version``,
+rich-click's ``--help`` — is caught by neither: rich-click's EPIPE arm takes
+both and exits 1.
 """
 
 from __future__ import annotations
