@@ -8,6 +8,7 @@ envs missing their source files.
 
 from __future__ import annotations
 
+import io
 import os
 import stat
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ import yaml
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
-from uv_stack.fsutil import atomic_write_new, name_lock
+from uv_stack.fsutil import Published, atomic_write_new, link_or_copy_no_replace, name_lock
 from uv_stack.parse import read_clean_lines
 
 _KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib", ".locks"}
@@ -169,8 +170,38 @@ class RepairAction:
     reason: str | None = None
 
 
-def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
-    """Complete a move after linking, checking both names before unlinking.
+def _same_bytes(left: Path, right: Path) -> bool:
+    """Report whether two paths hold identical bytes.
+
+    Sizes first, then a chunked comparison that stops at the first difference.
+    Deliberately not a timestamp comparison: the filesystems that reach the
+    caller's copy branch are exactly the ones with coarse mtimes — FAT resolves
+    to two seconds, exFAT to ten milliseconds — so an mtime test would miss the
+    writes most likely to land in the millisecond-scale window it guards. Also
+    deliberately not :func:`filecmp.cmp`, whose module-level cache is keyed on a
+    stat signature containing mtime: the same weakness by another route.
+
+    :param left: First file.
+    :param right: Second file.
+    :returns: ``True`` when both hold the same bytes.
+    :raises OSError: If either file cannot be stat'd or read.
+    """
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with open(left, "rb") as left_handle, open(right, "rb") as right_handle:
+        while True:
+            left_chunk = left_handle.read(io.DEFAULT_BUFFER_SIZE)
+            right_chunk = right_handle.read(io.DEFAULT_BUFFER_SIZE)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
+
+
+def _finish_move(
+    src: Path, dst: Path, moved_stat: os.stat_result, published: Published
+) -> None:
+    """Complete a move after publishing, checking both names before unlinking.
 
     Every unlink here names a path, not an inode — POSIX offers no
     unlink-by-inode — so each is preceded by an identity check that narrows,
@@ -178,13 +209,28 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
     file underneath us. Hence the success path's re-check of ``dst``: ``src``
     still naming the moved inode says nothing about what became of our link.
 
+    Which rules apply is decided by ``published.kind`` and never by comparing
+    stats. The two mechanisms differ in what they prove:
+
+    - **link** — ``dst`` and ``src`` name one inode. Nothing published here is
+      provably ours, because :func:`os.link` publishes whatever ``src`` named
+      at link time, which may be a replacement. These rules are unchanged from
+      before the copy path existed.
+    - **copy** — ``dst`` is a *different* inode, made by an exclusive create,
+      so it is provably ours and the rollback set narrows to it alone. But it
+      is a snapshot, so identity is no longer sufficient to authorize removing
+      ``src``: an in-place write leaves ``st_dev``/``st_ino`` untouched while
+      the bytes diverge, and unlinking ``src`` would destroy them. The bytes
+      are therefore compared before the unlink.
+
     The rollback withdraws ``dst`` on one condition and no other: ``dst``
-    names an inode in ``ours``, the one we measured or the one ``src`` names
-    now. Anything else is left alone — that link leaks, and only there is a
-    deletion ruled out. Withdrawing at all is a choice, not a POSIX limit:
-    ``dst`` is a name only we created, and leaving it would block every later
-    move. But the condition tests state, not provenance, so "rolled back"
-    promises a clean destination and nothing more:
+    names an inode in the branch's rollback set — on the link path, the one we
+    measured or the one ``src`` names now; on the copy path, the one the
+    exclusive create made. Anything else is left alone — that link leaks, and
+    only there is a deletion ruled out. Withdrawing at all is a choice, not a
+    POSIX limit: ``dst`` is a name only we created, and leaving it would block
+    every later move. On the link path the condition tests state, not
+    provenance, so "rolled back" promises a clean destination and nothing more:
 
     - Neither the name at ``dst`` nor the inode it holds is provably ours. A
       pre-link replacement of ``src`` is what ``os.link`` publishes; a symlink
@@ -203,6 +249,10 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
       that check guards, costing the moved inode what may be its last name.
     - ``src`` swapped between its check and its unlink, which removes the
       replacement rather than the file we moved.
+    - On the copy path, a write landing between the byte comparison and the
+      unlink is still lost. The comparison narrows that window to the interval
+      between two adjacent statements; it does not close it, exactly as the
+      identity checks above narrow rather than close theirs.
     - ``src`` already gone when we look — or gone by the time we unlink — with
       ``dst`` unlinked or replaced in the same interval. No name of ours is
       left to remove, so the function returns and the caller records the move
@@ -214,17 +264,25 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
       been removed by someone else. An inaccurate "applied" costs less than
       deleting the file we were asked to preserve.
 
-    :param src: The source path that was linked.
-    :param dst: The destination path where the link was created.
+    :param src: The source path that was published.
+    :param dst: The destination path where it was published.
     :param moved_stat: The stat of the inode being moved, taken from ``src``
-        BEFORE the link. It must not come from ``dst`` after the link: that
-        records whatever ``dst`` names at that moment, which is our own link
-        only if nobody intervened — the very thing this check must not assume.
-    :raises OSError: If ``src`` or ``dst`` changed identity during the move.
+        BEFORE the publication. It must not come from ``dst`` afterwards: on
+        the link path that records whatever ``dst`` names at that moment, which
+        is our own link only if nobody intervened — the very thing this check
+        must not assume.
+    :param published: What :func:`~uv_stack.fsutil.link_or_copy_no_replace`
+        reported. ``kind`` selects the branch; on the copy path ``stat`` is the
+        identity ``dst`` was given, and is what the rollback set is built from.
+    :raises OSError: If ``src`` or ``dst`` changed identity during the move, or
+        — on the copy path — if the source's bytes changed under the copy.
         Every guarantee holds only as of the check that precedes the action it
         guards; the windows above say what each one costs past that point.
     """
     moved_ident = (moved_stat.st_dev, moved_stat.st_ino)
+    if published.kind == "copy":
+        _finish_copy_move(src, dst, moved_ident, published)
+        return
     try:
         current = src.lstat()
     except FileNotFoundError:
@@ -237,10 +295,10 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
         # name, so a dst that a third party unlinked or replaced aborts the
         # move with src intact rather than destroying the file.
         try:
-            published = dst.lstat()
+            published_now = dst.lstat()
         except FileNotFoundError:
             raise OSError(f"{dst} vanished during move; nothing deleted") from None
-        if (published.st_dev, published.st_ino) != moved_ident:
+        if (published_now.st_dev, published_now.st_ino) != moved_ident:
             raise OSError(f"{dst} changed during move; nothing deleted")
         # missing_ok: a third party can remove src between the check above and
         # this line, and dst already holds the moved inode by then. Raising
@@ -273,16 +331,76 @@ def _finish_move(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
     raise OSError(f"{src} changed during move; {outcome}")
 
 
+def _finish_copy_move(
+    src: Path, dst: Path, moved_ident: tuple[int, int], published: Published
+) -> None:
+    """The copy branch of :func:`_finish_move`; see that docstring for the rules.
+
+    Split out because its conditions differ from the link branch's in kind, not
+    only in detail, and interleaving them in one body would make each harder to
+    read than either is alone.
+
+    :param src: The source path that was copied.
+    :param dst: The destination holding the copy.
+    :param moved_ident: ``(st_dev, st_ino)`` of the inode measured before the copy.
+    :param published: The copy's own report; ``published.stat`` identifies the
+        inode the exclusive create made.
+    :raises OSError: If ``dst`` vanished or was replaced, or if ``src`` changed
+        identity or content under the copy.
+    """
+    published_ident = (published.stat.st_dev, published.stat.st_ino)
+    try:
+        current = src.lstat()
+    except FileNotFoundError:
+        # Same reasoning as the link branch: no name of ours is left to remove,
+        # and nothing here can improve on whatever became of dst.
+        return
+    if (current.st_dev, current.st_ino) == moved_ident:
+        try:
+            dst_now = dst.lstat()
+        except FileNotFoundError:
+            raise OSError(f"{dst} vanished during move; nothing deleted") from None
+        if (dst_now.st_dev, dst_now.st_ino) != published_ident:
+            raise OSError(f"{dst} changed during move; nothing deleted")
+        try:
+            identical = _same_bytes(src, dst)
+        except OSError:
+            # One of the two names became unreadable mid-comparison — a vanish,
+            # a swap, a mode change. Not provably safe to unlink src, so take
+            # the withdrawal path rather than guess.
+            identical = False
+        if identical:
+            src.unlink(missing_ok=True)
+            return
+    # src was replaced, or its bytes changed under the copy we published. Either
+    # way dst is a stale snapshot. Withdraw it only while it still names the
+    # inode the exclusive create made: that inode is provably ours, and unlike
+    # the link branch there is no second candidate — we never published src's
+    # own inode, so whatever src names now cannot be at dst by our doing.
+    withdrew = False
+    try:
+        dst_now = dst.lstat()
+        if (dst_now.st_dev, dst_now.st_ino) == published_ident:
+            dst.unlink(missing_ok=True)
+            withdrew = True
+    except FileNotFoundError:
+        pass
+    outcome = f"{dst} withdrawn" if withdrew else "nothing deleted"
+    raise OSError(f"{src} changed during move; {outcome}")
+
+
 def _move_no_replace(src: Path, dst: Path) -> None:
     """Move ``src`` to ``dst``, refusing to replace ``dst`` or a changed ``src``.
 
-    Publishes via :func:`os.link` (fails if ``dst`` exists), then removes the
-    source only while it still names the moved inode *and* ``dst`` still holds
-    our link — a source replaced mid-move is left untouched, a destination
-    taken by someone else aborts the move with the source intact, and the link
-    published at ``dst`` is withdrawn only while ``dst`` names an inode
-    :func:`os.link` could have published for us. That test cannot prove the
-    link is ours; see :func:`_finish_move` for what it lets through.
+    Publishes via :func:`~uv_stack.fsutil.link_or_copy_no_replace` (fails if
+    ``dst`` exists), then removes the source only while it still names the
+    moved inode *and* ``dst`` still holds what we published — and, where the
+    publication was a copy, only while the two still hold the same bytes. A
+    source replaced mid-move is left untouched, a destination taken by someone
+    else aborts the move with the source intact, and what was published at
+    ``dst`` is withdrawn only under :func:`_finish_move`'s identity rules. On
+    the link path that test cannot prove the link is ours; see
+    :func:`_finish_move` for what it lets through.
 
     A symlink at ``src`` is refused, but only one that is there when we look:
     :func:`os.link` follows symlinks by default, so it would publish a link to
@@ -292,21 +410,22 @@ def _move_no_replace(src: Path, dst: Path) -> None:
     moved inode and the rollback withdraws that inode's last name.
 
     :raises FileNotFoundError: If ``src`` does not exist when the move begins,
-        or is removed in the window between that check and the link.
+        or is removed in the window between that check and the publication.
     :raises FileExistsError: If ``dst`` already exists.
-    :raises OSError: If ``src`` is not a regular file, or ``src`` or ``dst``
-        changed identity during the move. ``src`` is left in place on those
-        paths, and any link published at ``dst`` is withdrawn only under
-        :func:`_finish_move`'s identity rules — which, when ``src`` was replaced
-        during the move, can withdraw the last name of the moved inode or of the
+    :raises OSError: If ``src`` is not a regular file, if ``src`` or ``dst``
+        changed identity during the move, or if ``src``'s bytes changed under a
+        copy publication. ``src`` is left in place on those paths, and anything
+        published at ``dst`` is withdrawn only under :func:`_finish_move`'s
+        rules — which, on the link path when ``src`` was replaced during the
+        move, can withdraw the last name of the moved inode or of the
         replacement ``os.link`` published in its place. See that function's
         docstring for the residual windows those rules narrow but cannot close.
     """
     moved = src.lstat()
     if not stat.S_ISREG(moved.st_mode):
         raise OSError(f"{src} is not a regular file; nothing moved")
-    os.link(src, dst)
-    _finish_move(src, dst, moved)
+    published = link_or_copy_no_replace(src, dst)
+    _finish_move(src, dst, moved, published)
 
 
 def _fix_mkdir(config: ConfigRoot, finding: Finding) -> RepairAction:

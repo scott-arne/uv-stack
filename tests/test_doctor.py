@@ -307,6 +307,7 @@ def test_finish_move_normal_case(tmp_path: Path):
     """Normal move: source identity matches linked inode → source removed."""
     import os
 
+    from uv_stack.fsutil import Published
     from uv_stack.operations.doctor import _finish_move
 
     src = tmp_path / "source.txt"
@@ -314,7 +315,7 @@ def test_finish_move_normal_case(tmp_path: Path):
     src.write_text("content\n")
     moved_stat = src.lstat()
     os.link(src, dst)
-    _finish_move(src, dst, moved_stat)
+    _finish_move(src, dst, moved_stat, Published("link", moved_stat))
     assert not src.exists()
     assert dst.read_text() == "content\n"
 
@@ -325,6 +326,7 @@ def test_finish_move_src_replaced_after_link(tmp_path: Path):
     """Source replaced after link → link withdrawn, OSError raised, replacement survives."""
     import os
 
+    from uv_stack.fsutil import Published
     from uv_stack.operations.doctor import _finish_move
 
     src = tmp_path / "source.txt"
@@ -336,7 +338,7 @@ def test_finish_move_src_replaced_after_link(tmp_path: Path):
     src.unlink()
     src.write_text("replacement\n")
     try:
-        _finish_move(src, dst, moved_stat)
+        _finish_move(src, dst, moved_stat, Published("link", moved_stat))
         raise AssertionError("Expected OSError")
     except OSError as e:
         assert "changed during move" in str(e)
@@ -351,6 +353,7 @@ def test_finish_move_src_vanished_after_link(tmp_path: Path):
     """Source vanished after link → no error, dest preserves the inode."""
     import os
 
+    from uv_stack.fsutil import Published
     from uv_stack.operations.doctor import _finish_move
 
     src = tmp_path / "source.txt"
@@ -360,7 +363,7 @@ def test_finish_move_src_vanished_after_link(tmp_path: Path):
     os.link(src, dst)
     src.unlink()
     # Should not raise.
-    _finish_move(src, dst, moved_stat)
+    _finish_move(src, dst, moved_stat, Published("link", moved_stat))
     assert not src.exists()
     assert dst.read_text() == "content\n"
 
@@ -369,6 +372,7 @@ def test_finish_move_dst_replaced_after_link(tmp_path: Path):
     """Both src and dst replaced → the stranger's dst survives, OSError raised."""
     import os
 
+    from uv_stack.fsutil import Published
     from uv_stack.operations.doctor import _finish_move
 
     src = tmp_path / "source.txt"
@@ -382,7 +386,7 @@ def test_finish_move_dst_replaced_after_link(tmp_path: Path):
     dst.unlink()
     dst.write_text("new-dst\n")
     try:
-        _finish_move(src, dst, moved_stat)
+        _finish_move(src, dst, moved_stat, Published("link", moved_stat))
         raise AssertionError("Expected OSError")
     except OSError as e:
         assert "changed during move" in str(e)
@@ -405,16 +409,19 @@ def test_move_no_replace_identity_check_in_rename(config_tree: ConfigRoot, monke
     findings = diagnose(config_tree)
 
     # Simulate race: monkeypatch _finish_move to replace source before unlinking.
+    from uv_stack.fsutil import Published
     from uv_stack.operations import doctor
 
     original_finish = doctor._finish_move
 
-    def race_finish(src: Path, dst: Path, moved_stat: os.stat_result) -> None:
+    def race_finish(
+        src: Path, dst: Path, moved_stat: os.stat_result, published: Published
+    ) -> None:
         # Replace source with new inode before calling original.
         if src == profiles_txt:
             src.unlink()
             src.write_text("@replaced\n")
-        original_finish(src, dst, moved_stat)
+        original_finish(src, dst, moved_stat, published)
 
     monkeypatch.setattr(doctor, "_finish_move", race_finish)
 
@@ -428,6 +435,171 @@ def test_move_no_replace_identity_check_in_rename(config_tree: ConfigRoot, monke
     assert profiles_txt.read_text() == "@replaced\n"
     # Link withdrawn.
     assert not stack_txt.exists()
+
+
+def _link_less(monkeypatch) -> None:
+    """Make os.link raise EOPNOTSUPP, as FAT/exFAT and some network mounts do."""
+    import errno
+    import os
+
+    def _no_link(src, dst, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "hard links not supported")
+
+    monkeypatch.setattr(os, "link", _no_link)
+
+
+def test_move_no_replace_completes_on_a_link_less_filesystem(tmp_path: Path, monkeypatch):
+    """The whole point of C10: a repair that is impossible today now completes."""
+    from uv_stack.operations.doctor import _move_no_replace
+
+    _link_less(monkeypatch)
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("content\n")
+    _move_no_replace(src, dst)
+    assert not src.exists()
+    assert dst.read_text() == "content\n"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "label"),
+    [(b"mutated-and-much-longer\n", "different-length"), (b"MUTATED!\n", "same-length")],
+)
+def test_move_no_replace_copy_path_refuses_an_in_place_rewrite(
+    tmp_path: Path, monkeypatch, mutation: bytes, label: str
+):
+    """A write through the source's own inode after the copy must not be lost.
+
+    On the copy path ``dst`` is a snapshot, so an in-place write leaves
+    st_dev/st_ino untouched while the bytes diverge. Unlinking the source on
+    identity alone would destroy the post-write content. The same-length case
+    is here so the size short-circuit cannot be what carries the test.
+    """
+    from uv_stack.operations import doctor
+
+    _link_less(monkeypatch)
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("original\n")
+    src_ident = (src.stat().st_dev, src.stat().st_ino)
+    real_publish = doctor.link_or_copy_no_replace
+
+    def publish_then_mutate(a, b):
+        result = real_publish(a, b)
+        with open(src, "r+b") as handle:
+            handle.write(mutation)
+            handle.truncate()
+        return result
+
+    monkeypatch.setattr(doctor, "link_or_copy_no_replace", publish_then_mutate)
+    with pytest.raises(OSError) as excinfo:
+        doctor._move_no_replace(src, dst)
+    assert "changed during move" in str(excinfo.value)
+    # The source survives, still the same inode, holding the post-copy bytes.
+    assert src.read_bytes() == mutation
+    assert (src.stat().st_dev, src.stat().st_ino) == src_ident
+    # The stale snapshot is withdrawn.
+    assert not dst.exists()
+
+
+def test_move_no_replace_link_path_survives_an_in_place_rewrite(tmp_path: Path, monkeypatch):
+    """The paired link case still succeeds: both names reach the mutated inode.
+
+    The content check belongs to the copy branch only. Applying it to the link
+    branch would turn a move that loses nothing into a spurious failure.
+    """
+    from uv_stack.operations import doctor
+
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("original\n")
+    real_publish = doctor.link_or_copy_no_replace
+
+    def publish_then_mutate(a, b):
+        result = real_publish(a, b)
+        with open(src, "r+b") as handle:
+            handle.write(b"MUTATED!\n")
+            handle.truncate()
+        return result
+
+    monkeypatch.setattr(doctor, "link_or_copy_no_replace", publish_then_mutate)
+    doctor._move_no_replace(src, dst)
+    assert not src.exists()
+    assert dst.read_bytes() == b"MUTATED!\n"
+
+
+def test_move_no_replace_copy_path_withdraws_when_the_source_is_replaced(
+    tmp_path: Path, monkeypatch
+):
+    """A replaced source takes the withdrawal path, leaving the replacement intact."""
+    from uv_stack.operations import doctor
+
+    _link_less(monkeypatch)
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("original\n")
+    real_publish = doctor.link_or_copy_no_replace
+
+    def publish_then_replace(a, b):
+        result = real_publish(a, b)
+        src.unlink()
+        src.write_text("replacement\n")
+        return result
+
+    monkeypatch.setattr(doctor, "link_or_copy_no_replace", publish_then_replace)
+    with pytest.raises(OSError) as excinfo:
+        doctor._move_no_replace(src, dst)
+    assert "changed during move" in str(excinfo.value)
+    assert src.read_text() == "replacement\n"
+    assert not dst.exists()
+
+
+def test_move_no_replace_copy_path_leaves_a_foreign_destination_alone(
+    tmp_path: Path, monkeypatch
+):
+    """The rollback set is exactly the inode the exclusive create made.
+
+    A destination replaced by a third party after publication is not ours to
+    delete, however the move ends.
+    """
+    from uv_stack.operations import doctor
+
+    _link_less(monkeypatch)
+    src = tmp_path / "source.txt"
+    dst = tmp_path / "dest.txt"
+    src.write_text("original\n")
+    real_publish = doctor.link_or_copy_no_replace
+
+    def publish_then_hijack(a, b):
+        result = real_publish(a, b)
+        src.unlink()
+        src.write_text("replacement\n")
+        dst.unlink()
+        dst.write_text("stranger\n")
+        return result
+
+    monkeypatch.setattr(doctor, "link_or_copy_no_replace", publish_then_hijack)
+    with pytest.raises(OSError) as excinfo:
+        doctor._move_no_replace(src, dst)
+    assert "nothing deleted" in str(excinfo.value)
+    assert dst.read_text() == "stranger\n"
+
+
+def test_same_bytes_compares_content_not_timestamps(tmp_path: Path):
+    """Sizes first, then bytes — never mtime, which FAT resolves to two seconds."""
+    from uv_stack.operations.doctor import _same_bytes
+
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    c = tmp_path / "c.txt"
+    d = tmp_path / "d.txt"
+    a.write_bytes(b"same\n")
+    b.write_bytes(b"same\n")
+    c.write_bytes(b"diff\n")
+    d.write_bytes(b"longer content\n")
+    assert _same_bytes(a, b)
+    assert not _same_bytes(a, c)
+    assert not _same_bytes(a, d)
 
 
 def test_repair_conversion_source_replaced_between_read_and_move(
