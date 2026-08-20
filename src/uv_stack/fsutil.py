@@ -698,3 +698,68 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
             return
         finally:
             os.close(fd)
+
+
+def probe_locking(path: Path) -> bool:
+    """Report whether this filesystem can serve an advisory lock at ``path``.
+
+    Answers the question :func:`name_lock` answers silently, and answers it
+    total: **this function never raises.** Contention counts as success,
+    because another holder proves the mechanism works. Everything else that
+    stops a lock being taken — an absent :mod:`fcntl`, a lock file that cannot
+    be obtained, any shape :func:`name_lock` refuses, a ``flock`` declined for
+    a reason other than contention — is reported as ``False``. A diagnostic
+    that aborts the diagnosis it is part of would be worse than the silence it
+    replaces.
+
+    :param path: The probe lock file. Created if absent, and left in place —
+        ``flock`` binds to an open file description, so unlinking the name
+        would not release anything and would race every other user of the
+        directory.
+    :returns: ``True`` when a lock could be taken or was held by someone else,
+        ``False`` for every other outcome.
+    """
+    if not _LOCK_AVAILABLE:
+        return False
+
+    import fcntl
+
+    fd = -1
+    try:
+        fd = _open_lock_file(path)
+        if fd == -1:
+            return False
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            # name_lock raises here, because a planted FIFO costs it its
+            # exclusion. The probe reports instead: "locking is degraded" is
+            # the honest answer either way, and a diagnostic must not abort.
+            return False
+        # The same courtesy name_lock pays the next user, for the same reason:
+        # probe.lock is persistent, so a first run under a 077 umask would
+        # otherwise leave a file no other user of a shared root can open —
+        # making the probe the cause of the degrade it reports.
+        with suppress(OSError):
+            os.fchmod(fd, 0o666)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            return exc.errno in _LOCK_CONTENDED_ERRNOS
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True
+    except (ConfigError, OSError):
+        # Load-bearing, not defensive. _open_lock_file raises ConfigError for a
+        # non-directory at .locks or any ancestor, for a non-regular file at the
+        # lock path, and for a regular lock file neither open could touch; and a
+        # bare OSError for the shapes the kernel declines itself. Every one is a
+        # root on which name_lock cannot serialize anything, which is precisely
+        # what the caller asked about.
+        return False
+    finally:
+        if fd != -1:
+            # Suppressed, not ignored: close can fail (EIO on a flaky network
+            # mount is the realistic one), and an exception from a finally
+            # replaces whatever the body returned — which would break the
+            # never-raises contract on precisely the degraded roots this
+            # function exists to report.
+            with suppress(OSError):
+                os.close(fd)

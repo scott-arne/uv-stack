@@ -189,3 +189,10 @@ def test_load_env_hint_prefixes_leading_dash_name(tmp_path: Path):
     with pytest.raises(ConfigError) as excinfo:
         root.load_env("--recreate")
     assert "stack create env -- --recreate TOKENS..." in excinfo.value.hint
+
+
+def test_probe_lock_path_cannot_collide_with_a_user_name(config_tree):
+    """The stem and env locks are prefixed, so a fixed bare name is safe."""
+    assert config_tree.probe_lock_path() == config_tree.locks_dir / "probe.lock"
+    assert config_tree.probe_lock_path() != config_tree.stem_lock_path("probe")
+    assert config_tree.probe_lock_path() != config_tree.env_lock_path("probe")

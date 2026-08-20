@@ -128,6 +128,15 @@ class ConfigRoot:
         """
         return self.locks_dir / f"env-{name}.lock"
 
+    def probe_lock_path(self) -> Path:
+        """Lock used only to test whether this root supports locking.
+
+        A fixed name in a namespace of its own: the stem and env locks are
+        ``stem-<name>.lock`` and ``env-<name>.lock``, so no user-chosen name
+        can collide with it.
+        """
+        return self.locks_dir / "probe.lock"
+
     # -- existence -------------------------------------------------------
     def profile_exists(self, name: str) -> bool:
         return self.profile_path(name).is_file()

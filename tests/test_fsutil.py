@@ -1633,3 +1633,119 @@ def test_link_or_copy_no_replace_closes_source_fd_when_destination_create_fails(
     with pytest.raises(OSError) as excinfo:
         os.fstat(source_fd)
     assert excinfo.value.errno == errno.EBADF
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_probe_locking_succeeds_on_a_local_root(tmp_path):
+    from uv_stack.fsutil import probe_locking
+
+    assert probe_locking(tmp_path / ".locks" / "probe.lock") is True
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_probe_locking_leaves_the_lock_file_in_place(tmp_path):
+    """flock binds to the open file description, so unlinking would release nothing."""
+    from uv_stack.fsutil import probe_locking
+
+    lock_path = tmp_path / ".locks" / "probe.lock"
+    probe_locking(lock_path)
+    assert lock_path.is_file()
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_probe_locking_reports_contention_as_success(tmp_path):
+    """Another holder proves the mechanism works; it is not a degraded filesystem."""
+    from uv_stack.fsutil import probe_locking
+
+    lock_path = tmp_path / ".locks" / "probe.lock"
+    with _lock_held_by_another_process(lock_path):
+        assert probe_locking(lock_path) is True
+
+
+def test_probe_locking_declines_without_fcntl(tmp_path, monkeypatch):
+    from uv_stack import fsutil
+
+    monkeypatch.setattr(fsutil, "_LOCK_AVAILABLE", False)
+    assert fsutil.probe_locking(tmp_path / ".locks" / "probe.lock") is False
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_probe_locking_declines_when_locks_is_a_plain_file(tmp_path):
+    """The ConfigError arm: a file where the directory has to be."""
+    from uv_stack.fsutil import probe_locking
+
+    locks = tmp_path / ".locks"
+    locks.write_text("not a directory\n")
+    assert probe_locking(locks / "probe.lock") is False
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_probe_locking_declines_on_an_unsearchable_locks_directory(tmp_path):
+    """No execute bit means the open cannot traverse in, so no lock is obtainable."""
+    import os as _os
+
+    from uv_stack.fsutil import probe_locking
+
+    locks = tmp_path / ".locks"
+    locks.mkdir()
+    _os.chmod(locks, 0o600)
+    try:
+        assert probe_locking(locks / "probe.lock") is False
+    finally:
+        # Restore, or tmp_path teardown cannot remove the directory.
+        _os.chmod(locks, 0o700)
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_probe_locking_declines_on_a_non_regular_lock_file(tmp_path):
+    """name_lock raises here; the probe reports, because the answer is the same."""
+    import os as _os
+
+    from uv_stack.fsutil import probe_locking
+
+    locks = tmp_path / ".locks"
+    locks.mkdir()
+    lock_path = locks / "probe.lock"
+    _os.mkfifo(lock_path)
+    assert probe_locking(lock_path) is False
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
+def test_probe_locking_widens_the_probe_lock_mode(tmp_path, monkeypatch):
+    """probe.lock is persistent, so a 077 umask must not make it the cause of a degrade."""
+    import os as _os
+    import stat as _stat
+
+    from uv_stack.fsutil import probe_locking
+
+    old = _os.umask(0o077)
+    try:
+        lock_path = tmp_path / ".locks" / "probe.lock"
+        assert probe_locking(lock_path) is True
+    finally:
+        _os.umask(old)
+    assert _stat.S_IMODE(lock_path.stat().st_mode) == 0o666
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_probe_locking_survives_a_failing_close(tmp_path, monkeypatch):
+    """The finally block is the last way out of a function that promises none.
+
+    An exception raised in a ``finally`` replaces the value the body returned,
+    so an unsuppressed ``os.close`` would break the never-raises contract after
+    the answer was already known. EIO from close on a flaky network mount is the
+    realistic shape; the descriptor is closed for real first so the test leaks
+    nothing.
+    """
+    from uv_stack import fsutil
+
+    real_close = os.close
+
+    def exploding_close(fd):
+        real_close(fd)
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(fsutil.os, "close", exploding_close)
+    assert fsutil.probe_locking(tmp_path / ".locks" / "probe.lock") is True
