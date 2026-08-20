@@ -1,10 +1,11 @@
 """uv-stack command-line interface (rich-click).
 
 Defines the root group, the shared ``--root`` option (stored on the Click
-context), version output, and the error wrapper that renders
-:class:`UvStackError` and any bare :class:`OSError` as a panel and exits
-non-zero — except a broken pipe met while emitting help or running a command,
-which exits quietly with the shell's conventional signal status.
+context), version output, the error wrapper in ``UvStackGroup.invoke`` that
+renders :class:`UvStackError` and any bare :class:`OSError` as a panel and
+exits non-zero, and the shutdown guard in ``main()`` that flushes buffered
+output. Both handle a broken pipe met while emitting help or running a command
+by exiting quietly with the shell's conventional signal status.
 """
 
 from __future__ import annotations
@@ -46,6 +47,21 @@ def _redirect_streams_to_devnull() -> None:
     for stream in (sys.stdout, sys.stderr):
         with suppress(OSError, ValueError):
             os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
+
+
+def _sigpipe_status() -> int:
+    """Return the exit status for a broken-pipe condition.
+
+    POSIX shells report a process killed by a signal as ``128 + signal_number``.
+    ``signal.SIGPIPE`` is POSIX-only, so it is read with ``getattr`` —
+    dereferencing it unconditionally would replace a clean exit with an
+    ``AttributeError`` on the one platform the fallback exists for (embedders
+    and ``pythonw`` with no stdout).
+
+    :returns: ``128 + SIGPIPE`` where available, else ``1``.
+    """
+    sigpipe = getattr(signal, "SIGPIPE", None)
+    return 1 if sigpipe is None else 128 + int(sigpipe)
 
 
 class _AlignedCommandPanel(RichCommandPanel):
@@ -100,12 +116,8 @@ class UvStackGroup(click.RichGroup):
             # is ordinary shell usage and not an error. Redirect both streams to
             # devnull so the interpreter's shutdown flush has somewhere to go,
             # then exit with the shell's conventional status for the signal.
-            # signal.SIGPIPE is POSIX-only, so it is read with getattr —
-            # dereferencing it unconditionally would replace a clean exit with an
-            # AttributeError on the one platform the fallback exists for.
             _redirect_streams_to_devnull()
-            sigpipe = getattr(signal, "SIGPIPE", None)
-            sys.exit(1 if sigpipe is None else 128 + int(sigpipe))
+            sys.exit(_sigpipe_status())
         except OSError as error:
             render_os_error(error)
             sys.exit(1)
@@ -172,18 +184,28 @@ def main() -> None:
         # Flush now: a broken pipe raises here, where the guard below can catch
         # it, instead of at shutdown, where it cannot.
         try:
-            sys.stdout.flush()
-            sys.stderr.flush()
+            for stream in (sys.stdout, sys.stderr):
+                if stream is not None:
+                    stream.flush()
         except BrokenPipeError:
             # The invoke arm already redirected streams to devnull on the path
             # that caught BrokenPipeError, so the flush succeeds there and this
-            # arm is a no-op. Only help/version output that never entered invoke
-            # triggers this — redirect and exit with the same signal status the
-            # invoke arm uses. Raising SystemExit here deliberately replaces the
-            # in-flight SystemExit(0) from cli(); that is the intended behavior
-            # on the broken-pipe path only. Never `return` here: a bare return
-            # from finally silently swallows the in-flight SystemExit, turning
-            # every sys.exit(1) error path into status 0.
+            # arm is a no-op. Help output and some error paths that left buffered
+            # stdout reach this: --help, --version that fails to render (version
+            # string lookup error), and any command that exited through the error
+            # arms before ever writing. Redirect and exit with the same signal
+            # status the invoke arm uses. Raising SystemExit here deliberately
+            # replaces the in-flight SystemExit from cli(); that is the intended
+            # behavior on the broken-pipe path only. Never `return` here: a bare
+            # return from finally silently swallows the in-flight SystemExit,
+            # turning every sys.exit(1) error path into status 0.
             _redirect_streams_to_devnull()
-            sigpipe = getattr(signal, "SIGPIPE", None)
-            raise SystemExit(1 if sigpipe is None else 128 + int(sigpipe)) from None
+            raise SystemExit(_sigpipe_status()) from None
+        except (OSError, ValueError):
+            # A flush failure that is not a pipe break — likely EBADF (bad file
+            # descriptor), ENOSPC (no space), or a ValueError on a closed stream.
+            # Swallow it silently: the interpreter's own shutdown flush still
+            # reports the same failure and still sets status 120, which is the
+            # pre-guard behavior this arm restores exactly. Letting it escape the
+            # finally would replace the in-flight status with a traceback.
+            pass
