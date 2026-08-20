@@ -4,8 +4,10 @@ Defines the root group, the shared ``--root`` option (stored on the Click
 context), version output, the error wrapper in ``UvStackGroup.invoke`` that
 renders :class:`UvStackError` and any bare :class:`OSError` as a panel and
 exits non-zero, and the shutdown guard in ``main()`` that flushes buffered
-output. Both handle a broken pipe met while emitting help or running a command
-by exiting quietly with the shell's conventional signal status.
+output. A broken pipe met while running a command is caught by the wrapper; one
+met while emitting help, or on any output still buffered at exit, is caught by
+the guard. Either way the process exits quietly with the shell's conventional
+signal status.
 """
 
 from __future__ import annotations
@@ -45,8 +47,12 @@ def _redirect_streams_to_devnull() -> None:
     real pipe to protect either.
     """
     for stream in (sys.stdout, sys.stderr):
-        with suppress(OSError, ValueError):
-            os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
+        # CPython sets the attribute to None outright when the descriptor was
+        # already closed at startup, which is not a stream with nothing to
+        # redirect but no stream at all.
+        if stream is not None:
+            with suppress(OSError, ValueError):
+                os.dup2(os.open(os.devnull, os.O_WRONLY), stream.fileno())
 
 
 def _sigpipe_status() -> int:
@@ -55,8 +61,8 @@ def _sigpipe_status() -> int:
     POSIX shells report a process killed by a signal as ``128 + signal_number``.
     ``signal.SIGPIPE`` is POSIX-only, so it is read with ``getattr`` —
     dereferencing it unconditionally would replace a clean exit with an
-    ``AttributeError`` on the one platform the fallback exists for (embedders
-    and ``pythonw`` with no stdout).
+    ``AttributeError`` on the platforms the fallback exists for — non-POSIX
+    ones, Windows above all.
 
     :returns: ``128 + SIGPIPE`` where available, else ``1``.
     """
@@ -190,13 +196,15 @@ def main() -> None:
         except BrokenPipeError:
             # What reaches this arm is anything that left bytes in stdout's
             # buffer and never flushed them — help output above all. Output
-            # written through click.echo does not: echo flushes, so the break
-            # surfaces inside Click, whose own EPIPE handling swaps in a
-            # pacifying wrapper and exits 1 (this is why --version never gets
-            # here). Neither does a path the invoke arm already caught: it
-            # redirected both streams to devnull, so the flush above succeeds
-            # and this arm is a no-op. Redirect and exit with the same signal
-            # status the invoke arm uses. Raising SystemExit here deliberately
+            # written through click.echo does not, because echo flushes, so the
+            # break surfaces at the write instead: inside a command the invoke
+            # arm above catches it and exits 141, and from Click's own eager
+            # callbacks — --version — Click's EPIPE handling swaps in a
+            # pacifying wrapper and exits 1. Neither reaches here: the invoke
+            # arm redirected both streams to devnull and Click's wrapper
+            # swallows the flush, so this arm is a no-op on both. Redirect and
+            # exit with the same signal status the invoke arm uses. Raising
+            # SystemExit here deliberately
             # replaces the in-flight SystemExit from cli(); that is the intended
             # behavior on the broken-pipe path only. Never `return` here: a bare
             # return from finally silently swallows the in-flight SystemExit,
@@ -204,10 +212,13 @@ def main() -> None:
             _redirect_streams_to_devnull()
             raise SystemExit(_sigpipe_status()) from None
         except (OSError, ValueError):
-            # A flush failure that is not a pipe break — likely EBADF (bad file
+            # A flush failure that is not a pipe break — EBADF (bad file
             # descriptor), ENOSPC (no space), or a ValueError on a closed stream.
-            # Swallow it silently: the interpreter's own shutdown flush still
-            # reports the same failure and still sets status 120, which is the
-            # pre-guard behavior this arm restores exactly. Letting it escape the
-            # finally would replace the in-flight status with a traceback.
+            # Swallow it silently, which restores the pre-guard behavior exactly
+            # in both shapes: for the OSErrors the interpreter's own shutdown
+            # flush meets the same failure, reports it, and sets status 120, and
+            # for a closed stream CPython skips it at shutdown, so it was silent
+            # before this guard existed and stays silent now. Letting either
+            # escape the finally would replace the in-flight status with a
+            # traceback.
             pass
