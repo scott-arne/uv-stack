@@ -784,6 +784,100 @@ def test_broken_pipe_from_stderr_survives_stdout_closed_at_startup(tmp_path: Pat
 @pytest.mark.skipif(
     not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
 )
+def test_broken_pipe_while_rendering_the_error_panel_exits_with_signal_status(tmp_path: Path):
+    """A break met while rendering the UvStackError panel exits 141, not 1.
+
+    render_error writes through error_console, whose on_broken_pipe re-raises so
+    the edge can apply the signal status — but it runs *inside* the
+    `except UvStackError` arm, and Python does not dispatch an exception raised
+    in an except block to a sibling arm of the same try. Without the arm's own
+    inner catch the break escapes invoke() and rich-click's EPIPE arm exits 1.
+
+    The status is the whole assertion because stderr is the dead pipe here:
+    a traceback or an "Exception ignored" flush failure has nowhere to be
+    printed. Both are still visible in it — an escaped exception exits 1, a
+    failed shutdown flush exits 120 — and a command that stopped raising at all
+    would exit 0.
+    """
+    import subprocess
+    import sys
+
+    root = _seeded_root(tmp_path)
+    # Dead before the child starts, as in the sibling tests: a pipe with no
+    # reader fails every write immediately, which makes this deterministic.
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from uv_stack.cli import main; main()",
+                "--root",
+                str(root),
+                "show",
+                "env",
+                "ghost",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=write_fd,
+        )
+    finally:
+        os.close(write_fd)
+
+    assert proc.returncode == 128 + int(signal.SIGPIPE)
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
+)
+def test_broken_pipe_while_rendering_the_os_error_panel_exits_with_signal_status(tmp_path: Path):
+    """The bare-OSError arm nests its renderer for the same reason.
+
+    render_os_error runs inside `except OSError`, so a break met while printing
+    that panel escapes the same way the UvStackError one does. The raised errno
+    is EACCES, which Python maps to PermissionError — an OSError that is not a
+    BrokenPipeError, so it reaches the arm under test rather than the pipe arm
+    above it.
+    """
+    import subprocess
+    import sys
+
+    root = _seeded_root(tmp_path)
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        # A throwaway command on the real group, as in the render_warnings test
+        # above, so the whole chain runs: renderer -> error_console ->
+        # _ConsoleWithBrokenPipePropagation -> arm.
+        driver = (
+            "from uv_stack.cli import cli, main\n"
+            "@cli.command('explode')\n"
+            "def _explode():\n"
+            "    raise OSError(13, 'Permission denied', '/nope')\n"
+            "main()\n"
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                driver,
+                "--root",
+                str(root),
+                "explode",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=write_fd,
+        )
+    finally:
+        os.close(write_fd)
+
+    assert proc.returncode == 128 + int(signal.SIGPIPE)
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGPIPE"), reason="the shell status this pins is POSIX-only"
+)
 def test_help_into_a_closed_pipe_exits_without_exception_ignored():
     """Help output into a closed pipe exits cleanly, not with status 120.
 

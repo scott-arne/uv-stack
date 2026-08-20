@@ -4,12 +4,12 @@ Defines the root group, the shared ``--root`` option (stored on the Click
 context), version output, the error wrapper in ``UvStackGroup.invoke`` that
 renders :class:`UvStackError` and any bare :class:`OSError` as a panel and
 exits non-zero, and the shutdown guard in ``main()`` that flushes buffered
-output. A broken pipe met while running a command is caught by the wrapper; one
-met on output still buffered at exit — help text above all — is caught by the
-guard. Both exit quietly with the shell's conventional signal status. A break
-met at write time inside an eager callback — Click's ``--version``,
-rich-click's ``--help`` — is caught by neither: rich-click's EPIPE arm takes
-both and exits 1.
+output. A broken pipe met while running a command, or while the wrapper
+renders one of those panels, is caught by the wrapper; one met on output still
+buffered at exit — help text above all — is caught by the guard. Both exit
+quietly with the shell's conventional signal status. A break met at write time
+inside an eager callback — Click's ``--version``, rich-click's ``--help`` — is
+caught by neither: rich-click's EPIPE arm takes both and exits 1.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import os
 import signal
 import sys
 from contextlib import suppress
+from typing import NoReturn
 
 import rich_click as click
 from rich_click.rich_help_formatter import RichHelpFormatter
@@ -74,6 +75,24 @@ def _sigpipe_status() -> int:
     return 1 if sigpipe is None else 128 + int(sigpipe)
 
 
+def _exit_broken_pipe() -> NoReturn:
+    """Exit quietly with the shell's conventional status for a broken pipe.
+
+    A downstream reader closed the pipe (``stack list | head``), which is
+    ordinary shell usage and not an error. Both streams are redirected to
+    devnull so the interpreter's shutdown flush has somewhere to go, then the
+    process exits with the shell's conventional status for the signal.
+
+    The status is read *before* the redirect: afterwards stderr points at
+    devnull, so a failure inside :func:`_sigpipe_status` would exit 1 with its
+    traceback discarded, indistinguishable from the intended no-SIGPIPE
+    fallback. That ordering lives here so no call site can get it wrong.
+    """
+    status = _sigpipe_status()
+    _redirect_streams_to_devnull()
+    sys.exit(status)
+
+
 class _AlignedCommandPanel(RichCommandPanel):
     """Command-group panel with a fixed-width name column.
 
@@ -119,21 +138,25 @@ class UvStackGroup(click.RichGroup):
         try:
             super().invoke(ctx)
         except UvStackError as error:
-            render_error(error)
+            # The panel goes to error_console, whose on_broken_pipe re-raises so
+            # the edge can apply the signal status. Python does not dispatch an
+            # exception raised inside an except block to a sibling arm of the
+            # same try, so the arm below would never see it: without this inner
+            # catch the break escapes invoke() and rich-click's own EPIPE arm
+            # takes it and exits 1.
+            try:
+                render_error(error)
+            except BrokenPipeError:
+                _exit_broken_pipe()
             sys.exit(1)
         except BrokenPipeError:
-            # A downstream reader closed the pipe (`stack list | head`), which
-            # is ordinary shell usage and not an error. Redirect both streams to
-            # devnull so the interpreter's shutdown flush has somewhere to go,
-            # then exit with the shell's conventional status for the signal.
-            # Read the status first: after the redirect stderr points at
-            # devnull, so a failure inside _sigpipe_status would exit 1 with its
-            # traceback discarded, indistinguishable from the intended fallback.
-            status = _sigpipe_status()
-            _redirect_streams_to_devnull()
-            sys.exit(status)
+            _exit_broken_pipe()
         except OSError as error:
-            render_os_error(error)
+            # Same nesting as the UvStackError arm above, for the same reason.
+            try:
+                render_os_error(error)
+            except BrokenPipeError:
+                _exit_broken_pipe()
             sys.exit(1)
 
 
