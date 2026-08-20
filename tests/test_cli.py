@@ -282,6 +282,50 @@ def test_create_project_help(monkeypatch):
     assert "[tool.uv-stack]" in result.output
 
 
+@pytest.mark.parametrize(
+    ("name", "tokens"),
+    [("daily", ["pkg:numpy", "daily"]), ("app", ["app"])],
+)
+def test_create_bundle_refuses_self_reference(tmp_path: Path, name: str, tokens: list[str]):
+    """The bug this fix exists for: `stack create bundle app app` wrote a dead bundle."""
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "create", "bundle", name, *tokens])
+    assert result.exit_code == 1
+    assert "cannot include itself" in _flat_panel(result)
+    assert not (root / "bundles" / f"{name}.yaml").exists()
+
+
+def test_enumerated_kind_help_qualifies_shared_environment():
+    """'environment' must be qualified wherever 'project' shares the sentence.
+
+    Adjudicated during the 0.4.0 terminology work: the vocabulary rule governs
+    these enumerations, so a bare 'environment' beside 'project' is a defect.
+    Asserted against the module docstrings and the command's help attribute
+    rather than rendered output, which rich wraps at the console width.
+    """
+    from uv_stack.cli import create as create_mod
+    from uv_stack.cli import show as show_mod
+
+    assert "shared environment" in (create_mod.__doc__ or "")
+    assert "shared environment" in (show_mod.__doc__ or "")
+    assert "shared environment" in (cli.commands["create"].help or "")
+
+
+def test_create_bundle_surfaces_cycle_warnings_from_existing_bundles(tmp_path: Path):
+    """A cycle inside an already-existing referenced bundle must reach the user."""
+    from uv_stack.config import ConfigRoot
+
+    root = _seeded_root(tmp_path)
+    cfg = ConfigRoot(root)
+    cfg.bundle_path("loop").write_text("includes:\n  - '@loop'\n  - pkg:rich\n")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "create", "bundle", "app", "@loop"]
+    )
+    assert result.exit_code == 0
+    assert "Bundle cycle skipped: loop -> loop" in result.output
+
+
 # ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------
@@ -1926,19 +1970,6 @@ def test_create_bundle_warns_on_bare_token_in_other_bundle(tmp_path: Path):
     assert "this bundle" in combined
 
 
-def test_create_bundle_does_not_warn_about_itself(tmp_path: Path):
-    root = _seeded_root(tmp_path)
-    runner = CliRunner()
-    # Create bundle 'daily' that includes its own name as a bare token.
-    # Self-references are now refused at create time (0.4.3+).
-    result = runner.invoke(
-        cli, ["--root", str(root), "create", "bundle", "daily", "pkg:numpy", "daily"]
-    )
-    assert result.exit_code == 1
-    assert "cannot include itself" in _flat_panel(result)
-    assert not (root / "bundles" / "daily.yaml").exists()
-
-
 def test_create_profile_no_warning_without_bare_usage(tmp_path: Path):
     root = _seeded_root(tmp_path)
     runner = CliRunner()
@@ -2333,6 +2364,66 @@ def test_list_profile_no_match_preserves_bracketed_tag(tmp_path: Path, monkeypat
     assert "No profiles match tags: [nope]." in result.output.replace("\n", "")
 
 
+def test_refresh_spawn_failure_past_pending_write_prints_adoption_warning(
+    tmp_path: Path, monkeypatch
+):
+    """An adopting refresh that fails after the pending write must still print the warning.
+
+    Regression for a spawn failure that escaped UvStackError handlers at the CLI
+    edge, discarding every advisory computed before the crash — including the
+    adoption warning the user is promised will appear before any remove.
+
+    The adoption warning contains `[tool.uv-stack].applied`. Rich would parse
+    those brackets as a style tag and render the phrase as nothing, but
+    `render_warnings` assembles a `rich.text.Text`, which does not parse markup.
+    The assertion on that phrase below pins the mitigation on this path.
+    """
+    root = _seeded_root(tmp_path)
+    # Build the project fixture inline: chemprop present in dependencies and in
+    # pending, absent from applied and from the stack, so _adopt_orphans adopts it.
+    project_dir = tmp_path / "proj_spawn_fail"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pandas", "rdkit", "rich", "chemprop"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["standard"]\n'
+        'applied = ["numpy", "pandas", "rdkit", "rich"]\n'
+        'pending = ["numpy", "pandas", "rdkit", "rich", "chemprop"]\n'
+    )
+    monkeypatch.chdir(project_dir)
+    # --python 3.12 so resolve_project_python short-circuits on the passthrough
+    # version and never spawns micromamba.
+    # PATH=/nowhere so the uv spawn genuinely fails (not a fake runner).
+    nowhere = tmp_path / "nowhere"
+    monkeypatch.setenv("PATH", str(nowhere))
+    monkeypatch.setenv("COLUMNS", "1000")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "refresh", "--python", "3.12"]
+    )
+    assert result.exit_code == 1
+    flat = _flat_panel(result)
+    # The adoption warning reached stderr.
+    assert "was applied by an interrupted run" in flat
+    assert "chemprop" in flat
+    # Rendered through Text.assemble, so the brackets survive verbatim; a markup
+    # string would swallow the phrase and leave the sentence nonsensical.
+    assert "[tool.uv-stack].applied" in flat
+    # The panel names the binary that could not be started, proving a rendered
+    # ToolError rather than a traceback. ('uv' alone would match the panel's
+    # own 'uv-stack error' title.)
+    assert "Could not run uv" in flat
+    assert "Is uv installed and on PATH?" in flat
+    # Pin the boundary this test is named for. The pending write landed —
+    # 'chemprop' is durably in applied, so no later run re-derives the adoption
+    # warning — while pending is still set, so the final ledger write did not.
+    # This is exactly the window in which losing the advisory is unrecoverable.
+    import tomllib
+    ledger = tomllib.loads((project_dir / "pyproject.toml").read_text())["tool"]["uv-stack"]
+    assert "chemprop" in ledger["applied"]
+    assert ledger.get("pending") is not None
+
+
 # ---------------------------------------------------------------------------
 # show project
 # ---------------------------------------------------------------------------
@@ -2533,104 +2624,3 @@ def test_show_project_never_resolves_tokens(tmp_path: Path, monkeypatch, broken:
     as_json = runner.invoke(cli, ["--root", str(root), "show", "project", "--json"])
     assert as_json.exit_code == 0, _combined_output(as_json)
     assert json.loads(as_json.output)["stack"] == [token]
-
-
-def test_enumerated_kind_help_qualifies_shared_environment():
-    """'environment' must be qualified wherever 'project' shares the sentence.
-
-    Adjudicated during the 0.4.0 terminology work: the vocabulary rule governs
-    these enumerations, so a bare 'environment' beside 'project' is a defect.
-    Asserted against the module docstrings and the command's help attribute
-    rather than rendered output, which rich wraps at the console width.
-    """
-    from uv_stack.cli import create as create_mod
-    from uv_stack.cli import show as show_mod
-
-    assert "shared environment" in (create_mod.__doc__ or "")
-    assert "shared environment" in (show_mod.__doc__ or "")
-    assert "shared environment" in (cli.commands["create"].help or "")
-
-
-def test_create_bundle_refuses_bare_self_reference(tmp_path: Path):
-    """The bug this fix exists for: `stack create bundle app app` wrote a dead bundle."""
-    root = _seeded_root(tmp_path)
-    result = CliRunner().invoke(
-        cli, ["--root", str(root), "create", "bundle", "app", "app"]
-    )
-    assert result.exit_code == 1
-    assert "cannot include itself" in _flat_panel(result)
-    assert not (root / "bundles" / "app.yaml").exists()
-
-
-def test_create_bundle_surfaces_cycle_warnings_from_existing_bundles(tmp_path: Path):
-    """A cycle inside an already-existing referenced bundle must reach the user."""
-    from uv_stack.config import ConfigRoot
-
-    root = _seeded_root(tmp_path)
-    cfg = ConfigRoot(root)
-    cfg.bundle_path("loop").write_text("includes:\n  - '@loop'\n  - pkg:rich\n")
-    result = CliRunner().invoke(
-        cli, ["--root", str(root), "create", "bundle", "app", "@loop"]
-    )
-    assert result.exit_code == 0
-    assert "Bundle cycle skipped: loop -> loop" in result.output
-
-
-def test_refresh_spawn_failure_past_pending_write_prints_adoption_warning(
-    tmp_path: Path, monkeypatch
-):
-    """An adopting refresh that fails after the pending write must still print the warning.
-
-    Regression for a spawn failure that escaped UvStackError handlers at the CLI
-    edge, discarding every advisory computed before the crash — including the
-    adoption warning the user is promised will appear before any remove.
-
-    The adoption warning contains `[tool.uv-stack].applied`. Rich would parse
-    those brackets as a style tag and render the phrase as nothing, but
-    `render_warnings` assembles a `rich.text.Text`, which does not parse markup.
-    The assertion on that phrase below pins the mitigation on this path.
-    """
-    root = _seeded_root(tmp_path)
-    # Build the project fixture inline: chemprop present in dependencies and in
-    # pending, absent from applied and from the stack, so _adopt_orphans adopts it.
-    project_dir = tmp_path / "proj_spawn_fail"
-    project_dir.mkdir()
-    (project_dir / "pyproject.toml").write_text(
-        '[project]\nname = "x"\nversion = "0.1.0"\n'
-        'dependencies = ["numpy", "pandas", "rdkit", "rich", "chemprop"]\n'
-        "\n[tool.uv-stack]\nversion = 1\n"
-        'stack = ["standard"]\n'
-        'applied = ["numpy", "pandas", "rdkit", "rich"]\n'
-        'pending = ["numpy", "pandas", "rdkit", "rich", "chemprop"]\n'
-    )
-    monkeypatch.chdir(project_dir)
-    # --python 3.12 so resolve_project_python short-circuits on the passthrough
-    # version and never spawns micromamba.
-    # PATH=/nowhere so the uv spawn genuinely fails (not a fake runner).
-    nowhere = tmp_path / "nowhere"
-    monkeypatch.setenv("PATH", str(nowhere))
-    monkeypatch.setenv("COLUMNS", "1000")
-    result = CliRunner().invoke(
-        cli, ["--root", str(root), "refresh", "--python", "3.12"]
-    )
-    assert result.exit_code == 1
-    flat = _flat_panel(result)
-    # The adoption warning reached stderr.
-    assert "was applied by an interrupted run" in flat
-    assert "chemprop" in flat
-    # Rendered through Text.assemble, so the brackets survive verbatim; a markup
-    # string would swallow the phrase and leave the sentence nonsensical.
-    assert "[tool.uv-stack].applied" in flat
-    # The panel names the binary that could not be started, proving a rendered
-    # ToolError rather than a traceback. ('uv' alone would match the panel's
-    # own 'uv-stack error' title.)
-    assert "Could not run uv" in flat
-    assert "Is uv installed and on PATH?" in flat
-    # Pin the boundary this test is named for. The pending write landed —
-    # 'chemprop' is durably in applied, so no later run re-derives the adoption
-    # warning — while pending is still set, so the final ledger write did not.
-    # This is exactly the window in which losing the advisory is unrecoverable.
-    import tomllib
-    ledger = tomllib.loads((project_dir / "pyproject.toml").read_text())["tool"]["uv-stack"]
-    assert "chemprop" in ledger["applied"]
-    assert ledger.get("pending") is not None
