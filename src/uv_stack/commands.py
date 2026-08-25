@@ -44,6 +44,31 @@ def _micromamba_exe() -> str:
     return shutil.which("micromamba") or "micromamba"
 
 
+def _compile_args(
+    selector: list[str],
+    requirements_in: Path,
+    output: Path,
+    *,
+    upgrade: bool,
+    upgrade_packages: Sequence[str],
+) -> Command:
+    """Build ``uv pip compile`` around an interpreter-selecting flag pair.
+
+    :param selector: The interpreter selector, e.g. ``["--python", "/py"]``.
+    :param requirements_in: The input requirements file.
+    :param output: Where the compiled lock is written.
+    :param upgrade: Force a full upgrade of every pin.
+    :param upgrade_packages: Upgrade only these distributions.
+    :returns: The ``uv pip compile`` command.
+    """
+    args = ["uv", "pip", "compile", *selector, str(requirements_in), "-o", str(output)]
+    if upgrade:
+        args.append("--upgrade")
+    for pkg in upgrade_packages:
+        args += ["--upgrade-package", pkg]
+    return Command(args)
+
+
 def uv_pip_compile(
     python: str,
     requirements_in: Path,
@@ -53,12 +78,42 @@ def uv_pip_compile(
     upgrade_packages: Sequence[str] = (),
 ) -> Command:
     """Build ``uv pip compile`` for a named environment's requirements."""
-    args = ["uv", "pip", "compile", "--python", python, str(requirements_in), "-o", str(output)]
-    if upgrade:
-        args.append("--upgrade")
-    for pkg in upgrade_packages:
-        args += ["--upgrade-package", pkg]
-    return Command(args)
+    return _compile_args(
+        ["--python", python],
+        requirements_in,
+        output,
+        upgrade=upgrade,
+        upgrade_packages=upgrade_packages,
+    )
+
+
+def uv_pip_compile_for_version(
+    python_version: str,
+    requirements_in: Path,
+    output: Path,
+    *,
+    upgrade: bool = False,
+    upgrade_packages: Sequence[str] = (),
+) -> Command:
+    """Build ``uv pip compile --python-version`` for a target not yet installed.
+
+    Resolving against a version rather than an interpreter path is what lets a
+    recreate validate its lock before the existing environment is destroyed.
+
+    :param python_version: The target version, e.g. ``3.13``.
+    :param requirements_in: The input requirements file.
+    :param output: Where the compiled lock is written.
+    :param upgrade: Force a full upgrade of every pin.
+    :param upgrade_packages: Upgrade only these distributions.
+    :returns: The ``uv pip compile`` command.
+    """
+    return _compile_args(
+        ["--python-version", python_version],
+        requirements_in,
+        output,
+        upgrade=upgrade,
+        upgrade_packages=upgrade_packages,
+    )
 
 
 def uv_pip_sync(python: str, lock: Path, *, editable_mode: str = "compat") -> Command:

@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from uv_stack.commands import micromamba_create, micromamba_remove
+from uv_stack.commands import (
+    micromamba_create,
+    micromamba_remove,
+    uv_pip_check,
+    uv_pip_compile,
+    uv_pip_compile_for_version,
+    uv_pip_sync,
+)
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError
 from uv_stack.models import ProjectTracking
@@ -219,6 +226,95 @@ def test_upgrade_drift_exempt_when_dry_run(config_tree: ConfigRoot):
     # Should not raise.
     result = upgrade_env(config_tree, rec, "main", UpgradeOptions(dry_run=True))
     assert result.planned
+
+
+def test_upgrade_recreate_failed_compile_never_destroys_the_env(config_tree: ConfigRoot):
+    """An unsatisfiable recreate resolve must leave the environment standing."""
+    from uv_stack.errors import ToolError
+
+    lock = config_tree.env_requirements_lock("main")
+    lock.write_bytes(b"old-pinned-lock\n")
+
+    def _compile_failure_responder(cmd: Command) -> CommandResult:
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n")
+        if "compile" in cmd.args:
+            raise ToolError(
+                "uv pip compile failed.",
+                command=cmd.args,
+                returncode=1,
+                detail="ERROR: Could not find a version that satisfies the requirement",
+            )
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=_compile_failure_responder)
+    with pytest.raises(ToolError):
+        upgrade_env(config_tree, rec, "main", UpgradeOptions(recreate=True))
+
+    # The guarantee that matters: the destructive pair never ran.
+    assert micromamba_remove("main") not in rec.commands
+    assert micromamba_create(config_tree.env_environment_yml("main")) not in rec.commands
+    # The previous resolution survives, and no candidate lock is left behind.
+    assert lock.read_bytes() == b"old-pinned-lock\n"
+    assert list(lock.parent.glob("*.tmp")) == []
+
+
+def test_upgrade_recreate_compiles_for_version_then_rebuilds(config_tree: ConfigRoot):
+    """The recreate sequence: compile, remove, create, sync, check."""
+    rec = RecordingRunner(responder=_existing_env_responder)
+    lock = config_tree.env_requirements_lock("main")
+    upgrade_env(config_tree, rec, "main", UpgradeOptions(recreate=True))
+
+    # Drop the interpreter probes; what remains is the ordering under test.
+    steps = [c for c in rec.commands if "run" not in c.args]
+    # The compile writes to a temp path, so only its head is comparable.
+    assert steps[0].args[:5] == ["uv", "pip", "compile", "--python-version", "3.12"]
+    # The target interpreter does not exist yet, so it cannot be named.
+    assert "--python" not in steps[0].args
+    assert steps[1:] == [
+        micromamba_remove("main"),
+        micromamba_create(config_tree.env_environment_yml("main")),
+        uv_pip_sync("/envs/main/bin/python", lock),
+        uv_pip_check("/envs/main/bin/python"),
+    ]
+    # The candidate was published, and nothing was left behind.
+    assert lock.is_file()
+    assert list(lock.parent.glob("*.tmp")) == []
+
+
+def test_upgrade_dry_run_recreate_plan_leads_with_the_compile(config_tree: ConfigRoot):
+    rec = RecordingRunner(responder=_existing_env_responder)
+    result = upgrade_env(
+        config_tree, rec, "main", UpgradeOptions(dry_run=True, recreate=True)
+    )
+    assert rec.commands == []
+    lock = config_tree.env_requirements_lock("main")
+    assert result.planned == [
+        uv_pip_compile_for_version(
+            "3.12", config_tree.env_requirements_in("main"), lock, upgrade=True
+        ),
+        micromamba_remove("main"),
+        micromamba_create(config_tree.env_environment_yml("main")),
+        uv_pip_sync("<env-python>", lock),
+        uv_pip_check("<env-python>"),
+    ]
+
+
+def test_upgrade_dry_run_create_plan_is_unchanged(config_tree: ConfigRoot):
+    """Only the recreate plan was reordered; --create still creates first."""
+    rec = RecordingRunner(responder=_missing_env_responder)
+    result = upgrade_env(
+        config_tree, rec, "main", UpgradeOptions(dry_run=True, create=True)
+    )
+    lock = config_tree.env_requirements_lock("main")
+    assert result.planned == [
+        micromamba_create(config_tree.env_environment_yml("main")),
+        uv_pip_compile(
+            "<env-python>", config_tree.env_requirements_in("main"), lock, upgrade=True
+        ),
+        uv_pip_sync("<env-python>", lock),
+        uv_pip_check("<env-python>"),
+    ]
 
 
 # ============================================================================
