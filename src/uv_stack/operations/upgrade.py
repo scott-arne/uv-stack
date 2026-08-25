@@ -127,7 +127,9 @@ def upgrade_env(
     :raises ConfigError: If the environment config is missing or invalid, or if
         a recreate is requested for an env whose ``python.txt`` is not a plain
         version.
-    :raises EnvError: If the env is missing and creation was not requested.
+    :raises EnvError: If the env is missing and creation was not requested, or
+        if a non-recreate upgrade is requested for an env whose running
+        interpreter no longer matches ``python.txt``.
     :raises ToolError: If a uv/micromamba command fails.
     """
     env = config.load_env(env_name)
@@ -136,8 +138,12 @@ def upgrade_env(
     # Guard: refuse when the running Python version differs from python.txt.
     # Placing this before the atomic_write calls ensures generated files are
     # untouched when drift is detected, preserving the "sources changed" signal.
+    # A dry run is held to this refusal too, rather than exempted. It is not
+    # read-only — it rewrites the two generated files below — and a plan
+    # describing commands the real command declines to issue is precisely the
+    # dishonesty this guard exists to remove.
     probed_python = None
-    if not options.dry_run and not options.recreate:
+    if not options.recreate:
         try:
             result = runner.run(
                 micromamba_python_info(env_name), capture=True, check=False
@@ -151,9 +157,11 @@ def upgrade_env(
                             f"but python.txt requests {env.python}.",
                             hint=(
                                 "The interpreter is only rebuilt when the environment "
-                                "is recreated. Run "
-                                f"'stack create env {render_positional_arg(env_name)} "
-                                "--recreate' to rebuild it "
+                                "is recreated. Either set "
+                                f"{config.env_python_path(env_name)} to "
+                                f"{actual_version} to keep the current interpreter, "
+                                "or run 'stack create env --recreate "
+                                f"{render_positional_arg(env_name)}' to rebuild it "
                                 "(this wipes and reinstalls the environment)."
                             ),
                         )
@@ -267,8 +275,9 @@ def upgrade_env(
                 # interpreter, and any pre-recreate probe describes the env
                 # that was just removed.
                 python = _env_python(runner, env_name)
-                # Publish only now, so a rebuild that failed above leaves the
-                # lock still describing the environment that is actually there.
+                # Publish only now: every failure above unwinds through the
+                # handler below, which discards the candidate and leaves the
+                # published lock untouched.
                 tmp_lock.replace(lock)
             except BaseException:
                 if tmp_lock.exists():

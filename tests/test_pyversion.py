@@ -77,6 +77,17 @@ def test_is_comparable_non_integer_component():
     assert is_comparable("3.-1") is False
 
 
+def test_is_comparable_rejects_what_int_would_accept():
+    """int() is not the predicate: uv's --python-version is stricter than it.
+
+    A leading '+', PEP 515 underscores, and non-ASCII decimal digits all round
+    trip through int() and all reach uv as something it rejects.
+    """
+    assert is_comparable("+3.14") is False
+    assert is_comparable("3.1_2") is False
+    assert is_comparable("٣.١٢") is False
+
+
 def test_satisfies_matching_versions():
     assert satisfies("3.14.7", "3.14.7") is True
     assert satisfies("3.12", "3.12") is True

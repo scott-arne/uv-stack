@@ -134,8 +134,14 @@ def test_config_init_reports_the_locks_directory(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_upgrade_dry_run(tmp_path: Path):
+def test_upgrade_dry_run(tmp_path: Path, monkeypatch):
     root = _env_root(tmp_path)
+    # A dry run is subject to the drift guard, so it probes the interpreter for
+    # real. Stub the runner: the machine's own 'main' env must not decide this.
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.SubprocessRunner",
+        lambda: _FakeProbeRunner(stdout="/envs/main/bin/python\n3.12.7\n"),
+    )
     result = CliRunner().invoke(
         cli, ["--root", str(root), "upgrade", "--dry-run", "main"]
     )
@@ -1698,6 +1704,27 @@ def test_create_env_python_without_tokens_with_recreate_writes_python_and_recrea
     assert calls and calls[0][0] == ["main"]
     assert calls[0][1].recreate is True
     assert calls[0][1].create is False
+
+
+def test_create_env_python_non_plain_version_leaves_python_txt_alone(tmp_path: Path):
+    """A value the recreate will refuse must not be written to python.txt first.
+
+    Writing it and then failing in upgrade_env leaves the env config holding a
+    value that makes every later --recreate refuse, recoverable only by hand.
+    """
+    root = _env_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    before = cfg.env_python_path("main").read_bytes()
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "create", "env", "main", "--python", "3.12.*", "--recreate"],
+    )
+    assert result.exit_code == 2
+    assert "plain version such as 3.14" in _flat_panel(result)
+    assert cfg.env_python_path("main").read_bytes() == before
 
 
 def test_create_env_python_with_tokens_unchanged(tmp_path: Path, monkeypatch):

@@ -27,6 +27,10 @@ def is_comparable(configured: str) -> bool:
     accepts full match specs. Anything carrying a comparison operator, wildcard,
     build string, or list separator is not something a component-wise compare
     can judge, so it is reported as incomparable rather than guessed at.
+
+    :param configured: The value read from ``python.txt``.
+    :returns: ``True`` when every dot-separated component is a plain ASCII
+        run of digits.
     """
     if not configured or not configured.strip():
         return False
@@ -36,16 +40,13 @@ def is_comparable(configured: str) -> bool:
     if any(char in configured for char in invalid_chars):
         return False
 
-    # Verify each dot-separated component is a non-negative integer.
+    # Verify each dot-separated component is a run of plain ASCII digits.
+    # An int() round-trip is too permissive for this job: it accepts a leading
+    # '+', PEP 515 underscores, and non-ASCII decimal digits, none of which
+    # uv takes for --python-version.
     components = configured.split(".")
     for component in components:
-        if not component:
-            return False
-        try:
-            value = int(component)
-            if value < 0:
-                return False
-        except ValueError:
+        if not (component.isascii() and component.isdigit()):
             return False
 
     return True
@@ -58,6 +59,11 @@ def satisfies(configured: str, actual: str) -> bool:
     configured ``3.14`` is satisfied by an actual ``3.14.7``: the configured
     value is a prefix constraint, compared component-wise only as far as it is
     specified.
+
+    :param configured: The version ``python.txt`` requests.
+    :param actual: The version the environment's interpreter reports.
+    :returns: ``True`` when ``actual`` matches ``configured`` component-wise,
+        and also when either side cannot be parsed.
     """
     # Parse configured version.
     try:

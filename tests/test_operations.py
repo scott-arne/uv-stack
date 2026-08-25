@@ -6,6 +6,7 @@ import pytest
 
 from uv_stack.commands import (
     micromamba_create,
+    micromamba_python_info,
     micromamba_remove,
     uv_pip_check,
     uv_pip_compile,
@@ -187,13 +188,20 @@ def test_upgrade_dry_run_writes_files_but_runs_nothing(config_tree: ConfigRoot):
     result = upgrade_env(config_tree, rec, "main", UpgradeOptions(dry_run=True))
     assert config_tree.env_requirements_in("main").is_file()
     assert config_tree.env_environment_yml("main").is_file()
-    # No commands executed.
-    assert rec.commands == []
+    # Only the drift guard's read-only probe ran; nothing was executed.
+    assert rec.commands == [micromamba_python_info("main")]
     # But a plan is returned.
     assert result.planned
     assert any("compile" in c.args for c in result.planned)
     # Dry run never wrote a lock file.
     assert not config_tree.env_requirements_lock("main").is_file()
+
+
+def _drifted_responder(cmd: Command) -> CommandResult:
+    """An env whose interpreter reports 3.13.1 against a configured 3.12."""
+    if "run" in cmd.args:
+        return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.13.1\n")
+    return CommandResult(returncode=0, stdout="")
 
 
 def test_upgrade_refuses_python_version_drift(config_tree: ConfigRoot):
@@ -233,17 +241,131 @@ def test_upgrade_drift_exempt_when_recreate(config_tree: ConfigRoot):
     upgrade_env(config_tree, rec, "main", UpgradeOptions(recreate=True))
 
 
-def test_upgrade_drift_exempt_when_dry_run(config_tree: ConfigRoot):
-    """upgrade_env with dry_run=True does not raise on version drift."""
-    def _mismatched_responder(cmd: Command) -> CommandResult:
-        if "run" in cmd.args:
-            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.13.1\n")
-        return CommandResult(returncode=0, stdout="")
+def test_upgrade_dry_run_refuses_python_version_drift(config_tree: ConfigRoot):
+    """A dry run is refused exactly where the real command would be.
 
-    rec = RecordingRunner(responder=_mismatched_responder)
-    # Should not raise.
-    result = upgrade_env(config_tree, rec, "main", UpgradeOptions(dry_run=True))
-    assert result.planned
+    The plan a dry run prints must not describe an upgrade the tool declines to
+    perform, and the dry run rewrites the generated files on its way past.
+    """
+    rec = RecordingRunner(responder=_drifted_responder)
+    with pytest.raises(EnvError) as exc_info:
+        upgrade_env(config_tree, rec, "main", UpgradeOptions(dry_run=True))
+
+    assert "3.13.1" in str(exc_info.value)
+    # The refusal lands above the writes, so no generated file was rewritten.
+    assert not config_tree.env_requirements_in("main").exists()
+    assert not config_tree.env_environment_yml("main").exists()
+
+
+def test_upgrade_refuses_python_version_drift_when_creating(config_tree: ConfigRoot):
+    """The guard applies to create=True too, not only to a plain upgrade.
+
+    Exempting create would mean 'stack create env NAME' silently re-syncs the
+    pip layer onto an interpreter python.txt no longer describes.
+    """
+    rec = RecordingRunner(responder=_drifted_responder)
+    with pytest.raises(EnvError) as exc_info:
+        upgrade_env(config_tree, rec, "main", UpgradeOptions(create=True))
+
+    assert "3.13.1" in str(exc_info.value)
+    assert not any("uv" in " ".join(c.args) for c in rec.commands)
+
+
+def test_upgrade_drift_refusal_offers_both_remedies(config_tree: ConfigRoot):
+    """The hint must name the non-destructive remedy, not only the wipe.
+
+    python.txt defaults to 3.12 when absent, so the destructive remedy alone
+    tells the owner of a working 3.13 env to rebuild it at a version nobody
+    chose. Naming the path lets them act whether or not the file exists.
+    """
+    config_tree.env_python_path("main").unlink()
+
+    rec = RecordingRunner(responder=_drifted_responder)
+    with pytest.raises(EnvError) as exc_info:
+        upgrade_env(config_tree, rec, "main", UpgradeOptions())
+
+    hint = str(exc_info.value.hint)
+    # Remedy one: keep the interpreter by writing the version it reports.
+    assert str(config_tree.env_python_path("main")) in hint
+    assert "3.13.1" in hint
+    # Remedy two: rebuild the interpreter, said to be destructive.
+    assert "stack create env --recreate main" in hint
+    assert "wipes" in hint
+
+
+def test_upgrade_drift_refusal_hint_survives_a_flag_shaped_env_name(
+    config_tree: ConfigRoot,
+):
+    """The rendered command must not turn its own flag into a positional.
+
+    render_positional_arg emits '-- --recreate' for this name, so a hint that
+    appended the flag after it would read 'stack create env -- --recreate
+    --recreate' and paste as a request for an env named '--recreate'.
+    """
+    env_dir = config_tree.env_dir("--recreate")
+    env_dir.mkdir(parents=True)
+    (env_dir / "stack.txt").write_text("@standard\n")
+    (env_dir / "python.txt").write_text("3.12\n")
+
+    rec = RecordingRunner(responder=_drifted_responder)
+    with pytest.raises(EnvError) as exc_info:
+        upgrade_env(config_tree, rec, "--recreate", UpgradeOptions())
+
+    assert "stack create env --recreate -- --recreate" in str(exc_info.value.hint)
+
+
+def test_upgrade_drift_refusal_carries_resolution_warnings(config_tree: ConfigRoot):
+    """The refusal sits outside the execution handler, so it attaches its own.
+
+    Nothing else attaches them on this path: the advisories the resolve
+    computed would be dropped silently if the guard forgot to.
+    """
+    config_tree.env_stack_path("main").write_text("standrd\n")
+
+    rec = RecordingRunner(responder=_drifted_responder)
+    with pytest.raises(EnvError) as exc_info:
+        upgrade_env(config_tree, rec, "main", UpgradeOptions())
+
+    assert any("did you mean 'standard'" in w for w in exc_info.value.resolution_warnings)
+
+
+def test_upgrade_recreate_refusal_carries_resolution_warnings(config_tree: ConfigRoot):
+    """The recreate preflight is outside the handler too, and attaches its own."""
+    config_tree.env_python_path("main").write_text("3.12.*\n")
+    config_tree.env_stack_path("main").write_text("standrd\n")
+
+    rec = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ConfigError) as exc_info:
+        upgrade_env(config_tree, rec, "main", UpgradeOptions(recreate=True))
+
+    assert any("did you mean 'standard'" in w for w in exc_info.value.resolution_warnings)
+
+
+def test_upgrade_drift_guard_fails_open_when_the_probe_raises(config_tree: ConfigRoot):
+    """A probe that cannot run must not block an otherwise valid upgrade.
+
+    micromamba missing from PATH makes the version unknowable, and an unknown
+    version is not evidence of drift.
+    """
+    from uv_stack.errors import ToolError
+
+    def _probe_failure_responder(cmd: Command) -> CommandResult:
+        if cmd == micromamba_python_info("main"):
+            raise ToolError(
+                "Could not run micromamba: No such file or directory.",
+                command=cmd.args,
+                returncode=127,
+            )
+        return _existing_env_responder(cmd)
+
+    rec = RecordingRunner(responder=_probe_failure_responder)
+    upgrade_env(config_tree, rec, "main", UpgradeOptions())
+
+    assert micromamba_python_info("main") in rec.commands
+    assert any("compile" in c.args for c in rec.commands)
+    assert uv_pip_sync("/envs/main/bin/python", config_tree.env_requirements_lock("main")) in (
+        rec.commands
+    )
 
 
 def test_upgrade_recreate_failed_compile_never_destroys_the_env(config_tree: ConfigRoot):

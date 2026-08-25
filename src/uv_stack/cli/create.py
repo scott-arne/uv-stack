@@ -19,6 +19,7 @@ from uv_stack.operations.scaffold import (
 )
 from uv_stack.operations.upgrade import UpgradeOptions
 from uv_stack.parse import read_clean_lines
+from uv_stack.pyversion import is_comparable
 from uv_stack.resolver import Resolver
 from uv_stack.runner import SubprocessRunner
 
@@ -120,7 +121,9 @@ def create_env(
     """Create environment NAME, then upgrade it ('--recreate' wipes it first).
 
     With TOKENS, scaffold envs/NAME/stack.txt first (and python.txt when
-    '--python' is given).
+    '--python' is given). Without TOKENS, '--python VERSION --recreate' changes
+    an existing environment's interpreter: the lock is compiled against VERSION
+    before the environment is rebuilt.
     """
     if python is not None and not python.strip():
         raise click.UsageError("--python requires a non-empty version.")
@@ -137,6 +140,13 @@ def create_env(
             raise click.UsageError(
                 "Changing an existing environment's Python version requires "
                 "--recreate; the interpreter is only rebuilt then."
+            )
+        if not is_comparable(python):
+            # The recreate below resolves the lock against this value, and the
+            # operations layer refuses one uv cannot resolve against. Refuse it
+            # here too, so a doomed run does not leave python.txt rewritten.
+            raise click.UsageError(
+                f"--python must be a plain version such as 3.14, not '{python}'."
             )
         path = write_env_python(config, name, python)
         echo(f"Wrote {path}")
