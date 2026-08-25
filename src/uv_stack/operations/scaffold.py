@@ -17,7 +17,7 @@ import yaml
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
-from uv_stack.fsutil import atomic_write_new, name_lock, nofollow_read_flags
+from uv_stack.fsutil import atomic_write, atomic_write_new, name_lock, nofollow_read_flags
 from uv_stack.resolver import bundle_self_references
 
 _OVERWRITE_HINT = "Edit the file directly or choose another name."
@@ -490,6 +490,38 @@ def write_env_sources(
                     # is then an orphan, which adoption already handles.
             raise
         return [stack_path, *written]
+
+
+def write_env_python(config: ConfigRoot, name: str, python: str) -> Path:
+    """Update an existing environment's ``python.txt``.
+
+    Distinct from :func:`write_env_sources`, which publishes the source files of
+    a *new* environment under no-clobber rules. This call targets an environment
+    that already exists, so it overwrites in place.
+
+    :param config: Configuration root.
+    :param name: Environment name.
+    :param python: Version to write, e.g. ``3.14``.
+    :returns: The path written.
+    :raises ConfigError: If ``name`` is not a valid environment name, if the
+        environment has no ``stack.txt``, or if the per-name lock cannot be used.
+    """
+    _validate_name("environment", name)
+    with name_lock(config.env_lock_path(name), name):
+        stack_path = config.env_stack_path(name)
+        if not stack_path.exists():
+            from uv_stack.hints import render_positional_arg
+
+            raise ConfigError(
+                f"Environment '{name}' has no stack.txt.",
+                hint=(
+                    f"Pass TOKENS to create it: stack create env "
+                    f"{render_positional_arg(name)} TOKENS"
+                ),
+            )
+        python_path = config.env_python_path(name)
+        atomic_write(python_path, python + "\n")
+    return python_path
 
 
 _STARTER_PROFILE = """\

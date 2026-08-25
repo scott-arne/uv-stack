@@ -11,7 +11,12 @@ from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import UvStackError
 from uv_stack.operations.project import ProjectOptions, init_project
-from uv_stack.operations.scaffold import write_bundle, write_env_sources, write_profile
+from uv_stack.operations.scaffold import (
+    write_bundle,
+    write_env_python,
+    write_env_sources,
+    write_profile,
+)
 from uv_stack.operations.upgrade import UpgradeOptions
 from uv_stack.parse import read_clean_lines
 from uv_stack.resolver import Resolver
@@ -92,7 +97,10 @@ def create() -> None:
     "--python",
     "python",
     default=None,
-    help="Write python.txt with this version (requires TOKENS).",
+    help=(
+        "Write python.txt with this version (with TOKENS: a new env; "
+        "without: an existing env, requires --recreate)."
+    ),
 )
 @click.option("--recreate", is_flag=True, help="Remove and recreate the env first.")
 @click.option(
@@ -114,12 +122,29 @@ def create_env(
     With TOKENS, scaffold envs/NAME/stack.txt first (and python.txt when
     '--python' is given).
     """
-    if python is not None and not tokens:
-        raise click.UsageError(
-            "--python requires TOKENS (it only applies when scaffolding a new env)."
-        )
     if python is not None and not python.strip():
         raise click.UsageError("--python requires a non-empty version.")
+    if python is not None and not tokens:
+        # Refusing up front is deliberate: the alternative writes python.txt
+        # and then fails in upgrade_env, leaving the source edited and the env
+        # untouched.
+        stack_path = config.env_stack_path(name)
+        if not stack_path.exists():
+            raise click.UsageError(
+                "--python requires TOKENS when creating a new environment."
+            )
+        if not recreate:
+            raise click.UsageError(
+                "Changing an existing environment's Python version requires "
+                "--recreate; the interpreter is only rebuilt then."
+            )
+        path = write_env_python(config, name, python)
+        echo(f"Wrote {path}")
+        options = UpgradeOptions(recreate=True, strict=strict)
+        _run_upgrade(config, [name], options)
+        echo("")
+        print_activation_hint(name)
+        return
     if tokens:
         # Validate before anything durable is written: strict failures,
         # missing explicit references, and malformed profile YAML must not

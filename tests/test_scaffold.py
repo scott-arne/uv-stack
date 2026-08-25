@@ -966,3 +966,33 @@ def test_writers_still_work_when_locking_is_unavailable(tmp_path, monkeypatch):
     assert write_bundle(config, "y", ["x"]).is_file()
     assert all(p.is_file() for p in write_env_sources(config, "e", ["x"], python="3.12"))
     assert not config.locks_dir.exists()
+
+
+def test_write_env_python_overwrites_existing(config_tree: ConfigRoot):
+    """write_env_python updates an existing environment's python.txt."""
+    from uv_stack.operations.scaffold import write_env_python
+
+    assert config_tree.env_python_path("main").read_text() == "3.12\n"
+    path = write_env_python(config_tree, "main", "3.14")
+    assert path == config_tree.env_python_path("main")
+    assert path.read_text() == "3.14\n"
+
+
+def test_write_env_python_requires_stack_txt(config_tree: ConfigRoot):
+    """write_env_python refuses when the env has no stack.txt."""
+    from uv_stack.operations.scaffold import write_env_python
+
+    config_tree.env_dir("nostack").mkdir(parents=True)
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_python(config_tree, "nostack", "3.14")
+    assert "no stack.txt" in str(excinfo.value.message)
+    assert "Pass TOKENS to create it" in str(excinfo.value.hint)
+
+
+def test_write_env_python_rejects_invalid_name(config_tree: ConfigRoot):
+    """write_env_python validates the environment name."""
+    from uv_stack.operations.scaffold import write_env_python
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_env_python(config_tree, "a/b", "3.14")
+    assert "Invalid environment name" in str(excinfo.value.message)

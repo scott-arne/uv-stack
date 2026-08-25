@@ -1560,12 +1560,14 @@ def test_create_env_with_tokens_scaffolds_and_builds(tmp_path: Path, monkeypatch
 
 
 def test_create_env_python_without_tokens_is_usage_error(tmp_path: Path):
+    """--python without tokens and without --recreate on a new env is a usage error."""
     root = _seeded_root(tmp_path)
     runner = CliRunner()
     result = runner.invoke(
         cli, ["--root", str(root), "create", "env", "fresh", "--python", "3.13"]
     )
     assert result.exit_code == 2
+    assert "--python requires TOKENS when creating a new environment" in _flat_panel(result)
 
 
 def test_create_env_tokens_refuse_existing_stack(tmp_path: Path, monkeypatch):
@@ -1645,6 +1647,79 @@ def test_create_env_python_empty_string_without_tokens_is_usage_error(tmp_path: 
         cli, ["--root", str(root), "create", "env", "fresh", "--python", ""]
     )
     assert result.exit_code == 2
+
+
+def test_create_env_python_without_tokens_new_env_is_usage_error(tmp_path: Path):
+    """--python without tokens on a non-existent env requires TOKENS."""
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "newenv", "--python", "3.14"]
+    )
+    assert result.exit_code == 2
+    assert "--python requires TOKENS when creating a new environment" in _flat_panel(result)
+
+
+def test_create_env_python_without_tokens_existing_env_no_recreate_is_usage_error(tmp_path: Path):
+    """--python without tokens on an existing env requires --recreate."""
+    root = _env_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "main", "--python", "3.14"]
+    )
+    assert result.exit_code == 2
+    output = _flat_panel(result)
+    assert "requires --recreate" in output
+    assert "interpreter is only rebuilt then" in output
+
+
+def test_create_env_python_without_tokens_with_recreate_writes_python_and_recreates(
+    tmp_path: Path, monkeypatch
+):
+    """--python with --recreate and no TOKENS writes python.txt and runs recreate."""
+    root = _env_root(tmp_path)
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda config, names, options, **kw: calls.append((names, options)),
+    )
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    assert cfg.env_python_path("main").read_text() == "3.12\n"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "main", "--python", "3.14", "--recreate"]
+    )
+    assert result.exit_code == 0
+    assert cfg.env_python_path("main").read_text() == "3.14\n"
+    assert "Wrote" in result.output
+    assert str(cfg.env_python_path("main")) in result.output
+    assert calls and calls[0][0] == ["main"]
+    assert calls[0][1].recreate is True
+    assert calls[0][1].create is False
+
+
+def test_create_env_python_with_tokens_unchanged(tmp_path: Path, monkeypatch):
+    """--python with TOKENS still scaffolds and creates (existing behavior)."""
+    root = _seeded_root(tmp_path)
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda config, names, options, **kw: calls.append((names, options)),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "fresh", "ds", "--python", "3.14"]
+    )
+    assert result.exit_code == 0
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    assert cfg.env_stack_path("fresh").read_text() == "ds\n"
+    assert cfg.env_python_path("fresh").read_text() == "3.14\n"
+    assert calls and calls[0][0] == ["fresh"]
+    assert calls[0][1].create is True
 
 
 def test_create_env_rejects_malformed_profile_before_scaffolding(
