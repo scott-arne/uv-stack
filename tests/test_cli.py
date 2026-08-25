@@ -225,6 +225,23 @@ def test_upgrade_dry_run_strict_exits_nonzero_on_failure(tmp_path: Path):
     assert result.exit_code == 1
 
 
+def test_upgrade_refuses_python_version_drift_cli(tmp_path: Path, monkeypatch):
+    """CLI prints the hint when upgrade refuses on Python version drift."""
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.SubprocessRunner",
+        lambda: _FakeProbeRunner(stdout="/envs/main/bin/python\n3.13.1\n"),
+    )
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "main"])
+    assert result.exit_code == 1
+    # Error message mentions both versions.
+    output = _combined_output(result)
+    assert "3.13.1" in output
+    assert "3.12" in output
+    # Hint text reaches the user.
+    assert "--recreate" in output
+
+
 # ---------------------------------------------------------------------------
 # create
 # ---------------------------------------------------------------------------

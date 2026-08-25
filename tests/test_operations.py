@@ -171,6 +171,56 @@ def test_upgrade_dry_run_writes_files_but_runs_nothing(config_tree: ConfigRoot):
     assert not config_tree.env_requirements_lock("main").is_file()
 
 
+def test_upgrade_refuses_python_version_drift(config_tree: ConfigRoot):
+    """upgrade_env raises when the running version differs from python.txt."""
+    def _mismatched_responder(cmd: Command) -> CommandResult:
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.13.1\n")
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=_mismatched_responder)
+    with pytest.raises(EnvError) as exc_info:
+        upgrade_env(config_tree, rec, "main", UpgradeOptions())
+
+    # Error message mentions both versions.
+    assert "3.13.1" in str(exc_info.value)
+    assert "3.12" in str(exc_info.value)
+    # Hint mentions recreate.
+    assert "--recreate" in str(exc_info.value.hint)
+
+    # Generated files were NOT written (this is the regression that matters).
+    assert not config_tree.env_requirements_in("main").exists()
+    assert not config_tree.env_environment_yml("main").exists()
+
+    # No uv commands were recorded.
+    assert not any("uv" in " ".join(c.args) for c in rec.commands)
+
+
+def test_upgrade_drift_exempt_when_recreate(config_tree: ConfigRoot):
+    """upgrade_env with recreate=True does not raise on version drift."""
+    def _mismatched_responder(cmd: Command) -> CommandResult:
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.13.1\n")
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=_mismatched_responder)
+    # Should not raise.
+    upgrade_env(config_tree, rec, "main", UpgradeOptions(recreate=True))
+
+
+def test_upgrade_drift_exempt_when_dry_run(config_tree: ConfigRoot):
+    """upgrade_env with dry_run=True does not raise on version drift."""
+    def _mismatched_responder(cmd: Command) -> CommandResult:
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.13.1\n")
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=_mismatched_responder)
+    # Should not raise.
+    result = upgrade_env(config_tree, rec, "main", UpgradeOptions(dry_run=True))
+    assert result.planned
+
+
 # ============================================================================
 # project init operation tests
 # ============================================================================

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from uv_stack.commands import (
     micromamba_create,
+    micromamba_python_info,
     micromamba_python_path,
     micromamba_remove,
     uv_pip_check,
@@ -23,7 +24,9 @@ from uv_stack.commands import (
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import EnvError, UvStackError
 from uv_stack.fsutil import atomic_write
+from uv_stack.hints import render_positional_arg
 from uv_stack.operations.create import ensure_env
+from uv_stack.pyversion import is_comparable, parse_python_info, satisfies
 from uv_stack.render import render_environment_yml, render_requirements_in
 from uv_stack.resolver import Resolver
 from uv_stack.runner import Command, Runner
@@ -89,6 +92,40 @@ def upgrade_env(
     env = config.load_env(env_name)
     stack = Resolver(config, strict=options.strict).resolve(env.stack)
 
+    # Guard: refuse when the running Python version differs from python.txt.
+    # Placing this before the atomic_write calls ensures generated files are
+    # untouched when drift is detected, preserving the "sources changed" signal.
+    probed_python = None
+    if not options.dry_run and not options.recreate:
+        try:
+            result = runner.run(
+                micromamba_python_info(env_name), capture=True, check=False
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                executable, actual_version = parse_python_info(result.stdout)
+                if actual_version and is_comparable(env.python):
+                    if not satisfies(env.python, actual_version):
+                        error = EnvError(
+                            f"Environment '{env_name}' runs Python {actual_version}, "
+                            f"but python.txt requests {env.python}.",
+                            hint=(
+                                "The interpreter is only rebuilt when the environment "
+                                "is recreated. Run "
+                                f"'stack create env {render_positional_arg(env_name)} "
+                                "--recreate' to rebuild it "
+                                "(this wipes and reinstalls the environment)."
+                            ),
+                        )
+                        error.resolution_warnings = stack.warnings
+                        raise error
+                # Guard passed; remember the executable to avoid re-probing.
+                probed_python = executable
+        except EnvError:
+            raise
+        except Exception:
+            # Probe failure (e.g., micromamba not installed): fail open.
+            pass
+
     atomic_write(
         config.env_requirements_in(env_name),
         render_requirements_in(stack, config, env_name),
@@ -127,12 +164,18 @@ def upgrade_env(
             config, runner, env_name, create=options.create, recreate=options.recreate
         )
 
-        python = runner.run(micromamba_python_path(env_name), capture=True).stdout.strip()
-        if not python:
-            raise EnvError(
-                f"Could not determine the Python interpreter for env '{env_name}'.",
-                hint="Verify the micromamba environment was created successfully.",
-            )
+        # Reuse the probe from the drift guard when available; otherwise probe now.
+        if probed_python:
+            python = probed_python
+        else:
+            python = runner.run(
+                micromamba_python_path(env_name), capture=True
+            ).stdout.strip()
+            if not python:
+                raise EnvError(
+                    f"Could not determine the Python interpreter for env '{env_name}'.",
+                    hint="Verify the micromamba environment was created successfully.",
+                )
 
         # Compile to a temp lock, then atomically replace, so a failed compile never
         # corrupts an existing lockfile.
