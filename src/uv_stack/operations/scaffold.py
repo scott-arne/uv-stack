@@ -18,6 +18,7 @@ import yaml
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
 from uv_stack.fsutil import atomic_write, atomic_write_new, name_lock, nofollow_read_flags
+from uv_stack.hints import render_positional_arg
 from uv_stack.resolver import bundle_self_references
 
 _OVERWRITE_HINT = "Edit the file directly or choose another name."
@@ -510,8 +511,6 @@ def write_env_python(config: ConfigRoot, name: str, python: str) -> Path:
     with name_lock(config.env_lock_path(name), name):
         stack_path = config.env_stack_path(name)
         if not stack_path.exists():
-            from uv_stack.hints import render_positional_arg
-
             raise ConfigError(
                 f"Environment '{name}' has no stack.txt.",
                 hint=(
