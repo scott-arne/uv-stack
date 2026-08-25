@@ -1,3 +1,3 @@
 """uv-stack: formalized uv + micromamba environment management."""
 
-__version__ = "0.4.4"
+__version__ = "0.4.5"

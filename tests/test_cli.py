@@ -117,7 +117,7 @@ def _two_failing_envs_root(tmp_path: Path) -> Path:
 def test_version():
     result = CliRunner().invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "stack, version 0.4.4" in result.output
+    assert "stack, version 0.4.5" in result.output
 
 
 def test_config_init_reports_the_locks_directory(tmp_path: Path):
