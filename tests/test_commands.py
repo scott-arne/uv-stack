@@ -5,6 +5,7 @@ from pathlib import Path
 from uv_stack import commands
 from uv_stack.commands import (
     micromamba_create,
+    micromamba_python_info,
     micromamba_python_path,
     micromamba_remove,
     uv_add,
@@ -19,8 +20,14 @@ from uv_stack.commands import (
 def test_uv_pip_compile_basic():
     cmd = uv_pip_compile("/py", Path("requirements.in"), Path("out.lock"))
     assert cmd.args == [
-        "uv", "pip", "compile", "--python", "/py",
-        "requirements.in", "-o", "out.lock",
+        "uv",
+        "pip",
+        "compile",
+        "--python",
+        "/py",
+        "requirements.in",
+        "-o",
+        "out.lock",
     ]
 
 
@@ -30,9 +37,7 @@ def test_uv_pip_compile_upgrade_all():
 
 
 def test_uv_pip_compile_upgrade_packages():
-    cmd = uv_pip_compile(
-        "/py", Path("r.in"), Path("o"), upgrade_packages=["pandas", "numpy"]
-    )
+    cmd = uv_pip_compile("/py", Path("r.in"), Path("o"), upgrade_packages=["pandas", "numpy"])
     assert cmd.args.count("--upgrade-package") == 2
     assert "pandas" in cmd.args
     assert "numpy" in cmd.args
@@ -42,8 +47,14 @@ def test_uv_pip_compile_upgrade_packages():
 def test_uv_pip_sync():
     cmd = uv_pip_sync("/py", Path("lock.txt"))
     assert cmd.args == [
-        "uv", "pip", "sync", "--python", "/py",
-        "-C", "editable_mode=compat", "lock.txt",
+        "uv",
+        "pip",
+        "sync",
+        "--python",
+        "/py",
+        "-C",
+        "editable_mode=compat",
+        "lock.txt",
     ]
 
 
@@ -67,14 +78,23 @@ def test_micromamba_create_uses_mamba_exe(monkeypatch):
 def test_micromamba_create(monkeypatch):
     monkeypatch.setenv("MAMBA_EXE", "micromamba")
     assert micromamba_create(Path("env.yml")).args == [
-        "micromamba", "create", "-f", "env.yml", "-y",
+        "micromamba",
+        "create",
+        "-f",
+        "env.yml",
+        "-y",
     ]
 
 
 def test_micromamba_remove(monkeypatch):
     monkeypatch.setenv("MAMBA_EXE", "micromamba")
     assert micromamba_remove("main").args == [
-        "micromamba", "remove", "-n", "main", "--all", "-y",
+        "micromamba",
+        "remove",
+        "-n",
+        "main",
+        "--all",
+        "-y",
     ]
 
 
@@ -83,6 +103,32 @@ def test_micromamba_python_path(monkeypatch):
     cmd = micromamba_python_path("main")
     assert cmd.args[:4] == ["micromamba", "run", "-n", "main"]
     assert "python" in cmd.args
+
+
+def test_micromamba_python_info(monkeypatch):
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("MAMBA_EXE", "micromamba")
+    cmd = micromamba_python_info("main")
+    assert cmd.args[:4] == ["micromamba", "run", "-n", "main"]
+    assert "python" in cmd.args
+    # Verify the snippet prints executable then version.
+    snippet = [arg for arg in cmd.args if "import sys" in arg][0]
+    result = subprocess.run(
+        [sys.executable, "-c", snippet],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lines = result.stdout.strip().splitlines()
+    assert len(lines) == 2
+    assert lines[0] == sys.executable
+    # Verify the version line is three dot-separated integers.
+    version_parts = lines[1].split(".")
+    assert len(version_parts) == 3
+    for part in version_parts:
+        assert part.isdigit()
 
 
 def test_micromamba_exe_prefers_mamba_exe_over_path(monkeypatch):
@@ -120,7 +166,10 @@ def test_uv_add_and_sync():
 
 def test_uv_sync_with_python():
     assert uv_sync("/envs/main/bin/python").args == [
-        "uv", "sync", "--python", "/envs/main/bin/python",
+        "uv",
+        "sync",
+        "--python",
+        "/envs/main/bin/python",
     ]
 
 

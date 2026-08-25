@@ -16,6 +16,11 @@ from uv_stack.runner import Command
 
 _PYTHON_PATH_SNIPPET = "import sys; print(sys.executable)"
 
+_PYTHON_INFO_SNIPPET = (
+    "import sys; print(sys.executable); "
+    "print('.'.join(str(part) for part in sys.version_info[:3]))"
+)
+
 
 def _micromamba_exe() -> str:
     """Resolve the ``micromamba`` executable to invoke via :mod:`subprocess`.
@@ -108,6 +113,13 @@ def micromamba_python_path(env_name: str) -> Command:
     """Build a command that prints the env's Python executable path."""
     return Command(
         [_micromamba_exe(), "run", "-n", env_name, "python", "-c", _PYTHON_PATH_SNIPPET]
+    )
+
+
+def micromamba_python_info(env_name: str) -> Command:
+    """Build a command printing the env's Python executable, then its version."""
+    return Command(
+        [_micromamba_exe(), "run", "-n", env_name, "python", "-c", _PYTHON_INFO_SNIPPET]
     )
 
 

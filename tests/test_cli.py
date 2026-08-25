@@ -1801,7 +1801,7 @@ def test_doctor_fix_terminates_with_a_permanently_unfixable_finding(tmp_path: Pa
 class _FakeProbeRunner:
     """Stands in for SubprocessRunner in probe-only CLI paths."""
 
-    def __init__(self, stdout: str = "/envs/main/bin/python\n", returncode: int = 0):
+    def __init__(self, stdout: str = "/envs/main/bin/python\n3.12.7\n", returncode: int = 0):
         self._stdout = stdout
         self._returncode = returncode
 
@@ -1919,12 +1919,78 @@ def test_status_json(tmp_path: Path, monkeypatch):
         {
             "name": "main",
             "python": "3.12",
+            "actual_python": "3.12.7",
             "created": True,
             "lock": False,
             "state": "never built",
             "message": None,
         }
     ]
+
+
+def test_status_python_changed_renders_both_versions(tmp_path: Path, monkeypatch):
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
+    from uv_stack.runner import RecordingRunner
+
+    root = _env_root(tmp_path)
+    # Build the env so state is not "never built".
+    def _ok_responder(cmd):
+        from uv_stack.runner import CommandResult
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.12.7\n")
+        return CommandResult(returncode=0, stdout="")
+    upgrade_env(
+        ConfigRoot(root),
+        RecordingRunner(responder=_ok_responder),
+        "main",
+        UpgradeOptions(),
+    )
+    # Now probe with a mismatched version.
+    monkeypatch.setattr(
+        "uv_stack.cli.status_cmd.SubprocessRunner",
+        lambda: _FakeProbeRunner(stdout="/envs/main/bin/python\n3.13.1\n"),
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "status"])
+    assert result.exit_code == 0
+    cells = _row_cells(result.output, "main")
+    assert cells[1] == "3.12 (env 3.13.1)"
+    assert cells[4] == "python changed"
+
+
+def test_status_json_includes_actual_python(tmp_path: Path, monkeypatch):
+    import json
+
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
+    from uv_stack.runner import RecordingRunner
+
+    root = _env_root(tmp_path)
+    # Build the env.
+    def _ok_responder(cmd):
+        from uv_stack.runner import CommandResult
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.12.7\n")
+        return CommandResult(returncode=0, stdout="")
+    upgrade_env(
+        ConfigRoot(root),
+        RecordingRunner(responder=_ok_responder),
+        "main",
+        UpgradeOptions(),
+    )
+    # Probe with mismatched version.
+    monkeypatch.setattr(
+        "uv_stack.cli.status_cmd.SubprocessRunner",
+        lambda: _FakeProbeRunner(stdout="/envs/main/bin/python\n3.13.1\n"),
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "status", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert len(payload) == 1
+    assert payload[0]["actual_python"] == "3.13.1"
+    assert payload[0]["state"] == "python changed"
 
 
 def test_list_env_json(tmp_path: Path):

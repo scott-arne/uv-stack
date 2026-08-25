@@ -10,7 +10,7 @@ from uv_stack.runner import Command, CommandResult, RecordingRunner
 
 def _existing_env_responder(cmd: Command) -> CommandResult:
     if "run" in cmd.args:
-        return CommandResult(returncode=0, stdout="/envs/main/bin/python\n")
+        return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.12.7\n")
     return CommandResult(returncode=0, stdout="")
 
 
@@ -33,9 +33,7 @@ def _built(config_tree: ConfigRoot) -> None:
 
 def test_status_ok(config_tree: ConfigRoot):
     _built(config_tree)
-    status = env_status(
-        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
-    )
+    status = env_status(config_tree, RecordingRunner(responder=_existing_env_responder), "main")
     assert status.state == "ok"
     assert status.python == "3.12"
     assert status.created is True
@@ -47,9 +45,7 @@ def test_status_sources_changed(config_tree: ConfigRoot):
     _built(config_tree)
     with config_tree.env_stack_path("main").open("a") as handle:
         handle.write("httpx\n")
-    status = env_status(
-        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
-    )
+    status = env_status(config_tree, RecordingRunner(responder=_existing_env_responder), "main")
     assert status.state == "sources changed"
 
 
@@ -59,27 +55,21 @@ def test_status_lock_stale(config_tree: ConfigRoot):
     req = config_tree.env_requirements_in("main")
     old = req.stat().st_mtime - 100
     os.utime(lock, (old, old))
-    status = env_status(
-        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
-    )
+    status = env_status(config_tree, RecordingRunner(responder=_existing_env_responder), "main")
     assert status.state == "lock stale"
 
 
 def test_status_never_built(config_tree: ConfigRoot):
     _built(config_tree)
     config_tree.env_requirements_lock("main").unlink()
-    status = env_status(
-        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
-    )
+    status = env_status(config_tree, RecordingRunner(responder=_existing_env_responder), "main")
     assert status.state == "never built"
 
 
 def test_status_not_created_wins_over_never_built(config_tree: ConfigRoot):
     _built(config_tree)
     config_tree.env_requirements_lock("main").unlink()
-    status = env_status(
-        config_tree, RecordingRunner(responder=_missing_env_responder), "main"
-    )
+    status = env_status(config_tree, RecordingRunner(responder=_missing_env_responder), "main")
     assert status.state == "not created"
     assert status.created is False
 
@@ -93,9 +83,7 @@ def test_status_probe_unavailable_is_none(config_tree: ConfigRoot):
 
 def test_status_config_error(config_tree: ConfigRoot):
     config_tree.env_stack_path("main").unlink()
-    status = env_status(
-        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
-    )
+    status = env_status(config_tree, RecordingRunner(responder=_existing_env_responder), "main")
     assert status.state == "config error"
     assert status.python is None
     assert status.message is not None
@@ -104,9 +92,7 @@ def test_status_config_error(config_tree: ConfigRoot):
 
 def test_compute_status_defaults_to_all_envs(config_tree: ConfigRoot):
     _built(config_tree)
-    statuses = compute_status(
-        config_tree, RecordingRunner(responder=_existing_env_responder)
-    )
+    statuses = compute_status(config_tree, RecordingRunner(responder=_existing_env_responder))
     assert [s.name for s in statuses] == ["main"]
 
 
@@ -128,9 +114,7 @@ def test_status_local_requirements_change_makes_lock_stale(config_tree: ConfigRo
     # Bump mtime explicitly to ensure it exceeds the lock's mtime.
     future = config_tree.env_requirements_lock("main").stat().st_mtime + 100
     os.utime(local_req, (future, future))
-    status = env_status(
-        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
-    )
+    status = env_status(config_tree, RecordingRunner(responder=_existing_env_responder), "main")
     assert status.state == "lock stale"
 
 
@@ -149,9 +133,7 @@ def test_status_not_created_early_return_when_requirements_missing(
     """Regression: 'not created' must win even when generated files missing."""
     _built(config_tree)
     config_tree.env_requirements_in("main").unlink()
-    status = env_status(
-        config_tree, RecordingRunner(responder=_missing_env_responder), "main"
-    )
+    status = env_status(config_tree, RecordingRunner(responder=_missing_env_responder), "main")
     assert status.state == "not created"
     assert status.created is False
 
@@ -162,9 +144,7 @@ def test_status_requirements_in_deleted_after_build_is_sources_changed(
     """Generated file deleted after build → sources changed (not crash)."""
     _built(config_tree)
     config_tree.env_requirements_in("main").unlink()
-    status = env_status(
-        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
-    )
+    status = env_status(config_tree, RecordingRunner(responder=_existing_env_responder), "main")
     assert status.state == "sources changed"
 
 
@@ -175,9 +155,7 @@ def test_status_lock_deleted_after_build_is_never_built(config_tree: ConfigRoot)
     # Sanity check: lock exists.
     assert lock.is_file()
     lock.unlink()
-    status = env_status(
-        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
-    )
+    status = env_status(config_tree, RecordingRunner(responder=_existing_env_responder), "main")
     assert status.state == "never built"
     assert status.lock_present is False
 
@@ -208,9 +186,7 @@ def test_status_lock_race_condition(config_tree: ConfigRoot):
         return original_stat(self, follow_symlinks=follow_symlinks)
 
     with patch.object(Path, "stat", counting_stat):
-        status = env_status(
-            config_tree, RecordingRunner(responder=_existing_env_responder), "main"
-        )
+        status = env_status(config_tree, RecordingRunner(responder=_existing_env_responder), "main")
 
     assert status.state == "never built"
     assert status.lock_present is False
@@ -228,7 +204,52 @@ def test_dry_run_upgrade_keeps_status_ok(config_tree: ConfigRoot):
         "main",
         UpgradeOptions(dry_run=True),
     )
-    status = env_status(
-        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
-    )
+    status = env_status(config_tree, RecordingRunner(responder=_existing_env_responder), "main")
     assert status.state == "ok"
+
+
+def test_status_actual_python_populated_when_ok(config_tree: ConfigRoot):
+    _built(config_tree)
+    status = env_status(config_tree, RecordingRunner(responder=_existing_env_responder), "main")
+    assert status.state == "ok"
+    assert status.actual_python == "3.12.7"
+
+
+def test_status_python_changed_when_version_drift(config_tree: ConfigRoot):
+    def _mismatched_responder(cmd: Command) -> CommandResult:
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.13.1\n")
+        return CommandResult(returncode=0, stdout="")
+
+    _built(config_tree)
+    status = env_status(config_tree, RecordingRunner(responder=_mismatched_responder), "main")
+    assert status.state == "python changed"
+    assert status.python == "3.12"
+    assert status.actual_python == "3.13.1"
+
+
+def test_status_python_changed_wins_over_sources_changed(config_tree: ConfigRoot):
+    def _mismatched_responder(cmd: Command) -> CommandResult:
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.13.1\n")
+        return CommandResult(returncode=0, stdout="")
+
+    _built(config_tree)
+    # Make sources changed.
+    with config_tree.env_stack_path("main").open("a") as handle:
+        handle.write("httpx\n")
+    status = env_status(config_tree, RecordingRunner(responder=_mismatched_responder), "main")
+    assert status.state == "python changed"
+
+
+def test_status_actual_python_none_when_probe_fails(config_tree: ConfigRoot):
+    _built(config_tree)
+    status = env_status(config_tree, _ExplodingRunner(), "main")
+    assert status.actual_python is None
+
+
+def test_status_actual_python_none_when_not_created(config_tree: ConfigRoot):
+    _built(config_tree)
+    status = env_status(config_tree, RecordingRunner(responder=_missing_env_responder), "main")
+    assert status.state == "not created"
+    assert status.actual_python is None
