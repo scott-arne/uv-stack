@@ -20,14 +20,8 @@ from uv_stack.commands import (
 def test_uv_pip_compile_basic():
     cmd = uv_pip_compile("/py", Path("requirements.in"), Path("out.lock"))
     assert cmd.args == [
-        "uv",
-        "pip",
-        "compile",
-        "--python",
-        "/py",
-        "requirements.in",
-        "-o",
-        "out.lock",
+        "uv", "pip", "compile", "--python", "/py",
+        "requirements.in", "-o", "out.lock",
     ]
 
 
@@ -37,7 +31,9 @@ def test_uv_pip_compile_upgrade_all():
 
 
 def test_uv_pip_compile_upgrade_packages():
-    cmd = uv_pip_compile("/py", Path("r.in"), Path("o"), upgrade_packages=["pandas", "numpy"])
+    cmd = uv_pip_compile(
+        "/py", Path("r.in"), Path("o"), upgrade_packages=["pandas", "numpy"]
+    )
     assert cmd.args.count("--upgrade-package") == 2
     assert "pandas" in cmd.args
     assert "numpy" in cmd.args
@@ -47,14 +43,8 @@ def test_uv_pip_compile_upgrade_packages():
 def test_uv_pip_sync():
     cmd = uv_pip_sync("/py", Path("lock.txt"))
     assert cmd.args == [
-        "uv",
-        "pip",
-        "sync",
-        "--python",
-        "/py",
-        "-C",
-        "editable_mode=compat",
-        "lock.txt",
+        "uv", "pip", "sync", "--python", "/py",
+        "-C", "editable_mode=compat", "lock.txt",
     ]
 
 
@@ -78,23 +68,14 @@ def test_micromamba_create_uses_mamba_exe(monkeypatch):
 def test_micromamba_create(monkeypatch):
     monkeypatch.setenv("MAMBA_EXE", "micromamba")
     assert micromamba_create(Path("env.yml")).args == [
-        "micromamba",
-        "create",
-        "-f",
-        "env.yml",
-        "-y",
+        "micromamba", "create", "-f", "env.yml", "-y",
     ]
 
 
 def test_micromamba_remove(monkeypatch):
     monkeypatch.setenv("MAMBA_EXE", "micromamba")
     assert micromamba_remove("main").args == [
-        "micromamba",
-        "remove",
-        "-n",
-        "main",
-        "--all",
-        "-y",
+        "micromamba", "remove", "-n", "main", "--all", "-y",
     ]
 
 
@@ -166,10 +147,7 @@ def test_uv_add_and_sync():
 
 def test_uv_sync_with_python():
     assert uv_sync("/envs/main/bin/python").args == [
-        "uv",
-        "sync",
-        "--python",
-        "/envs/main/bin/python",
+        "uv", "sync", "--python", "/envs/main/bin/python",
     ]
 
 
