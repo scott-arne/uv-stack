@@ -167,6 +167,32 @@ def upgrade_env(
             # Probe failure (e.g., micromamba not installed): fail open.
             pass
 
+    # Guard: refuse a recreate whose target version uv cannot resolve against.
+    # Resolving before the rebuild means the version must be one uv accepts for
+    # --python-version. is_comparable is that predicate: it was written to
+    # decide whether a drift comparison is meaningful, but the values it
+    # admits — plain dotted versions — are exactly the ones the flag takes.
+    # Refuse here rather than let a conda match spec, which renders into
+    # environment.yml perfectly well, die inside uv with uv's own wording.
+    # Like the drift guard, this sits before the atomic_write calls so a
+    # refusal leaves the generated files — and the dry-run plan below — alone.
+    if options.recreate and not is_comparable(env.python):
+        refusal = ConfigError(
+            f"Cannot recreate env '{env_name}': python.txt requests "
+            f"'{env.python}', which is not a plain version. Recreating "
+            "resolves the lock against the target version before "
+            "rebuilding, and only a plain version can be resolved "
+            "against.",
+            hint=(
+                "Set a plain version such as 3.14 in "
+                f"{config.env_python_path(env_name)}, or upgrade "
+                "without --recreate to keep the current interpreter."
+            ),
+        )
+        # Outside the execution try below, so nothing else attaches these.
+        refusal.resolution_warnings = stack.warnings
+        raise refusal
+
     atomic_write(
         config.env_requirements_in(env_name),
         render_requirements_in(stack, config, env_name),
@@ -215,27 +241,6 @@ def upgrade_env(
 
     try:
         if options.recreate:
-            # Resolving before the rebuild means the version must be one uv
-            # accepts for --python-version. is_comparable is that predicate:
-            # it was written to decide whether a drift comparison is
-            # meaningful, but the values it admits — plain dotted versions —
-            # are exactly the ones the flag takes. Refuse here rather than let
-            # a conda match spec, which renders into environment.yml perfectly
-            # well, die inside uv with uv's own wording.
-            if not is_comparable(env.python):
-                raise ConfigError(
-                    f"Cannot recreate env '{env_name}': python.txt requests "
-                    f"'{env.python}', which is not a plain version. Recreating "
-                    "resolves the lock against the target version before "
-                    "rebuilding, and only a plain version can be resolved "
-                    "against.",
-                    hint=(
-                        "Set a plain version such as 3.14 in "
-                        f"{config.env_python_path(env_name)}, or upgrade "
-                        "without --recreate to keep the current interpreter."
-                    ),
-                )
-
             # The destructive step runs at the last possible moment. An
             # unsatisfiable resolve is the likeliest failure in this sequence,
             # and it is fully detectable up front: uv resolves against

@@ -128,6 +128,24 @@ def test_ensure_env_prefixes_leading_dash_name_in_hint(config_tree: ConfigRoot):
 # ============================================================================
 
 
+def _compile_output(cmd: Command) -> Path:
+    """The path a recorded ``uv pip compile`` was told to write."""
+    return Path(cmd.args[cmd.args.index("-o") + 1])
+
+
+def _assert_compiles_to_candidate(cmd: Command, lock: Path) -> None:
+    """Pin that a compile targets a sibling candidate, not the published lock.
+
+    Without this, a compile that wrote straight into the lock would satisfy
+    every other assertion about the recreate path.
+    """
+    target = _compile_output(cmd)
+    assert target != lock
+    assert target.parent == lock.parent
+    assert target.name.startswith(lock.name + ".")
+    assert target.suffix == ".tmp"
+
+
 def test_upgrade_writes_generated_files_and_runs_sequence(config_tree: ConfigRoot):
     rec = RecordingRunner(responder=_existing_env_responder)
     result = upgrade_env(config_tree, rec, "main", UpgradeOptions())
@@ -239,6 +257,12 @@ def test_upgrade_recreate_failed_compile_never_destroys_the_env(config_tree: Con
         if "run" in cmd.args:
             return CommandResult(returncode=0, stdout="/envs/main/bin/python\n")
         if "compile" in cmd.args:
+            # Write to whatever target the command names before failing, the
+            # way a half-finished uv resolve would. A responder that never
+            # writes cannot tell "compiled to a candidate" from "compiled
+            # straight into the published lock", which is the property the
+            # byte comparison below exists to prove.
+            _compile_output(cmd).write_bytes(b"half-written-candidate\n")
             raise ToolError(
                 "uv pip compile failed.",
                 command=cmd.args,
@@ -252,7 +276,8 @@ def test_upgrade_recreate_failed_compile_never_destroys_the_env(config_tree: Con
         upgrade_env(config_tree, rec, "main", UpgradeOptions(recreate=True))
 
     # The compile really was attempted; the raise below it proves something.
-    assert any("compile" in c.args for c in rec.commands)
+    compile_cmd = next(c for c in rec.commands if "compile" in c.args)
+    _assert_compiles_to_candidate(compile_cmd, lock)
     # The guarantee that matters: the destructive pair never ran.
     assert micromamba_remove("main") not in rec.commands
     assert micromamba_create(config_tree.env_environment_yml("main")) not in rec.commands
@@ -327,6 +352,27 @@ def test_upgrade_recreate_rejects_non_plain_python_version(config_tree: ConfigRo
     assert not any("uv" in c.args for c in rec.commands)
     assert micromamba_remove("main") not in rec.commands
     assert list(config_tree.env_requirements_lock("main").parent.glob("*.tmp")) == []
+    # Refused above the writes, so the "sources changed" signal is preserved.
+    assert not config_tree.env_requirements_in("main").exists()
+    assert not config_tree.env_environment_yml("main").exists()
+
+
+def test_upgrade_dry_run_recreate_rejects_non_plain_python_version(
+    config_tree: ConfigRoot,
+):
+    """A plan must never describe commands the real run would refuse to issue."""
+    config_tree.env_python_path("main").write_text("3.12.*\n")
+
+    rec = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ConfigError) as exc_info:
+        upgrade_env(
+            config_tree, rec, "main", UpgradeOptions(dry_run=True, recreate=True)
+        )
+
+    assert "3.12.*" in str(exc_info.value)
+    assert rec.commands == []
+    assert not config_tree.env_requirements_in("main").exists()
+    assert not config_tree.env_environment_yml("main").exists()
 
 
 def test_upgrade_recreate_compiles_for_version_then_rebuilds(config_tree: ConfigRoot):
@@ -341,6 +387,7 @@ def test_upgrade_recreate_compiles_for_version_then_rebuilds(config_tree: Config
     assert steps[0].args[:5] == ["uv", "pip", "compile", "--python-version", "3.12"]
     # The target interpreter does not exist yet, so it cannot be named.
     assert "--python" not in steps[0].args
+    _assert_compiles_to_candidate(steps[0], lock)
     assert steps[1:] == [
         micromamba_remove("main"),
         micromamba_create(config_tree.env_environment_yml("main")),
