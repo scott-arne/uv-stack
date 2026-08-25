@@ -127,6 +127,12 @@ def create_env(
     """
     if python is not None and not python.strip():
         raise click.UsageError("--python requires a non-empty version.")
+    if python is not None:
+        # Normalize before the is_comparable check below, so the CLI judges the
+        # same string first_clean_line will hand back to the operations layer.
+        # Judging the raw value would refuse ' 3.14 ', which reads back as the
+        # plain version the recreate accepts.
+        python = python.strip()
     if python is not None and not tokens:
         # Refusing up front is deliberate: the alternative writes python.txt
         # and then fails in upgrade_env, leaving the source edited and the env

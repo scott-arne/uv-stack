@@ -1706,6 +1706,29 @@ def test_create_env_python_without_tokens_with_recreate_writes_python_and_recrea
     assert calls[0][1].create is False
 
 
+def test_create_env_python_tolerates_surrounding_whitespace(tmp_path: Path, monkeypatch):
+    """The CLI must judge the value python.txt reads back, not the raw argument.
+
+    is_comparable(' 3.14 ') is False, but first_clean_line strips on read, so
+    the operations layer would have seen a plain 3.14 and accepted it. Judging
+    the raw value would refuse a version the recreate can resolve against.
+    """
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda config, names, options, **kw: None,
+    )
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(root), "create", "env", "main", "--python", " 3.14 ", "--recreate"],
+    )
+    assert result.exit_code == 0
+    assert cfg.env_python_path("main").read_text() == "3.14\n"
+
+
 def test_create_env_python_non_plain_version_leaves_python_txt_alone(tmp_path: Path):
     """A value the recreate will refuse must not be written to python.txt first.
 
