@@ -24,6 +24,23 @@ from uv_stack.resolver import Resolver
 from uv_stack.runner import SubprocessRunner
 
 
+def _require_plain_python(python: str) -> None:
+    """Refuse a ``--python`` value a recreate cannot resolve the lock against.
+
+    A recreate resolves the lock against this value before rebuilding the
+    environment, and the operations layer refuses one uv cannot resolve
+    against. Refusing here too keeps a doomed run from leaving stack.txt and
+    python.txt written.
+
+    :param python: The stripped ``--python`` value.
+    :raises click.UsageError: If the value is not a plain dotted version.
+    """
+    if not is_comparable(python):
+        raise click.UsageError(
+            f"--python must be a plain version such as 3.14, not '{python}'."
+        )
+
+
 def _bare_usage_warnings(
     config: ConfigRoot, name: str, kind: str, *, exclude_bundle: str | None = None
 ) -> list[str]:
@@ -147,13 +164,7 @@ def create_env(
                 "Changing an existing environment's Python version requires "
                 "--recreate; the interpreter is only rebuilt then."
             )
-        if not is_comparable(python):
-            # The recreate below resolves the lock against this value, and the
-            # operations layer refuses one uv cannot resolve against. Refuse it
-            # here too, so a doomed run does not leave python.txt rewritten.
-            raise click.UsageError(
-                f"--python must be a plain version such as 3.14, not '{python}'."
-            )
+        _require_plain_python(python)
         path = write_env_python(config, name, python)
         echo(f"Wrote {path}")
         options = UpgradeOptions(recreate=True, strict=strict)
@@ -162,6 +173,11 @@ def create_env(
         print_activation_hint(name)
         return
     if tokens:
+        if python is not None and recreate:
+            # Only a recreate resolves the lock against this value. Creating
+            # without --recreate compiles against the built interpreter's
+            # path instead, so a conda match spec is still legal there.
+            _require_plain_python(python)
         # Validate before anything durable is written: strict failures,
         # missing explicit references, and malformed profile YAML must not
         # leave a half-created env. flatten() loads every referenced profile.

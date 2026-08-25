@@ -1750,6 +1750,68 @@ def test_create_env_python_non_plain_version_leaves_python_txt_alone(tmp_path: P
     assert cfg.env_python_path("main").read_bytes() == before
 
 
+def test_create_env_python_non_plain_version_with_tokens_writes_nothing(
+    tmp_path: Path, monkeypatch
+):
+    """A non-plain --python with TOKENS and --recreate must refuse before scaffolding.
+
+    The with-TOKENS path writes stack.txt and python.txt before the upgrade runs,
+    so refusing after scaffolding leaves source files holding a value that makes
+    every later --recreate refuse. The refusal must happen before any durable
+    write, and must match the operations layer's own check so the CLI does not
+    promise a run the operations layer is guaranteed to refuse.
+    """
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "create", "env", "fresh", "ds", "--python", "3.12.*", "--recreate"],
+    )
+    assert result.exit_code == 2
+    assert "plain version such as 3.14" in _flat_panel(result)
+    assert not cfg.env_stack_path("fresh").exists()
+    assert not cfg.env_python_path("fresh").exists()
+
+
+def test_create_env_non_plain_python_still_allowed_without_recreate(
+    tmp_path: Path, monkeypatch
+):
+    """--python with a conda match spec still works when --recreate is not given.
+
+    A create without --recreate compiles the lock against the built interpreter's
+    path, not against --python-version, so a conda match spec in python.txt is
+    still legal: environment.yml accepts it and the compile never sees it. The
+    guard only refuses a non-plain version when --recreate is also given, since
+    only the recreate path resolves the lock against python.txt's value.
+    """
+    root = _seeded_root(tmp_path)
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda config, names, options, **kw: calls.append((names, options)),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "create", "env", "fresh", "ds", "--python", "3.12.*"],
+    )
+    assert result.exit_code == 0
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    assert cfg.env_python_path("fresh").read_text() == "3.12.*\n"
+    assert calls and calls[0][0] == ["fresh"]
+    assert calls[0][1].create is True
+    assert calls[0][1].recreate is False
+
+
 def test_create_env_python_with_tokens_unchanged(tmp_path: Path, monkeypatch):
     """--python with TOKENS still scaffolds and creates (existing behavior)."""
     root = _seeded_root(tmp_path)
