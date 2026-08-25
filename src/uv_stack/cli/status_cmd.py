@@ -26,6 +26,7 @@ def status(config: ConfigRoot, names: tuple[str, ...], as_json: bool) -> None:
             {
                 "name": s.name,
                 "python": s.python,
+                "actual_python": s.actual_python,
                 "created": s.created,
                 "lock": s.lock_present,
                 "state": s.state,
@@ -38,10 +39,13 @@ def status(config: ConfigRoot, names: tuple[str, ...], as_json: bool) -> None:
     rows = []
     for s in statuses:
         created = "?" if s.created is None else ("yes" if s.created else "no")
+        python_cell = s.python or "-"
+        if s.actual_python is not None and s.state == "python changed":
+            python_cell = f"{s.python} (env {s.actual_python})"
         rows.append(
             (
                 s.name,
-                s.python or "-",
+                python_cell,
                 created,
                 "yes" if s.lock_present else "no",
                 s.state,

@@ -10,7 +10,7 @@ from uv_stack.runner import Command, CommandResult, RecordingRunner
 
 def _existing_env_responder(cmd: Command) -> CommandResult:
     if "run" in cmd.args:
-        return CommandResult(returncode=0, stdout="/envs/main/bin/python\n")
+        return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.12.7\n")
     return CommandResult(returncode=0, stdout="")
 
 
@@ -232,3 +232,77 @@ def test_dry_run_upgrade_keeps_status_ok(config_tree: ConfigRoot):
         config_tree, RecordingRunner(responder=_existing_env_responder), "main"
     )
     assert status.state == "ok"
+
+
+def test_status_actual_python_populated_when_ok(config_tree: ConfigRoot):
+    _built(config_tree)
+    status = env_status(
+        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
+    )
+    assert status.state == "ok"
+    assert status.actual_python == "3.12.7"
+
+
+def test_status_python_changed_when_version_drift(config_tree: ConfigRoot):
+    def _mismatched_responder(cmd: Command) -> CommandResult:
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.13.1\n")
+        return CommandResult(returncode=0, stdout="")
+
+    _built(config_tree)
+    status = env_status(
+        config_tree, RecordingRunner(responder=_mismatched_responder), "main"
+    )
+    assert status.state == "python changed"
+    assert status.python == "3.12"
+    assert status.actual_python == "3.13.1"
+
+
+def test_status_python_changed_wins_over_sources_changed(config_tree: ConfigRoot):
+    def _mismatched_responder(cmd: Command) -> CommandResult:
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.13.1\n")
+        return CommandResult(returncode=0, stdout="")
+
+    _built(config_tree)
+    # Make sources changed.
+    with config_tree.env_stack_path("main").open("a") as handle:
+        handle.write("httpx\n")
+    status = env_status(
+        config_tree, RecordingRunner(responder=_mismatched_responder), "main"
+    )
+    assert status.state == "python changed"
+
+
+def test_status_actual_python_none_when_probe_fails(config_tree: ConfigRoot):
+    _built(config_tree)
+    status = env_status(config_tree, _ExplodingRunner(), "main")
+    assert status.actual_python is None
+
+
+def test_status_actual_python_none_when_not_created(config_tree: ConfigRoot):
+    _built(config_tree)
+    status = env_status(
+        config_tree, RecordingRunner(responder=_missing_env_responder), "main"
+    )
+    assert status.state == "not created"
+    assert status.actual_python is None
+
+
+def test_status_non_comparable_python_is_not_drift(config_tree: ConfigRoot):
+    """Conda match spec in python.txt is not judged as drift."""
+    def _version_responder(cmd: Command) -> CommandResult:
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.13.1\n")
+        return CommandResult(returncode=0, stdout="")
+
+    # Set python.txt to a conda match spec before building.
+    config_tree.env_python_path("main").write_text(">=3.12\n")
+    rec = RecordingRunner(responder=_version_responder)
+    upgrade_env(config_tree, rec, "main", UpgradeOptions())
+    status = env_status(
+        config_tree, RecordingRunner(responder=_version_responder), "main"
+    )
+    # Should be ok, not python changed, because >=3.12 is not comparable.
+    assert status.state == "ok"
+    assert status.actual_python == "3.13.1"

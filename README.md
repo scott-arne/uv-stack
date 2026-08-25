@@ -212,7 +212,7 @@ Files **you** write:
 | File | Purpose |
 | --- | --- |
 | `stack.txt` | **Required.** One stack token per line; `#` comments allowed |
-| `python.txt` | Interpreter version (defaults to `3.12`) |
+| `python.txt` | Interpreter version (defaults to `3.12`); applied at create and `--recreate` only |
 | `micromamba.txt` | Extra conda packages (e.g. `graphviz`) |
 | `channels.txt` | Extra conda channels (`conda-forge` is always first) |
 | `requirements.local.in` | Machine-local pip additions, kept out of profiles |
@@ -272,7 +272,7 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | Command | What it does |
 | --- | --- |
 | `stack init` | Guided first-run setup (config tree, starter profile, first env) |
-| `stack create env NAME [TOKENS]...` | Scaffold (optional) and build a shared environment (`--recreate` wipes it first) |
+| `stack create env NAME [TOKENS]...` | Scaffold (optional) and build a shared environment (`--recreate` wipes and rebuilds it: the lock is compiled first, and the conda layer is destroyed only if that succeeds) |
 | `stack create profile NAME PKG...` | Write a new profile YAML (`--description`, `--tag`) |
 | `stack create bundle NAME TOKEN...` | Write a new bundle YAML (`--description`, `--tag`) |
 | `stack upgrade [NAMES]...` | Re-render, re-lock, and sync shared environments |
@@ -303,6 +303,27 @@ to the newest allowed versions), then syncs the environment to match the lock
 exactly — packages you removed from a profile are uninstalled. A batch keeps
 going past a failing environment and ends with a `✓`/`✗` summary
 (`--stop-on-error` aborts at the first failure).
+
+`stack upgrade` refuses a non-recreate upgrade when the running interpreter does
+not match `python.txt` — use `stack create env NAME --recreate` to resolve
+the mismatch first.
+
+### Changing an environment's Python version
+
+To upgrade or downgrade an existing environment's interpreter:
+
+```bash
+stack create env NAME --python 3.14 --recreate
+```
+
+`--recreate` requires `python.txt` to hold a plain dotted version such as `3.14`;
+a conda match spec such as `3.12.*` is refused.
+
+The command compiles the candidate lock before destroying the environment, so an
+unsatisfiable resolve leaves the old environment intact. `micromamba.txt`,
+`channels.txt`, and `python.txt` are applied at environment creation and
+`--recreate` only; `stack upgrade` re-syncs the pip layer without rebuilding
+the conda layer.
 
 ### Inspecting
 
@@ -340,9 +361,11 @@ stack status
 
 Shows one row per shared environment: whether the micromamba env exists, whether a
 lock is present, and whether your sources changed since the last build
-(`sources changed` means "run `stack upgrade`"). `--json` makes every
-inspection command (`list`, `show`, `resolve`, `status`, `doctor`)
-script-friendly.
+(`sources changed` means "run `stack upgrade`"). When the running interpreter
+does not match `python.txt`, the state becomes `python changed` and the Python
+column shows both the configured and actual versions (e.g. `3.12 (env 3.14.0)`).
+`--json` makes every inspection command (`list`, `show`, `resolve`, `status`,
+`doctor`) script-friendly.
 
 ### Typo protection
 

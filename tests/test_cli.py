@@ -134,8 +134,14 @@ def test_config_init_reports_the_locks_directory(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_upgrade_dry_run(tmp_path: Path):
+def test_upgrade_dry_run(tmp_path: Path, monkeypatch):
     root = _env_root(tmp_path)
+    # A dry run is subject to the drift guard, so it probes the interpreter for
+    # real. Stub the runner: the machine's own 'main' env must not decide this.
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.SubprocessRunner",
+        lambda: _FakeProbeRunner(stdout="/envs/main/bin/python\n3.12.7\n"),
+    )
     result = CliRunner().invoke(
         cli, ["--root", str(root), "upgrade", "--dry-run", "main"]
     )
@@ -223,6 +229,23 @@ def test_upgrade_dry_run_strict_exits_nonzero_on_failure(tmp_path: Path):
         cli, ["--root", str(root), "upgrade", "--dry-run", "--strict", "test"]
     )
     assert result.exit_code == 1
+
+
+def test_upgrade_refuses_python_version_drift_cli(tmp_path: Path, monkeypatch):
+    """CLI prints the hint when upgrade refuses on Python version drift."""
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.SubprocessRunner",
+        lambda: _FakeProbeRunner(stdout="/envs/main/bin/python\n3.13.1\n"),
+    )
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "main"])
+    assert result.exit_code == 1
+    # Error message mentions both versions.
+    output = _combined_output(result)
+    assert "3.13.1" in output
+    assert "3.12" in output
+    # Hint text reaches the user.
+    assert "--recreate" in output
 
 
 # ---------------------------------------------------------------------------
@@ -1543,12 +1566,14 @@ def test_create_env_with_tokens_scaffolds_and_builds(tmp_path: Path, monkeypatch
 
 
 def test_create_env_python_without_tokens_is_usage_error(tmp_path: Path):
+    """--python without tokens and without --recreate on a new env is a usage error."""
     root = _seeded_root(tmp_path)
     runner = CliRunner()
     result = runner.invoke(
         cli, ["--root", str(root), "create", "env", "fresh", "--python", "3.13"]
     )
     assert result.exit_code == 2
+    assert "--python requires TOKENS when creating a new environment" in _flat_panel(result)
 
 
 def test_create_env_tokens_refuse_existing_stack(tmp_path: Path, monkeypatch):
@@ -1628,6 +1653,185 @@ def test_create_env_python_empty_string_without_tokens_is_usage_error(tmp_path: 
         cli, ["--root", str(root), "create", "env", "fresh", "--python", ""]
     )
     assert result.exit_code == 2
+
+
+def test_create_env_python_without_tokens_new_env_is_usage_error(tmp_path: Path):
+    """--python without tokens on a non-existent env requires TOKENS."""
+    root = _seeded_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "newenv", "--python", "3.14"]
+    )
+    assert result.exit_code == 2
+    assert "--python requires TOKENS when creating a new environment" in _flat_panel(result)
+
+
+def test_create_env_python_without_tokens_existing_env_no_recreate_is_usage_error(tmp_path: Path):
+    """--python without tokens on an existing env requires --recreate."""
+    root = _env_root(tmp_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "main", "--python", "3.14"]
+    )
+    assert result.exit_code == 2
+    output = _flat_panel(result)
+    assert "requires --recreate" in output
+    assert "interpreter is only rebuilt then" in output
+
+
+def test_create_env_python_without_tokens_with_recreate_writes_python_and_recreates(
+    tmp_path: Path, monkeypatch
+):
+    """--python with --recreate and no TOKENS writes python.txt and runs recreate."""
+    root = _env_root(tmp_path)
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda config, names, options, **kw: calls.append((names, options)),
+    )
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    assert cfg.env_python_path("main").read_text() == "3.12\n"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "main", "--python", "3.14", "--recreate"]
+    )
+    assert result.exit_code == 0
+    assert cfg.env_python_path("main").read_text() == "3.14\n"
+    assert "Wrote" in result.output
+    assert str(cfg.env_python_path("main")) in result.output
+    assert calls and calls[0][0] == ["main"]
+    assert calls[0][1].recreate is True
+    assert calls[0][1].create is False
+
+
+def test_create_env_python_tolerates_surrounding_whitespace(tmp_path: Path, monkeypatch):
+    """The CLI must judge the value python.txt reads back, not the raw argument.
+
+    is_comparable(' 3.14 ') is False, but first_clean_line strips on read, so
+    the operations layer would have seen a plain 3.14 and accepted it. Judging
+    the raw value would refuse a version the recreate can resolve against.
+    """
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda config, names, options, **kw: None,
+    )
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(root), "create", "env", "main", "--python", " 3.14 ", "--recreate"],
+    )
+    assert result.exit_code == 0
+    assert cfg.env_python_path("main").read_text() == "3.14\n"
+
+
+def test_create_env_python_non_plain_version_leaves_python_txt_alone(tmp_path: Path):
+    """A value the recreate will refuse must not be written to python.txt first.
+
+    Writing it and then failing in upgrade_env leaves the env config holding a
+    value that makes every later --recreate refuse, recoverable only by hand.
+    """
+    root = _env_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    before = cfg.env_python_path("main").read_bytes()
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "create", "env", "main", "--python", "3.12.*", "--recreate"],
+    )
+    assert result.exit_code == 2
+    assert "plain version such as 3.14" in _flat_panel(result)
+    assert cfg.env_python_path("main").read_bytes() == before
+
+
+def test_create_env_python_non_plain_version_with_tokens_writes_nothing(
+    tmp_path: Path, monkeypatch
+):
+    """A non-plain --python with TOKENS and --recreate must refuse before scaffolding.
+
+    The with-TOKENS path writes stack.txt and python.txt before the upgrade runs,
+    so refusing after scaffolding leaves source files holding a value that makes
+    every later --recreate refuse. The refusal must happen before any durable
+    write, and must match the operations layer's own check so the CLI does not
+    promise a run the operations layer is guaranteed to refuse.
+    """
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "create", "env", "fresh", "ds", "--python", "3.12.*", "--recreate"],
+    )
+    assert result.exit_code == 2
+    assert "plain version such as 3.14" in _flat_panel(result)
+    assert not cfg.env_stack_path("fresh").exists()
+    assert not cfg.env_python_path("fresh").exists()
+
+
+def test_create_env_non_plain_python_still_allowed_without_recreate(
+    tmp_path: Path, monkeypatch
+):
+    """--python with a conda match spec still works when --recreate is not given.
+
+    A create without --recreate compiles the lock against the built interpreter's
+    path, not against --python-version, so a conda match spec in python.txt is
+    still legal: environment.yml accepts it and the compile never sees it. The
+    guard only refuses a non-plain version when --recreate is also given, since
+    only the recreate path resolves the lock against python.txt's value.
+    """
+    root = _seeded_root(tmp_path)
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda config, names, options, **kw: calls.append((names, options)),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "create", "env", "fresh", "ds", "--python", "3.12.*"],
+    )
+    assert result.exit_code == 0
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    assert cfg.env_python_path("fresh").read_text() == "3.12.*\n"
+    assert calls and calls[0][0] == ["fresh"]
+    assert calls[0][1].create is True
+    assert calls[0][1].recreate is False
+
+
+def test_create_env_python_with_tokens_unchanged(tmp_path: Path, monkeypatch):
+    """--python with TOKENS still scaffolds and creates (existing behavior)."""
+    root = _seeded_root(tmp_path)
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.create._run_upgrade",
+        lambda config, names, options, **kw: calls.append((names, options)),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(root), "create", "env", "fresh", "ds", "--python", "3.14"]
+    )
+    assert result.exit_code == 0
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    assert cfg.env_stack_path("fresh").read_text() == "ds\n"
+    assert cfg.env_python_path("fresh").read_text() == "3.14\n"
+    assert calls and calls[0][0] == ["fresh"]
+    assert calls[0][1].create is True
 
 
 def test_create_env_rejects_malformed_profile_before_scaffolding(
@@ -1801,7 +2005,7 @@ def test_doctor_fix_terminates_with_a_permanently_unfixable_finding(tmp_path: Pa
 class _FakeProbeRunner:
     """Stands in for SubprocessRunner in probe-only CLI paths."""
 
-    def __init__(self, stdout: str = "/envs/main/bin/python\n", returncode: int = 0):
+    def __init__(self, stdout: str = "/envs/main/bin/python\n3.12.7\n", returncode: int = 0):
         self._stdout = stdout
         self._returncode = returncode
 
@@ -1919,12 +2123,78 @@ def test_status_json(tmp_path: Path, monkeypatch):
         {
             "name": "main",
             "python": "3.12",
+            "actual_python": "3.12.7",
             "created": True,
             "lock": False,
             "state": "never built",
             "message": None,
         }
     ]
+
+
+def test_status_python_changed_renders_both_versions(tmp_path: Path, monkeypatch):
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
+    from uv_stack.runner import RecordingRunner
+
+    root = _env_root(tmp_path)
+    # Build the env so state is not "never built".
+    def _ok_responder(cmd):
+        from uv_stack.runner import CommandResult
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.12.7\n")
+        return CommandResult(returncode=0, stdout="")
+    upgrade_env(
+        ConfigRoot(root),
+        RecordingRunner(responder=_ok_responder),
+        "main",
+        UpgradeOptions(),
+    )
+    # Now probe with a mismatched version.
+    monkeypatch.setattr(
+        "uv_stack.cli.status_cmd.SubprocessRunner",
+        lambda: _FakeProbeRunner(stdout="/envs/main/bin/python\n3.13.1\n"),
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "status"])
+    assert result.exit_code == 0
+    cells = _row_cells(result.output, "main")
+    assert cells[1] == "3.12 (env 3.13.1)"
+    assert cells[4] == "python changed"
+
+
+def test_status_json_includes_actual_python(tmp_path: Path, monkeypatch):
+    import json
+
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
+    from uv_stack.runner import RecordingRunner
+
+    root = _env_root(tmp_path)
+    # Build the env.
+    def _ok_responder(cmd):
+        from uv_stack.runner import CommandResult
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.12.7\n")
+        return CommandResult(returncode=0, stdout="")
+    upgrade_env(
+        ConfigRoot(root),
+        RecordingRunner(responder=_ok_responder),
+        "main",
+        UpgradeOptions(),
+    )
+    # Probe with mismatched version.
+    monkeypatch.setattr(
+        "uv_stack.cli.status_cmd.SubprocessRunner",
+        lambda: _FakeProbeRunner(stdout="/envs/main/bin/python\n3.13.1\n"),
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "status", "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert len(payload) == 1
+    assert payload[0]["actual_python"] == "3.13.1"
+    assert payload[0]["state"] == "python changed"
 
 
 def test_list_env_json(tmp_path: Path):

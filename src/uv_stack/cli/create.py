@@ -11,11 +11,34 @@ from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import UvStackError
 from uv_stack.operations.project import ProjectOptions, init_project
-from uv_stack.operations.scaffold import write_bundle, write_env_sources, write_profile
+from uv_stack.operations.scaffold import (
+    write_bundle,
+    write_env_python,
+    write_env_sources,
+    write_profile,
+)
 from uv_stack.operations.upgrade import UpgradeOptions
 from uv_stack.parse import read_clean_lines
+from uv_stack.pyversion import is_comparable
 from uv_stack.resolver import Resolver
 from uv_stack.runner import SubprocessRunner
+
+
+def _require_plain_python(python: str) -> None:
+    """Refuse a ``--python`` value a recreate cannot resolve the lock against.
+
+    A recreate resolves the lock against this value before rebuilding the
+    environment, and the operations layer refuses one uv cannot resolve
+    against. Refusing here too keeps a doomed run from leaving stack.txt and
+    python.txt written.
+
+    :param python: The stripped ``--python`` value.
+    :raises click.UsageError: If the value is not a plain dotted version.
+    """
+    if not is_comparable(python):
+        raise click.UsageError(
+            f"--python must be a plain version such as 3.14, not '{python}'."
+        )
 
 
 def _bare_usage_warnings(
@@ -92,7 +115,10 @@ def create() -> None:
     "--python",
     "python",
     default=None,
-    help="Write python.txt with this version (requires TOKENS).",
+    help=(
+        "Write python.txt with this version (with TOKENS: a new env; "
+        "without: an existing env, requires --recreate)."
+    ),
 )
 @click.option("--recreate", is_flag=True, help="Remove and recreate the env first.")
 @click.option(
@@ -112,15 +138,46 @@ def create_env(
     """Create environment NAME, then upgrade it ('--recreate' wipes it first).
 
     With TOKENS, scaffold envs/NAME/stack.txt first (and python.txt when
-    '--python' is given).
+    '--python' is given). Without TOKENS, '--python VERSION --recreate' changes
+    an existing environment's interpreter: the lock is compiled against VERSION
+    before the environment is rebuilt.
     """
-    if python is not None and not tokens:
-        raise click.UsageError(
-            "--python requires TOKENS (it only applies when scaffolding a new env)."
-        )
     if python is not None and not python.strip():
         raise click.UsageError("--python requires a non-empty version.")
+    if python is not None:
+        # Normalize before the is_comparable check below, so the CLI judges the
+        # same string first_clean_line will hand back to the operations layer.
+        # Judging the raw value would refuse ' 3.14 ', which reads back as the
+        # plain version the recreate accepts.
+        python = python.strip()
+    if python is not None and not tokens:
+        # Refusing up front is deliberate: the alternative writes python.txt
+        # and then fails in upgrade_env, leaving the source edited and the env
+        # untouched.
+        stack_path = config.env_stack_path(name)
+        if not stack_path.exists():
+            raise click.UsageError(
+                "--python requires TOKENS when creating a new environment."
+            )
+        if not recreate:
+            raise click.UsageError(
+                "Changing an existing environment's Python version requires "
+                "--recreate; the interpreter is only rebuilt then."
+            )
+        _require_plain_python(python)
+        path = write_env_python(config, name, python)
+        echo(f"Wrote {path}")
+        options = UpgradeOptions(recreate=True, strict=strict)
+        _run_upgrade(config, [name], options)
+        echo("")
+        print_activation_hint(name)
+        return
     if tokens:
+        if python is not None and recreate:
+            # Only a recreate resolves the lock against this value. Creating
+            # without --recreate compiles against the built interpreter's
+            # path instead, so a conda match spec is still legal there.
+            _require_plain_python(python)
         # Validate before anything durable is written: strict failures,
         # missing explicit references, and malformed profile YAML must not
         # leave a half-created env. flatten() loads every referenced profile.

@@ -5,12 +5,14 @@ from pathlib import Path
 from uv_stack import commands
 from uv_stack.commands import (
     micromamba_create,
+    micromamba_python_info,
     micromamba_python_path,
     micromamba_remove,
     uv_add,
     uv_init,
     uv_pip_check,
     uv_pip_compile,
+    uv_pip_compile_for_version,
     uv_pip_sync,
     uv_sync,
 )
@@ -37,6 +39,36 @@ def test_uv_pip_compile_upgrade_packages():
     assert "pandas" in cmd.args
     assert "numpy" in cmd.args
     assert "--upgrade" not in cmd.args
+
+
+def test_uv_pip_compile_for_version_basic():
+    cmd = uv_pip_compile_for_version("3.13", Path("requirements.in"), Path("out.lock"))
+    assert cmd.args == [
+        "uv", "pip", "compile", "--python-version", "3.13",
+        "requirements.in", "-o", "out.lock",
+    ]
+
+
+def test_uv_pip_compile_for_version_upgrade_flags():
+    cmd = uv_pip_compile_for_version(
+        "3.13", Path("r.in"), Path("o"), upgrade=True, upgrade_packages=["pandas"]
+    )
+    assert "--upgrade" in cmd.args
+    assert cmd.args.count("--upgrade-package") == 1
+    assert "pandas" in cmd.args
+
+
+def test_compile_builders_differ_only_in_the_interpreter_selector():
+    # The path form's argv is pinned by existing callers and tests; the version
+    # form must be the same command with a different selector, nothing else.
+    by_path = uv_pip_compile("/py", Path("r.in"), Path("o"), upgrade=True)
+    by_version = uv_pip_compile_for_version("3.13", Path("r.in"), Path("o"), upgrade=True)
+    assert by_path.args[:3] == by_version.args[:3] == ["uv", "pip", "compile"]
+    assert by_path.args[3:5] == ["--python", "/py"]
+    assert by_version.args[3:5] == ["--python-version", "3.13"]
+    assert "--python-version" not in by_path.args
+    assert "--python" not in by_version.args
+    assert by_path.args[5:] == by_version.args[5:]
 
 
 def test_uv_pip_sync():
@@ -83,6 +115,32 @@ def test_micromamba_python_path(monkeypatch):
     cmd = micromamba_python_path("main")
     assert cmd.args[:4] == ["micromamba", "run", "-n", "main"]
     assert "python" in cmd.args
+
+
+def test_micromamba_python_info(monkeypatch):
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("MAMBA_EXE", "micromamba")
+    cmd = micromamba_python_info("main")
+    assert cmd.args[:4] == ["micromamba", "run", "-n", "main"]
+    assert "python" in cmd.args
+    # Verify the snippet prints executable then version.
+    snippet = [arg for arg in cmd.args if "import sys" in arg][0]
+    result = subprocess.run(
+        [sys.executable, "-c", snippet],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lines = result.stdout.strip().splitlines()
+    assert len(lines) == 2
+    assert lines[0] == sys.executable
+    # Verify the version line is three dot-separated integers.
+    version_parts = lines[1].split(".")
+    assert len(version_parts) == 3
+    for part in version_parts:
+        assert part.isdigit()
 
 
 def test_micromamba_exe_prefers_mamba_exe_over_path(monkeypatch):
