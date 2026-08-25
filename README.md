@@ -272,7 +272,7 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | Command | What it does |
 | --- | --- |
 | `stack init` | Guided first-run setup (config tree, starter profile, first env) |
-| `stack create env NAME [TOKENS]...` | Scaffold (optional) and build a shared environment (`--recreate` compiles the lock first, then rebuilds the conda layer if successful) |
+| `stack create env NAME [TOKENS]...` | Scaffold (optional) and build a shared environment (`--recreate` wipes and rebuilds it: the lock is compiled first, and the conda layer is destroyed only if that succeeds) |
 | `stack create profile NAME PKG...` | Write a new profile YAML (`--description`, `--tag`) |
 | `stack create bundle NAME TOKEN...` | Write a new bundle YAML (`--description`, `--tag`) |
 | `stack upgrade [NAMES]...` | Re-render, re-lock, and sync shared environments |
@@ -363,7 +363,7 @@ Shows one row per shared environment: whether the micromamba env exists, whether
 lock is present, and whether your sources changed since the last build
 (`sources changed` means "run `stack upgrade`"). When the running interpreter
 does not match `python.txt`, the state becomes `python changed` and the Python
-column shows both the configured and actual versions (e.g. `3.12 (env 3.14)`).
+column shows both the configured and actual versions (e.g. `3.12 (env 3.14.0)`).
 `--json` makes every inspection command (`list`, `show`, `resolve`, `status`,
 `doctor`) script-friendly.
 

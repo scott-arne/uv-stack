@@ -1,8 +1,10 @@
 """Scaffold writers for user-authored config files.
 
 These write the *source* files a user would otherwise author by hand
-(profile/bundle YAML, an env's ``stack.txt``/``python.txt``). They refuse to
-overwrite existing files — editing belongs to the user — and write atomically.
+(profile/bundle YAML, an env's ``stack.txt``/``python.txt``). They write
+atomically and refuse to overwrite existing files — editing belongs to the
+user. :func:`write_env_python` is the one exception: retargeting an existing
+environment's interpreter is a rewrite by definition, so it overwrites in place.
 """
 
 from __future__ import annotations
