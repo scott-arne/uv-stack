@@ -251,12 +251,82 @@ def test_upgrade_recreate_failed_compile_never_destroys_the_env(config_tree: Con
     with pytest.raises(ToolError):
         upgrade_env(config_tree, rec, "main", UpgradeOptions(recreate=True))
 
+    # The compile really was attempted; the raise below it proves something.
+    assert any("compile" in c.args for c in rec.commands)
     # The guarantee that matters: the destructive pair never ran.
     assert micromamba_remove("main") not in rec.commands
     assert micromamba_create(config_tree.env_environment_yml("main")) not in rec.commands
     # The previous resolution survives, and no candidate lock is left behind.
     assert lock.read_bytes() == b"old-pinned-lock\n"
     assert list(lock.parent.glob("*.tmp")) == []
+
+
+def test_upgrade_recreate_failed_create_leaves_no_candidate_lock(config_tree: ConfigRoot):
+    """The temp-lock guard spans ensure_env, not just the compile."""
+    from uv_stack.errors import ToolError
+
+    lock = config_tree.env_requirements_lock("main")
+    lock.write_bytes(b"old-pinned-lock\n")
+
+    def _create_failure_responder(cmd: Command) -> CommandResult:
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n")
+        if "create" in cmd.args:
+            raise ToolError(
+                "micromamba create failed.", command=cmd.args, returncode=1
+            )
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=_create_failure_responder)
+    with pytest.raises(ToolError):
+        upgrade_env(config_tree, rec, "main", UpgradeOptions(recreate=True))
+
+    # This failure lands after the remove, so the env really is gone — the
+    # window the reorder narrows but cannot close. What must still hold: the
+    # candidate lock is cleaned up, and the published lock was never touched.
+    assert list(lock.parent.glob("*.tmp")) == []
+    assert lock.read_bytes() == b"old-pinned-lock\n"
+
+
+def test_upgrade_recreate_syncs_against_the_rebuilt_interpreter(config_tree: ConfigRoot):
+    """Sync and check must use a probe taken after the rebuild, never before."""
+    rebuilt = False
+
+    def _rebuilding_responder(cmd: Command) -> CommandResult:
+        nonlocal rebuilt
+        if "remove" in cmd.args:
+            rebuilt = True
+            return CommandResult(returncode=0, stdout="")
+        if "run" in cmd.args:
+            path = "/envs/main/bin/python3.13" if rebuilt else "/envs/main/bin/python3.12"
+            return CommandResult(returncode=0, stdout=path + "\n")
+        return CommandResult(returncode=0, stdout="")
+
+    rec = RecordingRunner(responder=_rebuilding_responder)
+    lock = config_tree.env_requirements_lock("main")
+    upgrade_env(config_tree, rec, "main", UpgradeOptions(recreate=True))
+
+    assert uv_pip_sync("/envs/main/bin/python3.13", lock) in rec.commands
+    assert uv_pip_check("/envs/main/bin/python3.13") in rec.commands
+    # The interpreter that existed before the rebuild reaches nothing.
+    assert not any("python3.12" in " ".join(c.args) for c in rec.commands)
+
+
+def test_upgrade_recreate_rejects_non_plain_python_version(config_tree: ConfigRoot):
+    """A conda match spec cannot be resolved against, so recreate refuses first."""
+    config_tree.env_python_path("main").write_text("3.12.*\n")
+
+    rec = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ConfigError) as exc_info:
+        upgrade_env(config_tree, rec, "main", UpgradeOptions(recreate=True))
+
+    assert "3.12.*" in str(exc_info.value)
+    assert "python.txt" in str(exc_info.value)
+    assert str(config_tree.env_python_path("main")) in str(exc_info.value.hint)
+    # Refused before resolving and, above all, before destroying.
+    assert not any("uv" in c.args for c in rec.commands)
+    assert micromamba_remove("main") not in rec.commands
+    assert list(config_tree.env_requirements_lock("main").parent.glob("*.tmp")) == []
 
 
 def test_upgrade_recreate_compiles_for_version_then_rebuilds(config_tree: ConfigRoot):

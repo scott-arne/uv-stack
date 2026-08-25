@@ -23,7 +23,7 @@ from uv_stack.commands import (
     uv_pip_sync,
 )
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import EnvError, UvStackError
+from uv_stack.errors import ConfigError, EnvError, UvStackError
 from uv_stack.fsutil import atomic_write
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.create import ensure_env
@@ -86,8 +86,11 @@ def _new_candidate_lock(lock: Path) -> Path:
     return Path(tmp_name)
 
 
-def _env_python(runner: Runner, env_name: str, probed: str | None = None) -> str:
+def _env_python(runner: Runner, env_name: str, *, probed: str | None = None) -> str:
     """Return the env's interpreter path, reusing an earlier probe when given.
+
+    ``probed`` is keyword-only: passing a stale path here syncs the wrong
+    interpreter, so supplying it must always be a deliberate act.
 
     :param runner: Command runner.
     :param env_name: Environment name.
@@ -121,7 +124,9 @@ def upgrade_env(
     :param env_name: Environment name.
     :param options: Upgrade options.
     :returns: An :class:`UpgradeResult`.
-    :raises ConfigError: If the environment config is missing or invalid.
+    :raises ConfigError: If the environment config is missing or invalid, or if
+        a recreate is requested for an env whose ``python.txt`` is not a plain
+        version.
     :raises EnvError: If the env is missing and creation was not requested.
     :raises ToolError: If a uv/micromamba command fails.
     """
@@ -210,6 +215,27 @@ def upgrade_env(
 
     try:
         if options.recreate:
+            # Resolving before the rebuild means the version must be one uv
+            # accepts for --python-version. is_comparable is that predicate:
+            # it was written to decide whether a drift comparison is
+            # meaningful, but the values it admits — plain dotted versions —
+            # are exactly the ones the flag takes. Refuse here rather than let
+            # a conda match spec, which renders into environment.yml perfectly
+            # well, die inside uv with uv's own wording.
+            if not is_comparable(env.python):
+                raise ConfigError(
+                    f"Cannot recreate env '{env_name}': python.txt requests "
+                    f"'{env.python}', which is not a plain version. Recreating "
+                    "resolves the lock against the target version before "
+                    "rebuilding, and only a plain version can be resolved "
+                    "against.",
+                    hint=(
+                        "Set a plain version such as 3.14 in "
+                        f"{config.env_python_path(env_name)}, or upgrade "
+                        "without --recreate to keep the current interpreter."
+                    ),
+                )
+
             # The destructive step runs at the last possible moment. An
             # unsatisfiable resolve is the likeliest failure in this sequence,
             # and it is fully detectable up front: uv resolves against
@@ -249,7 +275,7 @@ def upgrade_env(
             )
 
             # Reuse the probe from the drift guard when available; otherwise probe now.
-            python = _env_python(runner, env_name, probed_python)
+            python = _env_python(runner, env_name, probed=probed_python)
 
             # Compile to a temp lock, then atomically replace, so a failed compile never
             # corrupts an existing lockfile.
