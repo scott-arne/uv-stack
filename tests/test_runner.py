@@ -270,3 +270,24 @@ def test_subprocess_runner_interactive_honours_cwd(tmp_path):
     )
     assert status == 0
     assert marker.is_file()
+
+
+def test_subprocess_runner_interactive_inherits_the_terminal(tmp_path):
+    """An editor needs the real stdin, stdout and stderr, not pipes.
+
+    ``run`` deliberately captures and tees; this mode must not. Comparing the
+    child's fd identities against the parent's is the only assertion that
+    fails if any redirection is reintroduced.
+    """
+    probe = (
+        "import os, sys, pathlib; "
+        "pathlib.Path(sys.argv[1]).write_text("
+        "repr([(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in (0, 1, 2)]))"
+    )
+    seen = tmp_path / "fds.txt"
+    expected = repr([(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in (0, 1, 2)])
+    status = SubprocessRunner().run_interactive(
+        Command([sys.executable, "-c", probe, str(seen)])
+    )
+    assert status == 0
+    assert seen.read_text() == expected
