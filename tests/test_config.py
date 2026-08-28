@@ -199,3 +199,43 @@ def test_probe_lock_path_cannot_collide_with_a_user_name(config_tree):
     assert config_tree.probe_lock_path() == config_tree.locks_dir / "probe.lock"
     assert config_tree.probe_lock_path() != config_tree.stem_lock_path("probe")
     assert config_tree.probe_lock_path() != config_tree.env_lock_path("probe")
+
+
+def test_editor_path_is_root_scoped(tmp_path: Path):
+    # editor.txt is a property of the config root, not of any one env.
+    assert ConfigRoot(tmp_path).editor_path() == tmp_path / "editor.txt"
+
+
+def test_default_editor_reads_first_clean_line(tmp_path: Path):
+    (tmp_path / "editor.txt").write_text("# my editor\nvim -f\n", encoding="utf-8")
+    assert ConfigRoot(tmp_path).default_editor() == "vim -f"
+
+
+def test_default_editor_is_none_when_absent(tmp_path: Path):
+    assert ConfigRoot(tmp_path).default_editor() is None
+
+
+def test_default_editor_is_none_when_blank(tmp_path: Path):
+    (tmp_path / "editor.txt").write_text("   \n# nothing here\n", encoding="utf-8")
+    assert ConfigRoot(tmp_path).default_editor() is None
+
+
+def test_default_editor_reports_undecodable_file_as_config_error(tmp_path: Path):
+    # UnicodeDecodeError is a ValueError, so unwrapped it escapes the CLI edge,
+    # which renders only UvStackError and OSError.
+    (tmp_path / "editor.txt").write_bytes(b"\xff\xfe vim")
+    with pytest.raises(ConfigError) as excinfo:
+        ConfigRoot(tmp_path).default_editor()
+    assert "not valid UTF-8" in excinfo.value.message
+    assert str(tmp_path / "editor.txt") in excinfo.value.message
+
+
+def test_require_env_accepts_an_env_with_a_stack_file(config_tree: ConfigRoot):
+    config_tree.require_env("main")
+
+
+def test_require_env_reports_a_missing_stack_file(tmp_path: Path):
+    with pytest.raises(ConfigError) as excinfo:
+        ConfigRoot(tmp_path).require_env("ghost")
+    assert "Missing stack file for env 'ghost'" in excinfo.value.message
+    assert "stack create env ghost TOKENS..." in (excinfo.value.hint or "")

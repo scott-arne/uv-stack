@@ -79,6 +79,10 @@ class ConfigRoot:
         """
         return self.root / "project-python.txt"
 
+    def editor_path(self) -> Path:
+        """Path to the root-level editor command file."""
+        return self.root / "editor.txt"
+
     def profile_path(self, name: str) -> Path:
         return self.profiles_dir / f"{name}.yaml"
 
@@ -175,6 +179,26 @@ class ConfigRoot:
         line = first_clean_line(self.project_python_path(), default="")
         return line or None
 
+    def default_editor(self) -> str | None:
+        """Return the editor command configured in ``editor.txt``.
+
+        :returns: The first clean line of ``editor.txt``, or ``None`` when the
+            file is absent or holds nothing but blanks and comments.
+        :raises ConfigError: When the file is not valid UTF-8. The underlying
+            ``UnicodeDecodeError`` is a ``ValueError``, which the CLI edge does
+            not render, and this read happens before the editor launches, so
+            the post-edit validators cannot cover it.
+        """
+        path = self.editor_path()
+        try:
+            line = first_clean_line(path, default="")
+        except UnicodeDecodeError as error:
+            raise ConfigError(
+                f"Cannot read {path}: it is not valid UTF-8.",
+                hint="Re-save editor.txt as UTF-8 text, or delete it.",
+            ) from error
+        return line or None
+
     def _load_yaml_model(
         self, path: Path, name: str, model: type[_ModelT]
     ) -> _ModelT:
@@ -219,17 +243,31 @@ class ConfigRoot:
     def load_bundle(self, name: str) -> Bundle:
         return self._load_yaml_model(self.bundle_path(name), name, Bundle)
 
+    def require_env(self, name: str) -> None:
+        """Raise unless env ``name`` has a stack file.
+
+        Extracted from :meth:`load_env` so callers that must check existence
+        without reading the env's other files — ``stack edit``, which is about
+        to hand one of them to an editor precisely because it is broken — get
+        the identical message.
+
+        :param name: The environment name.
+        :raises ConfigError: When ``stack.txt`` is missing.
+        """
+        if self.env_exists(name):
+            return
+        raise ConfigError(
+            f"Missing stack file for env '{name}': expected {self.env_stack_path(name)}",
+            hint=(
+                # The hint is a command the user is meant to paste; an env
+                # name is a directory name and may contain shell syntax.
+                "Create stack.txt in the env config directory, or pass "
+                f"TOKENS: stack create env {render_positional_arg(name)} TOKENS..."
+            ),
+        )
+
     def load_env(self, name: str) -> EnvConfig:
-        if not self.env_exists(name):
-            raise ConfigError(
-                f"Missing stack file for env '{name}': expected {self.env_stack_path(name)}",
-                hint=(
-                    # The hint is a command the user is meant to paste; an env
-                    # name is a directory name and may contain shell syntax.
-                    "Create stack.txt in the env config directory, or pass "
-                    f"TOKENS: stack create env {render_positional_arg(name)} TOKENS..."
-                ),
-            )
+        self.require_env(name)
         return EnvConfig(
             name=name,
             python=first_clean_line(self.env_python_path(name), default="3.12"),
