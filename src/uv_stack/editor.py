@@ -94,8 +94,6 @@ def editor_argv(editor: EditorCommand, target: Path) -> list[str]:
             f"Cannot parse the editor command from {editor.source}: {error}",
             hint="Check the quoting.",
         ) from error
-    # Filter out empty strings (shlex.split("''") returns [''])
-    parts = [p for p in parts if p]
-    if not parts:
+    if not parts or not parts[0]:
         raise ConfigError("No editor configured.", hint=_CHAIN_HINT)
     return [*parts, str(target)]

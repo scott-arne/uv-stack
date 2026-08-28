@@ -187,3 +187,31 @@ def test_argv_reports_a_command_that_splits_to_nothing(tmp_path: Path):
     with pytest.raises(ConfigError) as excinfo:
         editor_argv(editor, tmp_path / "t.txt")
     assert excinfo.value.message == "No editor configured."
+
+
+def test_interior_empty_argument_is_preserved(tmp_path: Path):
+    """An empty argument can be a load-bearing $0 sentinel in a wrapper command.
+
+    ``sh -c 'exec vim "$@"' ''`` passes an empty ``$0`` to the inner command so
+    ``$@`` starts at the first real argument. Dropping it shifts the appended
+    target into ``$0``, so the editor opens no file.
+    """
+    editor = EditorCommand('vim "" f', "$EDITOR", from_flag=False)
+    assert editor_argv(editor, tmp_path / "t.txt") == [
+        "vim",
+        "",
+        "f",
+        str(tmp_path / "t.txt"),
+    ]
+
+
+def test_leading_empty_executable_is_rejected(tmp_path: Path):
+    """Empty executable must fail, not silently promote the second argument.
+
+    ``"" vim`` should report no editor rather than resolving to executable
+    ``vim`` — the latter would hide a misconfiguration that should surface.
+    """
+    editor = EditorCommand('"" vim', "$EDITOR", from_flag=False)
+    with pytest.raises(ConfigError) as excinfo:
+        editor_argv(editor, tmp_path / "t.txt")
+    assert excinfo.value.message == "No editor configured."
