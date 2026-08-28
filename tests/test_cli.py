@@ -2521,7 +2521,7 @@ def test_init_decline_build_still_surfaces_warnings(tmp_path: Path, monkeypatch)
 
 
 # No leading-dash counterpart: init's name reaches write_env_sources, whose
-# _validate_name refuses a leading '-', so this site cannot render that case.
+# validate_name refuses a leading '-', so this site cannot render that case.
 def test_init_shell_quotes_env_name_in_build_hint(tmp_path: Path, monkeypatch):
     root = tmp_path / "python-envs"
     monkeypatch.setattr(
