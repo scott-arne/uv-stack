@@ -138,6 +138,24 @@ class Runner(Protocol):
         ...
 
 
+class InteractiveRunner(Protocol):
+    """Protocol for running a command that owns the terminal.
+
+    Separate from :class:`Runner` because the two modes are mutually
+    exclusive: ``Runner.run`` captures or tees output, which is exactly what a
+    full-screen editor cannot tolerate.
+    """
+
+    def run_interactive(self, command: Command) -> int:
+        """Run ``command`` with stdin, stdout, and stderr inherited.
+
+        :param command: The command to run.
+        :returns: The child's exit status.
+        :raises ToolError: When the process cannot be started at all.
+        """
+        ...
+
+
 class SubprocessRunner:
     """Runs commands with :mod:`subprocess`."""
 
@@ -195,6 +213,23 @@ class SubprocessRunner:
                 detail=detail or None,
             )
         return CommandResult(returncode=returncode, stdout=stdout)
+
+    def run_interactive(self, command: Command) -> int:
+        """Hand the terminal to ``command`` and wait for it.
+
+        No redirection at all. ``run``'s pty allocation and stderr tee exist so
+        uv's progress bars survive capture; an editor needs a real stdin and
+        would be broken by either.
+
+        :param command: The command to run.
+        :returns: The child's exit status.
+        :raises ToolError: When the process cannot be started at all.
+        """
+        try:
+            completed = subprocess.run(command.args, cwd=command.cwd)
+        except OSError as error:
+            raise _spawn_error(command, error) from error
+        return completed.returncode
 
     @staticmethod
     def _run_with_pty(command: Command) -> tuple[int, str]:
@@ -271,3 +306,10 @@ class RecordingRunner:
         if self.responder is not None:
             return self.responder(command)
         return CommandResult(returncode=0, stdout="")
+
+    def run_interactive(self, command: Command) -> int:
+        """Record an interactive launch and report a scripted status."""
+        self.commands.append(command)
+        if self.responder is not None:
+            return self.responder(command).returncode
+        return 0

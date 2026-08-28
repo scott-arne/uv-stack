@@ -233,3 +233,40 @@ def test_subprocess_runner_unenterable_cwd_hints_the_directory(tmp_path):
     assert exc.value.returncode == 127
     assert "Cannot enter the working directory" in exc.value.hint
     assert "chmod +x" not in exc.value.hint
+
+
+def test_recording_runner_records_interactive_runs():
+    rec = RecordingRunner()
+    assert rec.run_interactive(Command(["vim", "/tmp/x.txt"])) == 0
+    assert rec.commands == [Command(["vim", "/tmp/x.txt"])]
+
+
+def test_recording_runner_interactive_uses_responder():
+    rec = RecordingRunner(responder=lambda command: CommandResult(returncode=3))
+    assert rec.run_interactive(Command(["vim", "/tmp/x.txt"])) == 3
+
+
+def test_subprocess_runner_interactive_returns_child_status():
+    runner = SubprocessRunner()
+    assert runner.run_interactive(Command([sys.executable, "-c", "raise SystemExit(0)"])) == 0
+    assert runner.run_interactive(Command([sys.executable, "-c", "raise SystemExit(7)"])) == 7
+
+
+def test_subprocess_runner_interactive_reports_a_missing_binary():
+    runner = SubprocessRunner()
+    with pytest.raises(ToolError) as excinfo:
+        runner.run_interactive(Command(["uv-stack-no-such-editor-xyz"]))
+    assert excinfo.value.returncode == 127
+
+
+def test_subprocess_runner_interactive_honours_cwd(tmp_path):
+    runner = SubprocessRunner()
+    marker = tmp_path / "here.txt"
+    status = runner.run_interactive(
+        Command(
+            [sys.executable, "-c", "import pathlib; pathlib.Path('here.txt').write_text('x')"],
+            cwd=tmp_path,
+        )
+    )
+    assert status == 0
+    assert marker.is_file()
