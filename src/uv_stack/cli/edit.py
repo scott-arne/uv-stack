@@ -62,7 +62,11 @@ def _require_regular_file(path: Path) -> None:
 
     ``Path.is_file()`` cannot tell a directory named ``channels.txt`` from an
     absent optional file, so without this the editor is handed a path it can
-    never write.
+    never write. For the same reason this must run *before* any
+    ``is_file()``-based existence test on the same path: that test cannot
+    distinguish "absent" from "present but unusable", so it would claim the
+    resource is missing and send the user to ``stack create``, which sees the
+    entry and refuses. On a genuinely absent path this is a no-op.
 
     :raises ConfigError: When something other than a regular file is there.
     """
@@ -91,6 +95,7 @@ def _resolve_target(config: ConfigRoot, kind: str, name: str, file: str) -> Path
     """
     if kind == "profile":
         target = config.profile_path(name)
+        _require_regular_file(target)
         if not target.is_file():
             raise ConfigError(
                 f"Missing profile: {target}",
@@ -101,6 +106,7 @@ def _resolve_target(config: ConfigRoot, kind: str, name: str, file: str) -> Path
             )
     elif kind == "bundle":
         target = config.bundle_path(name)
+        _require_regular_file(target)
         if not target.is_file():
             raise ConfigError(
                 f"Missing bundle: {target}",
@@ -110,15 +116,20 @@ def _resolve_target(config: ConfigRoot, kind: str, name: str, file: str) -> Path
                 ),
             )
     elif kind == "env":
+        # require_env tests stack.txt with is_file(), so a dangling link reads
+        # as an absent file and its hint sends the user to `stack create`,
+        # which refuses the same path because its O_EXCL open sees the link.
+        _require_regular_file(config.env_stack_path(name))
         config.require_env(name)
         target = _env_target(config, name, file)
+        _require_regular_file(target)
     else:
         target = Path.cwd() / "pyproject.toml"
+        _require_regular_file(target)
         if not target.is_file():
             # Shared with the post-edit re-check so both moments give the same
             # hint; see operations/edit.missing_project_error.
             raise missing_project_error(Path.cwd())
-    _require_regular_file(target)
     return target
 
 
@@ -132,7 +143,14 @@ def _argv(editor: EditorCommand, target: Path) -> list[str]:
         return editor_argv(editor, target)
     except ConfigError as error:
         if editor.from_flag:
-            raise click.UsageError(error.message) from error
+            # UsageError renders a bare string, with no hint slot of its own,
+            # so the actionable half would be dropped on the floor. The layout
+            # mirrors render_error's panel, which is what every other error in
+            # the CLI looks like.
+            detail = error.message
+            if error.hint:
+                detail = f"{detail}\n\nHint: {error.hint}"
+            raise click.UsageError(detail) from error
         raise
 
 
