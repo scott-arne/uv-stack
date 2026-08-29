@@ -14,7 +14,7 @@ from pathlib import Path
 
 import rich_click as click
 
-from uv_stack.cli._complete import complete_show_names
+from uv_stack.cli._complete import KIND_CHOICES, complete_show_names
 from uv_stack.cli._render import echo, render_error, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.editor import EditorCommand, editor_argv, resolve_editor
@@ -30,7 +30,6 @@ from uv_stack.operations.edit import missing_project_error, validate
 from uv_stack.operations.scaffold import validate_name
 from uv_stack.runner import Command, InteractiveRunner, SubprocessRunner
 
-_KINDS = ("env", "profile", "bundle", "project")
 _FILES = ("stack", "python", "micromamba", "channels", "local")
 
 
@@ -206,7 +205,7 @@ def _edit_loop(
 
 
 @click.command("edit")
-@click.argument("kind", type=click.Choice(_KINDS))
+@click.argument("kind", type=click.Choice(KIND_CHOICES))
 @click.argument("name", required=False, shell_complete=complete_show_names)
 @click.option(
     "--file",

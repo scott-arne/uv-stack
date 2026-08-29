@@ -7,7 +7,7 @@ from pathlib import Path
 
 import rich_click as click
 
-from uv_stack.cli._complete import complete_show_names
+from uv_stack.cli._complete import KIND_CHOICES, complete_show_names
 from uv_stack.cli._render import echo, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
@@ -18,8 +18,6 @@ from uv_stack.render import render_requirements_in
 from uv_stack.resolver import Resolver
 from uv_stack.runner import SubprocessRunner
 
-_KINDS = ("env", "profile", "bundle", "project")
-
 
 def _probe_interpreter(config: ConfigRoot, name: str) -> str | None:
     """Probe the env's interpreter via the operations layer."""
@@ -27,7 +25,7 @@ def _probe_interpreter(config: ConfigRoot, name: str) -> str | None:
 
 
 @click.command("show")
-@click.argument("kind", type=click.Choice(_KINDS))
+@click.argument("kind", type=click.Choice(KIND_CHOICES))
 @click.argument("name", required=False, shell_complete=complete_show_names)
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.pass_obj

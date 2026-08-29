@@ -1,7 +1,8 @@
-"""Shell-completion callbacks for NAME arguments.
+"""Shared pieces of the KIND/NAME argument pair, and NAME completion.
 
-Every callback swallows all errors and returns an empty list: completion must
-never crash the shell, even with a missing or broken config root.
+Every completion callback swallows all errors and returns an empty list:
+completion must never crash the shell, even with a missing or broken config
+root.
 """
 
 from __future__ import annotations
@@ -11,6 +12,13 @@ from typing import Any
 import rich_click as click
 
 from uv_stack.config import ConfigRoot
+
+#: KIND choices for the commands that accept a project as well as the three
+#: named resources: ``stack show`` and ``stack edit``. Shared because the two
+#: must offer the same set — a KIND one accepts and the other rejects sends
+#: the user to a command that cannot help them. ``stack list`` deliberately
+#: omits ``project``: there is no registry of projects to list.
+KIND_CHOICES = ("env", "profile", "bundle", "project")
 
 
 def _config_from_ctx(ctx: click.Context) -> ConfigRoot:

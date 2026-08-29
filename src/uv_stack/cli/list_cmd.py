@@ -10,6 +10,8 @@ from rich.text import Text
 from uv_stack.cli._render import console, echo, render_table
 from uv_stack.config import ConfigRoot
 
+#: Deliberately not _complete.KIND_CHOICES: listing needs a registry to
+#: enumerate, and projects are wherever the user left them.
 _KINDS = ("env", "profile", "bundle")
 
 #: Max rendered width of the Description and Tags cells before truncation.
