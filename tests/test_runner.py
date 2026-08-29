@@ -297,6 +297,20 @@ def test_subprocess_runner_interactive_reports_a_non_executable_binary(tmp_path)
     assert f"chmod +x {shim}" in excinfo.value.hint
 
 
+def test_subprocess_runner_interactive_shell_quotes_chmod_hint(tmp_path):
+    """A non-executable editor with spaces and metacharacters gets quoted."""
+    from uv_stack.hints import render_positional_arg
+
+    shim = tmp_path / "bad editor; rm -rf /"
+    shim.write_text("#!/bin/sh\n")
+    runner = SubprocessRunner()
+    with pytest.raises(ToolError) as excinfo:
+        runner.run_interactive(Command([str(shim)]))
+    assert excinfo.value.returncode == 127
+    assert "not executable" in excinfo.value.hint
+    assert f"chmod +x {render_positional_arg(str(shim))}" in excinfo.value.hint
+
+
 def test_subprocess_runner_interactive_inherits_the_terminal(tmp_path):
     """An editor needs the real stdin, stdout and stderr, not pipes.
 

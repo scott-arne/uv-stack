@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Protocol
 
 from uv_stack.errors import ToolError
+from uv_stack.hints import render_positional_arg
 
 
 def _pty_supported() -> bool:
@@ -84,7 +85,7 @@ def _spawn_error(command: Command, error: OSError) -> ToolError:
     elif error.errno == errno.EACCES:
         # The message here reads "Permission denied", so the PATH hint below
         # would contradict it: the binary was found, it just cannot be run.
-        hint = f"{exe} is not executable. Try: chmod +x {exe}"
+        hint = f"{exe} is not executable. Try: chmod +x {render_positional_arg(exe)}"
     else:
         hint = f"Is {exe} installed and on PATH?"
     return ToolError(
