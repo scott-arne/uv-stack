@@ -32,7 +32,17 @@ def complete_env_names(
 def complete_show_names(
     ctx: click.Context, param: Any, incomplete: str
 ) -> list[str]:
-    """Complete the NAME argument of ``show`` based on its KIND argument."""
+    """Complete NAME for the commands whose first argument is a KIND.
+
+    Serves both ``stack show`` and ``stack edit``: each takes KIND then NAME,
+    so the candidate list depends on the KIND already typed. ``project`` takes
+    no NAME and yields no candidates.
+
+    :param ctx: Click context, read for the KIND already on the command line.
+    :param param: The parameter being completed; unused.
+    :param incomplete: The partial NAME typed so far.
+    :returns: Matching names, or an empty list when the KIND has none.
+    """
     kind = ctx.params.get("kind")
     try:
         config = _config_from_ctx(ctx)

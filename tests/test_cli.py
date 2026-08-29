@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import rich_click
 from click.testing import CliRunner
 
 from uv_stack.cli import cli
+from uv_stack.runner import Command
 
 
 def _row_cells(output: str, name: str) -> list[str]:
@@ -25,6 +27,13 @@ def _row_cells(output: str, name: str) -> list[str]:
 def _combined_output(result) -> str:
     """stdout plus stderr, tolerant of click versions that separate them."""
     try:
+        # In click 8.x with default CliRunner, result.output already includes
+        # stderr, and result.stderr contains the same content. Concatenating
+        # them would duplicate every error message. Also, when rich prints to
+        # error_console, CliRunner captures it in both streams, so we need to
+        # check if stderr is a subset of stdout to avoid duplication.
+        if result.output == result.stderr or result.stderr in result.output:
+            return result.output
         return result.output + result.stderr
     except (ValueError, AttributeError):
         return result.output
@@ -2538,6 +2547,707 @@ def test_init_shell_quotes_env_name_in_build_hint(tmp_path: Path, monkeypatch):
     )
     assert result.exit_code == 0
     assert "Build it with: stack create env 'bad;touch'" in result.output
+
+
+# ---------------------------------------------------------------------------
+# edit
+# ---------------------------------------------------------------------------
+
+
+class _FakeEditor:
+    """Stands in for SubprocessRunner in edit paths.
+
+    :param edits: One callable per launch, each handed the target path; use it
+        to write whatever that attempt should leave behind. Launches past the
+        end of the list change nothing.
+    :param status: The exit status every launch reports.
+    """
+
+    def __init__(self, *edits, status: int = 0) -> None:
+        self.edits = list(edits)
+        self.status = status
+        self.commands: list[Command] = []
+
+    def run_interactive(self, command: Command) -> int:
+        self.commands.append(command)
+        if self.edits:
+            self.edits.pop(0)(Path(command.args[-1]))
+        return self.status
+
+
+def _install_editor(monkeypatch, fake: _FakeEditor) -> _FakeEditor:
+    monkeypatch.setenv("EDITOR", "fake-editor")
+    for var in ("UV_STACK_EDITOR", "VISUAL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr("uv_stack.cli.edit.SubprocessRunner", lambda: fake)
+    return fake
+
+
+def test_edit_profile_opens_the_profile_file(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "ds"])
+    assert result.exit_code == 0
+    from uv_stack.config import ConfigRoot
+
+    assert fake.commands == [
+        Command(["fake-editor", str(ConfigRoot(root).profile_path("ds"))])
+    ]
+
+
+def test_edit_env_defaults_to_the_stack_file_of_main(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "env"])
+    assert result.exit_code == 0
+    from uv_stack.config import ConfigRoot
+
+    assert fake.commands[0].args[-1] == str(ConfigRoot(root).env_stack_path("main"))
+
+
+@pytest.mark.parametrize(
+    "flag,attr",
+    [
+        ("stack", "env_stack_path"),
+        ("python", "env_python_path"),
+        ("micromamba", "env_micromamba_path"),
+        ("channels", "env_channels_path"),
+        ("local", "env_local_path"),
+    ],
+)
+def test_edit_env_file_selects_the_source(tmp_path: Path, monkeypatch, flag, attr):
+    root = _env_root(tmp_path)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "env", "main", "--file", flag]
+    )
+    assert result.exit_code == 0
+    from uv_stack.config import ConfigRoot
+
+    assert fake.commands[0].args[-1] == str(getattr(ConfigRoot(root), attr)("main"))
+
+
+def test_edit_env_opens_an_absent_optional_file(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    channels = ConfigRoot(root).env_channels_path("main")
+    channels.unlink(missing_ok=True)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "env", "main", "--file", "channels"]
+    )
+    assert result.exit_code == 0
+    assert fake.commands[0].args[-1] == str(channels)
+
+
+@pytest.mark.parametrize(
+    # "stack" is the env default, so it is the half that regresses if --file is
+    # declared default="stack"; "python" is the half that regresses if the
+    # env-only check is dropped. Both are needed on every non-env kind.
+    "file",
+    ["stack", "python"],
+)
+@pytest.mark.parametrize(
+    "kind,name", [("profile", ["ds"]), ("bundle", ["standard"]), ("project", [])]
+)
+def test_edit_rejects_file_on_non_env_kinds(
+    tmp_path: Path, monkeypatch, kind, name, file
+):
+    root = _seeded_root(tmp_path)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", kind, *name, "--file", file]
+    )
+    assert result.exit_code == 2
+    assert "env-only" in _combined_output(result)
+    assert fake.commands == []
+
+
+@pytest.mark.parametrize(
+    "kind,args",
+    [("profile", ["ds"]), ("bundle", ["standard"]), ("project", [])],
+)
+def test_edit_accepts_non_env_kinds_without_file(tmp_path: Path, monkeypatch, kind, args):
+    """The env-only rule must not reject a plain invocation.
+
+    A click default reaches the callback indistinguishably from a typed value,
+    which is why --file defaults to None rather than to "stack".
+    """
+    root = _seeded_root(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", kind, *args])
+    assert result.exit_code == 0
+    assert len(fake.commands) == 1
+
+
+@pytest.mark.parametrize("kind", ["profile", "bundle"])
+def test_edit_requires_a_name_for_profile_and_bundle(tmp_path: Path, monkeypatch, kind):
+    root = _seeded_root(tmp_path)
+    _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", kind])
+    assert result.exit_code == 2
+    assert "requires a NAME" in _combined_output(result)
+
+
+def test_edit_project_rejects_a_name(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "project", "x"])
+    assert result.exit_code == 2
+    assert "takes no NAME" in _combined_output(result)
+
+
+@pytest.mark.parametrize(
+    "name", ["../../../etc/passwd", "../escape", "sub/dir", "a\\b"]
+)
+def test_edit_rejects_a_traversing_name(tmp_path: Path, monkeypatch, name):
+    """The traversal guard, which is the reason validate_name is applied here.
+
+    Unguarded, ``profiles_dir / f"{name}.yaml"`` resolves outside the config
+    root and the resulting path is handed to an editor as a *write* target.
+    """
+    root = _seeded_root(tmp_path)
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("untouched\n", encoding="utf-8")
+    fake = _install_editor(monkeypatch, _FakeEditor(lambda path: path.write_text("x")))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", name])
+    assert result.exit_code == 1
+    assert "Invalid profile name" in _combined_output(result)
+    assert fake.commands == []
+    assert outside.read_text() == "untouched\n"
+
+
+def test_edit_rejects_a_traversing_env_name(tmp_path: Path, monkeypatch):
+    # env routes through a different branch, and names itself "environment" to
+    # match `stack create env`, so it needs its own case.
+    root = _env_root(tmp_path)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "env", "../../../etc"]
+    )
+    assert result.exit_code == 1
+    assert "Invalid environment name" in _combined_output(result)
+    assert fake.commands == []
+
+
+def test_edit_refuses_a_missing_profile(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "ghost"])
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert "Missing profile" in output
+    assert "stack create profile ghost" in output
+    assert fake.commands == []
+
+
+def test_edit_refuses_a_missing_bundle(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "bundle", "ghost"])
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert "Missing bundle" in output
+    assert "stack create bundle ghost" in output
+    assert fake.commands == []
+
+
+def test_edit_refuses_a_missing_env(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "env", "ghost"])
+    assert result.exit_code == 1
+    output = _flat_panel(result)
+    assert "Missing stack file for env 'ghost'" in output
+    assert "stack create env ghost" in output
+    assert fake.commands == []
+
+
+def test_edit_refuses_a_directory_without_a_pyproject(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    monkeypatch.chdir(bare)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "project"])
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert "No pyproject.toml" in output
+    assert "stack create project" in output
+    assert fake.commands == []
+
+
+def test_edit_refuses_a_target_that_is_not_a_regular_file(tmp_path: Path, monkeypatch):
+    root = _env_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    channels = ConfigRoot(root).env_channels_path("main")
+    channels.unlink(missing_ok=True)
+    channels.mkdir()
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "env", "main", "--file", "channels"]
+    )
+    assert result.exit_code == 1
+    assert "Not a regular file" in _combined_output(result)
+    assert fake.commands == []
+
+
+def test_edit_reports_no_configured_editor(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    for var in ("UV_STACK_EDITOR", "VISUAL", "EDITOR"):
+        monkeypatch.delenv(var, raising=False)
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "ds"])
+    assert result.exit_code == 1
+    assert "No editor configured." in _combined_output(result)
+
+
+def test_edit_rejects_an_empty_editor_flag(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "profile", "ds", "--editor", ""]
+    )
+    assert result.exit_code == 2
+    assert "--editor needs a command" in _combined_output(result)
+
+
+def test_edit_reports_unparseable_editor_flag_as_usage(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "profile", "ds", "--editor", 'code "-w']
+    )
+    assert result.exit_code == 2
+    assert "Cannot parse the editor command from --editor" in _combined_output(result)
+
+
+def test_edit_reports_unparseable_stored_editor_as_config_error(
+    tmp_path: Path, monkeypatch
+):
+    root = _seeded_root(tmp_path)
+    monkeypatch.setenv("UV_STACK_EDITOR", 'code "-w')
+    for var in ("VISUAL", "EDITOR"):
+        monkeypatch.delenv(var, raising=False)
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "ds"])
+    assert result.exit_code == 1
+    assert "Cannot parse the editor command from $UV_STACK_EDITOR" in _combined_output(
+        result
+    )
+
+
+def test_edit_reports_a_nonzero_editor_exit_without_validating(
+    tmp_path: Path, monkeypatch
+):
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    def _break_it(path: Path) -> None:
+        path.write_text("includes: not-a-list\n", encoding="utf-8")
+
+    _install_editor(monkeypatch, _FakeEditor(_break_it, status=3))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "ds"])
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert "Editor exited with status 3" in output
+    # The abort is about the editor, not about the file it left behind: a
+    # non-zero exit means "I did not finish", so validating would be guesswork.
+    assert "Invalid profile config in" not in output
+    assert ConfigRoot(root).profile_path("ds").read_text() == "includes: not-a-list\n"
+
+
+def test_edit_reoffers_the_editor_until_the_file_is_valid(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+
+    def _break_it(path: Path) -> None:
+        path.write_text("includes: not-a-list\n", encoding="utf-8")
+
+    def _fix_it(path: Path) -> None:
+        path.write_text("includes:\n  - requests\n", encoding="utf-8")
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_break_it, _fix_it))
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "profile", "ds"], input="y\n"
+    )
+    assert result.exit_code == 0
+    assert len(fake.commands) == 2
+    assert "Validated" in _combined_output(result)
+
+
+def test_edit_declining_the_reoffer_exits_nonzero(tmp_path: Path, monkeypatch):
+    """Declining leaves the file exactly as the editor left it.
+
+    `edit` never reverts, backs up, or discards: declining is itself the escape
+    hatch, and a user who chose 'n' to go fix the file by hand must still find
+    their edit on disk. Asserting the content is the only thing that catches a
+    regression that starts restoring the original.
+    """
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+    broken = "includes: not-a-list\n"
+
+    def _break_it(path: Path) -> None:
+        path.write_text(broken, encoding="utf-8")
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_break_it))
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "profile", "ds"], input="n\n"
+    )
+    assert result.exit_code == 1
+    assert len(fake.commands) == 1
+    assert ConfigRoot(root).profile_path("ds").read_text() == broken
+
+
+def test_edit_renders_the_failure_panel_exactly_once(tmp_path: Path, monkeypatch):
+    # The loop is the sole renderer; re-raising would have UvStackGroup.invoke
+    # print the identical panel a second time.
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+    monkeypatch.setenv("COLUMNS", "200")
+
+    def _break_it(path: Path) -> None:
+        path.write_text("includes: not-a-list\n", encoding="utf-8")
+
+    _install_editor(monkeypatch, _FakeEditor(_break_it))
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "profile", "ds"], input="n\n"
+    )
+    assert result.exit_code == 1
+    assert _combined_output(result).count("Invalid profile config in") == 1
+
+
+def test_edit_does_not_prompt_without_a_tty(tmp_path: Path, monkeypatch):
+    # _stdin_is_tty is left real here: CliRunner's stdin is not a terminal, so
+    # this covers the genuine non-interactive path.
+    root = _seeded_root(tmp_path)
+
+    def _break_it(path: Path) -> None:
+        path.write_text("includes: not-a-list\n", encoding="utf-8")
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_break_it))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "ds"])
+    assert result.exit_code == 1
+    assert len(fake.commands) == 1
+    assert "Re-open the editor?" not in _combined_output(result)
+
+
+def test_edit_does_not_reoffer_a_newer_schema(tmp_path: Path, monkeypatch):
+    # Re-editing cannot satisfy a forward-schema refusal, so looping the user
+    # through the editor again would be a trap.
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+
+    def _bump_schema(path: Path) -> None:
+        path.write_text(
+            '[project]\nname = "x"\nversion = "0.1.0"\n\n'
+            "[tool.uv-stack]\nversion = 2\nstack = []\n",
+            encoding="utf-8",
+        )
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_bump_schema))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "project"], input="y\n")
+    assert result.exit_code == 1
+    assert len(fake.commands) == 1
+    assert "Re-open the editor?" not in _combined_output(result)
+
+
+def test_edit_project_reports_a_deleted_pyproject(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+    _install_editor(monkeypatch, _FakeEditor(lambda path: path.unlink()))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "project"], input="n\n")
+    assert result.exit_code == 1
+    assert "No pyproject.toml" in _combined_output(result)
+
+
+def test_edit_reoffers_after_an_unresolvable_bundle_token(tmp_path: Path, monkeypatch):
+    """ResolutionError is a sibling of ConfigError, not a subclass.
+
+    A loop that caught only ConfigError would let this reach the CLI panel with
+    no re-open offered — precisely the typo the loop exists to catch.
+    """
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+
+    def _break_it(path: Path) -> None:
+        path.write_text("includes:\n  - profile:ghost\n", encoding="utf-8")
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_break_it))
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "bundle", "standard"], input="n\n"
+    )
+    assert result.exit_code == 1
+    assert len(fake.commands) == 1
+    assert "Re-open the editor?" in _combined_output(result)
+
+
+def test_edit_refuses_a_self_referencing_bundle(tmp_path: Path, monkeypatch):
+    """`create bundle` refuses this, so `edit bundle` must too.
+
+    The resolver alone would not catch it: at edit time the bundle exists, so
+    the reference resolves and the recursion guard silently drops it.
+    """
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+
+    def _self_include(path: Path) -> None:
+        path.write_text("includes:\n  - ds\n  - standard\n", encoding="utf-8")
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_self_include))
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "bundle", "standard"], input="n\n"
+    )
+    assert result.exit_code == 1
+    assert len(fake.commands) == 1
+    assert "cannot include itself" in _combined_output(result)
+
+
+def test_edit_reoffers_after_an_unresolvable_project_token(tmp_path: Path, monkeypatch):
+    """read_tracking answers "well-formed?", not "do these tokens name anything?".
+
+    `stack refresh` resolves the same list, so accepting this would report
+    success on a file the very next command rejects.
+    """
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+
+    def _track_a_ghost(path: Path) -> None:
+        path.write_text(
+            '[project]\nname = "x"\nversion = "0.1.0"\n\n'
+            '[tool.uv-stack]\nversion = 1\nstack = ["profile:missing"]\n',
+            encoding="utf-8",
+        )
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_track_a_ghost))
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "project"], input="n\n"
+    )
+    assert result.exit_code == 1
+    assert len(fake.commands) == 1
+    output = _combined_output(result)
+    assert "Re-open the editor?" in output
+    assert "Validated" not in output
+
+
+def test_edit_reports_undecodable_local_requirements(tmp_path: Path, monkeypatch):
+    """render_requirements_in emits '-r <path>' without opening the file.
+
+    Nothing in the env chain would otherwise notice that the file just edited
+    is undecodable, and UnicodeDecodeError is a ValueError, so it would escape
+    the CLI edge as a traceback rather than a panel.
+    """
+    root = _env_root(tmp_path)
+
+    def _corrupt(path: Path) -> None:
+        path.write_bytes(b"\xff\xfe requests\n")
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_corrupt))
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "env", "main", "--file", "local"]
+    )
+    assert result.exit_code == 1
+    assert len(fake.commands) == 1
+    output = _flat_panel(result)
+    assert "not valid UTF-8" in output
+    assert "Validated" not in output
+    assert "Traceback" not in output
+
+
+def test_edit_reports_an_editor_that_is_not_on_path(tmp_path: Path, monkeypatch):
+    """The real SubprocessRunner is used here: the point is the spawn failure.
+
+    _spawn_error turns the bare OSError into the same ToolError a missing `uv`
+    produces, so this must not go through _FakeEditor.
+    """
+    root = _seeded_root(tmp_path)
+    for var in ("UV_STACK_EDITOR", "VISUAL", "EDITOR"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("COLUMNS", "200")
+    missing = str(tmp_path / "no-such-editor")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "profile", "ds", "--editor", missing]
+    )
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert "no-such-editor" in output
+    assert "installed and on PATH" in output
+
+
+def test_edit_missing_target_preserves_bracketed_name(tmp_path: Path, monkeypatch):
+    """The missing-target message carries a user-supplied NAME.
+
+    validate_name permits '[', so a name that is also valid rich markup
+    reaches this panel. Unescaped, rich would render it as nothing.
+    """
+    root = _seeded_root(tmp_path)
+    _install_editor(monkeypatch, _FakeEditor())
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "profile", "ds[extra]"]
+    )
+    assert result.exit_code == 1
+    assert "ds[extra].yaml" in _combined_output(result)
+
+
+def test_edit_success_output_preserves_a_bracketed_env_name(
+    tmp_path: Path, monkeypatch
+):
+    """Both halves of the success row: the Validated line and the hint.
+
+    The spec's rendering table lists them as one row, and they have separate
+    protections — the Validated line carries a raw path, the hint carries a
+    shell-quoted name — so both are asserted here and both are mutated in the
+    mutation-proof step.
+    """
+    root = _env_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    src = cfg.env_dir("main")
+    dst = cfg.env_dir("main[x]")
+    shutil.copytree(src, dst)
+    _install_editor(monkeypatch, _FakeEditor())
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "env", "main[x]"])
+    assert result.exit_code == 0
+    assert f"Validated {cfg.env_stack_path('main[x]')}" in result.output
+    assert "Apply it with: stack upgrade 'main[x]'" in result.output
+
+
+def test_edit_non_regular_file_preserves_bracketed_path(tmp_path: Path, monkeypatch):
+    """The "Not a regular file" refusal names the target path."""
+    root = _env_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    shutil.copytree(cfg.env_dir("main"), cfg.env_dir("main[x]"))
+    channels = cfg.env_channels_path("main[x]")
+    channels.unlink(missing_ok=True)
+    channels.mkdir()
+    _install_editor(monkeypatch, _FakeEditor())
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "env", "main[x]", "--file", "channels"]
+    )
+    assert result.exit_code == 1
+    assert "main[x]" in _combined_output(result)
+
+
+def test_edit_malformed_stored_editor_preserves_a_bracketed_source(
+    tmp_path: Path, monkeypatch
+):
+    """The parse failure names its source, which for editor.txt is a path.
+
+    The editor *command* is deliberately not interpolated (see editor_argv), so
+    the user data on this row is the config-root path the source is spelled
+    with.
+    """
+    root = _seeded_root(tmp_path).rename(tmp_path / "python-envs[1]")
+    (root / "editor.txt").write_text('code "-w\n', encoding="utf-8")
+    for var in ("UV_STACK_EDITOR", "VISUAL", "EDITOR"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "ds"])
+    assert result.exit_code == 1
+    assert "python-envs[1]" in _combined_output(result)
+
+
+def test_edit_spawn_failure_preserves_a_bracketed_editor_path(
+    tmp_path: Path, monkeypatch
+):
+    """_spawn_error puts argv[0] into both the message and the hint."""
+    root = _seeded_root(tmp_path)
+    for var in ("UV_STACK_EDITOR", "VISUAL", "EDITOR"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("COLUMNS", "200")
+    missing = str(tmp_path / "bin[1]" / "nano")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "profile", "ds", "--editor", missing]
+    )
+    assert result.exit_code == 1
+    assert "bin[1]" in _combined_output(result)
+
+
+def test_edit_validator_failure_preserves_a_bracketed_path(tmp_path: Path, monkeypatch):
+    """Loader messages name the file, and validate_name permits '['."""
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    ConfigRoot(root).profile_path("ds[x]").write_text(
+        "includes:\n  - numpy\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("COLUMNS", "200")
+
+    def _break_it(path: Path) -> None:
+        path.write_text("includes: not-a-list\n", encoding="utf-8")
+
+    _install_editor(monkeypatch, _FakeEditor(_break_it))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "ds[x]"])
+    assert result.exit_code == 1
+    assert "ds[x].yaml" in _combined_output(result)
+
+
+def test_edit_warning_preserves_bracketed_text(tmp_path: Path, monkeypatch):
+    """The untracked-project warning names [tool.uv-stack], which is markup."""
+    root = _seeded_root(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+    _install_editor(monkeypatch, _FakeEditor())
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "project"])
+    assert result.exit_code == 0
+    assert "no [tool.uv-stack] table" in _combined_output(result)
+
+
+def test_edit_appears_in_help_under_its_own_group(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--help"], prog_name="stack")
+    assert result.exit_code == 0
+    assert "Edit" in result.output
+    # The command docstring's summary line, which click uses as the short help.
+    assert "Open a config file in your editor" in result.output
+
+
+def test_edit_help_documents_the_file_and_editor_options(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["edit", "--help"])
+    assert result.exit_code == 0
+    output = result.output
+    assert "env only" in output
+    assert "stack" in output and "micromamba" in output and "local" in output
+    assert "--editor" in output
 
 
 # ---------------------------------------------------------------------------
