@@ -392,3 +392,20 @@ def test_validate_project_runs_the_refresh_write_preflight(
     with pytest.raises(ConfigError) as excinfo:
         validate(config_tree, "project", "", project)
     assert "Refusing to modify" in excinfo.value.message
+
+
+def test_validate_project_refuses_a_non_table_project_value(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    # The ownership read reaches [project] through a nested .get; a scalar
+    # there raised AttributeError, which is not a UvStackError and so left the
+    # re-offer loop with a traceback instead of something to show the user.
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        'project = 1\n\n[tool.uv-stack]\nversion = 1\nstack = ["ds"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "project", "", project)
+    assert "must be a table" in excinfo.value.message

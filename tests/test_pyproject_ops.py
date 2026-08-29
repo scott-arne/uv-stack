@@ -693,3 +693,22 @@ def test_read_project_dependency_names_refuses_a_non_list(tmp_path: Path):
     with pytest.raises(ConfigError) as excinfo:
         read_project_dependency_names(pyproject)
     assert "must be an array" in excinfo.value.message
+
+
+def test_read_tracking_refuses_a_non_table_tool(tmp_path: Path):
+    """A scalar 'tool' key would make the nested .get raise AttributeError."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('tool = 1\n[project]\nname = "x"\nversion = "0.1.0"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert "must be a table" in excinfo.value.message
+
+
+def test_read_project_dependency_names_refuses_a_non_table_project(tmp_path: Path):
+    """Scalar and array-of-tables 'project' values are both refused."""
+    pyproject = tmp_path / "pyproject.toml"
+    for text in ('project = 1\n', 'project = "x"\n', '[[project]]\nname = "x"\n'):
+        pyproject.write_text(text)
+        with pytest.raises(ConfigError) as excinfo:
+            read_project_dependency_names(pyproject)
+        assert "must be a table" in excinfo.value.message
