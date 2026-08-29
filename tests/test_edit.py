@@ -308,6 +308,17 @@ def test_validate_project_reports_a_deleted_pyproject(
     assert "No pyproject.toml" in excinfo.value.message
 
 
+def test_validate_project_rejects_undecodable_bytes(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_bytes(b'[project]\nname = "\xff\xfe"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "project", "", project)
+    assert "not valid UTF-8" in excinfo.value.message
+
+
 def test_validate_project_resolves_tracked_stack_tokens(
     config_tree: ConfigRoot, tmp_path: Path
 ):

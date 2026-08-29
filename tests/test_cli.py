@@ -2881,6 +2881,63 @@ def test_edit_refuses_a_broken_symlink(tmp_path: Path, monkeypatch):
     assert fake.commands == []
 
 
+@pytest.mark.parametrize(
+    "break_it,expected",
+    [
+        (lambda path: path.mkdir(), "Not a regular file"),
+        (lambda path: path.symlink_to(path.parent / "nowhere"), "Broken symlink"),
+    ],
+    ids=["directory", "dangling-symlink"],
+)
+@pytest.mark.parametrize(
+    # The four paths that sit behind an is_file() existence check. The fifth,
+    # an optional env file, has no such check and was the only one the guard
+    # ever reached.
+    "kind",
+    ["profile", "bundle", "project", "env"],
+)
+def test_edit_refuses_a_non_regular_file_on_every_target_path(
+    tmp_path: Path, monkeypatch, kind, break_it, expected
+):
+    """A broken target must be named as such, not reported as missing.
+
+    ``is_file()`` is False for a directory and for a dangling symlink alike, so
+    an existence check that runs first calls the resource absent and hints at
+    ``stack create`` — which refuses the very same path because it is not.
+    Asserting the stale wording is gone is the half that pins the deadlock.
+    """
+    from uv_stack.config import ConfigRoot
+
+    if kind == "project":
+        root = _seeded_root(tmp_path)
+        work = tmp_path / "proj"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        target = work / "pyproject.toml"
+        args = ["edit", "project"]
+        stale = "No pyproject.toml"
+    elif kind == "env":
+        root = _env_root(tmp_path)
+        target = ConfigRoot(root).env_stack_path("main")
+        args = ["edit", "env", "main", "--file", "stack"]
+        stale = "Missing stack file"
+    else:
+        root = _seeded_root(tmp_path)
+        target = getattr(ConfigRoot(root), f"{kind}_path")("broken")
+        args = ["edit", kind, "broken"]
+        stale = f"Missing {kind}"
+    target.unlink(missing_ok=True)
+    break_it(target)
+
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), *args])
+    assert result.exit_code == 1
+    output = _flat_panel(result)
+    assert expected in output
+    assert stale not in output
+    assert fake.commands == []
+
+
 def test_edit_symlinked_profile_names_the_real_file(tmp_path: Path, monkeypatch):
     """When the target is a symlink, the success line names the resolved file."""
     root = _seeded_root(tmp_path)
@@ -2938,7 +2995,12 @@ def test_edit_reports_unparseable_editor_flag_as_usage(tmp_path: Path, monkeypat
         cli, ["--root", str(root), "edit", "profile", "ds", "--editor", 'code "-w']
     )
     assert result.exit_code == 2
-    assert "Cannot parse the editor command from --editor" in _combined_output(result)
+    # Flattened: the hint is folded in below the message, so the panel wraps.
+    output = _flat_panel(result)
+    assert "Cannot parse the editor command from --editor" in output
+    # UsageError has no hint slot, so the actionable half must be folded into
+    # the message or the user is told only that something is wrong.
+    assert "Hint: Check the quoting." in output
 
 
 def test_edit_reports_unparseable_stored_editor_as_config_error(
@@ -3363,7 +3425,10 @@ def test_edit_help_documents_the_file_and_editor_options(monkeypatch):
     assert result.exit_code == 0
     output = result.output
     assert "env only" in output
-    assert "stack" in output and "micromamba" in output and "local" in output
+    # "channels" rather than "stack": the latter also appears in the option's
+    # own "defaults to 'stack'" help, so it holds however broken the choices
+    # are. Each of these three appears only in the --file choice list.
+    assert "channels" in output and "micromamba" in output and "local" in output
     assert "--editor" in output
 
 
