@@ -678,3 +678,18 @@ def test_find_span_survives_crlf(tmp_path: Path):
     raw = pyproject.read_bytes()
     assert b'name = "demo"\r\n' in raw
     assert read_tracking(pyproject) == _tracking()
+
+
+def test_read_project_dependency_names_refuses_a_non_list(tmp_path: Path):
+    """A scalar iterates as characters or not at all; both are refused."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "x"\nversion = "0.1.0"\ndependencies = 1\n')
+    with pytest.raises(ConfigError) as excinfo:
+        read_project_dependency_names(pyproject)
+    assert "must be an array" in excinfo.value.message
+
+    # String shape also refused: iterates as characters, not package names
+    pyproject.write_text('[project]\nname = "x"\nversion = "0.1.0"\ndependencies = "numpy"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        read_project_dependency_names(pyproject)
+    assert "must be an array" in excinfo.value.message

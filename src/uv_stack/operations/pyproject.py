@@ -392,14 +392,24 @@ def read_project_dependency_names(pyproject: Path) -> set[str]:
     Includes names from PEP 508 direct references (``pkg @ https://...``).
     VCS-style entries (``git+https://...``) remain excluded.
 
-    Unreadable/missing files yield the empty set (refresh's own tracking
-    read reports real errors).
+    Unreadable/missing files yield the empty set; a readable file with the
+    wrong shape is refused.
+
+    :raises ConfigError: When ``[project.dependencies]`` is not an array.
     """
     try:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return set()
     dependencies = data.get("project", {}).get("dependencies", [])
+    if not isinstance(dependencies, list):
+        # A bare string is the dangerous shape: it iterates as characters, so
+        # ownership would be computed from single letters instead of failing.
+        # Anything else is a TypeError one frame later. PEP 621 says array.
+        raise ConfigError(
+            f"[project.dependencies] in {pyproject} must be an array of strings.",
+            hint="Replace the value with a list, e.g. dependencies = [].",
+        )
     names: set[str] = set()
     for dependency in dependencies:
         if isinstance(dependency, str):

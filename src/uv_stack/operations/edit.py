@@ -15,7 +15,11 @@ from pathlib import Path
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
-from uv_stack.operations.pyproject import read_tracking
+from uv_stack.operations.pyproject import (
+    read_project_dependency_names,
+    read_tracking,
+    validate_tracking_write,
+)
 from uv_stack.render import render_environment_yml, render_requirements_in
 from uv_stack.resolver import Resolver, bundle_self_references
 
@@ -137,8 +141,9 @@ def validate_project(config: ConfigRoot, cwd: Path) -> list[str]:
     :param cwd: The directory holding ``pyproject.toml``.
     :returns: Warnings; a single advisory when the file carries no
         ``[tool.uv-stack]`` table.
-    :raises ConfigError: When the file was deleted, is unreadable, or its
-        tracking table fails the schema.
+    :raises ConfigError: When the file was deleted, is unreadable, its
+        tracking table fails the schema, ``[project.dependencies]`` is
+        malformed, or the file would be refused by the write preflight.
     :raises NewerSchemaError: When the table declares a newer schema.
     :raises ResolutionError: When a tracked stack token cannot be resolved.
     """
@@ -155,6 +160,12 @@ def validate_project(config: ConfigRoot, cwd: Path) -> list[str]:
             f"{pyproject} has no [tool.uv-stack] table; 'stack refresh' will "
             "not manage this project."
         ]
+    with _decoding(str(pyproject)):
+        # Both of these are things `stack refresh` does before it mutates
+        # anything, and neither has a side effect. Skipping them lets the
+        # re-offer loop call a file valid that the next refresh refuses.
+        read_project_dependency_names(pyproject)
+        validate_tracking_write(pyproject, tracking)
     with _decoding(f"a file under {config.root}"):
         resolver = Resolver(config)
         stack = resolver.resolve(tracking.stack)

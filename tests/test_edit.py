@@ -356,3 +356,39 @@ def test_validate_project_reuses_the_pre_launch_missing_hint(
     assert excinfo.value.message == shared.message
     assert excinfo.value.hint == shared.hint
     assert "stack create project" in (shared.hint or "")
+
+
+def test_validate_project_refuses_a_malformed_dependencies_value(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    # refresh reads [project.dependencies] for ownership before it mutates
+    # anything; a non-list crashes it with a bare TypeError, so accepting the
+    # file here would send the user back out to a traceback.
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = 1\n\n'
+        '[tool.uv-stack]\nversion = 1\nstack = ["ds"]\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "project", "", project)
+    assert "must be an array" in excinfo.value.message
+
+
+def test_validate_project_runs_the_refresh_write_preflight(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    # read_tracking reads with universal newlines and accepts lone carriage
+    # returns; refresh's pre-mutation preflight reads with newline="" and
+    # refuses them. Without the preflight here the loop reports success on a
+    # file the next refresh will not touch.
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_bytes(
+        b'[project]\rname = "x"\rversion = "0.1.0"\rdependencies = []\r\r'
+        b'[tool.uv-stack]\rversion = 1\rstack = ["ds"]\r'
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "project", "", project)
+    assert "Refusing to modify" in excinfo.value.message
