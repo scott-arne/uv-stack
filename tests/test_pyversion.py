@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from uv_stack.pyversion import is_comparable, parse_python_info, satisfies
+from uv_stack.pyversion import (
+    is_comparable,
+    is_near_miss_version,
+    near_miss_version_notice,
+    parse_python_info,
+    satisfies,
+)
 
 
 def test_parse_python_info_both_lines():
@@ -86,6 +92,53 @@ def test_is_comparable_rejects_what_int_would_accept():
     assert is_comparable("+3.14") is False
     assert is_comparable("3.1_2") is False
     assert is_comparable("٣.١٢") is False
+
+
+def test_is_near_miss_version_catches_botched_versions():
+    assert is_near_miss_version("3.12.x") is True
+    assert is_near_miss_version("3.12.*") is True
+    assert is_near_miss_version("3.l2") is True
+    assert is_near_miss_version("3.12rc1") is True
+    assert is_near_miss_version("3.") is True
+
+
+def test_is_near_miss_version_passes_plain_versions():
+    assert is_near_miss_version("3.12") is False
+    assert is_near_miss_version("3.12.7") is False
+    assert is_near_miss_version("3") is False
+
+
+def test_is_near_miss_version_leaves_env_names_alone():
+    """A leading digit is not enough; the predicate must also see a dot.
+
+    The whole value of this test is that it fires only where the alternative
+    reading is wrong. '3d-modeling' is a perfectly good environment name, and
+    telling its owner it looks like a botched version is the same misdirection
+    running the other way.
+    """
+    assert is_near_miss_version("nope") is False
+    assert is_near_miss_version("main") is False
+    assert is_near_miss_version("3d-modeling") is False
+    assert is_near_miss_version("2024-baseline") is False
+    assert is_near_miss_version("") is False
+
+
+def test_is_near_miss_version_ignores_conda_operator_specs():
+    """Operator forms stay unflagged; only digit-dot openings are judged.
+
+    A deliberate limit rather than an oversight: the message names the value as
+    an attempted version, and this predicate earns that claim from the shape of
+    the value alone. Widening it to leading operators is defensible, but it is
+    a separate decision from the one this function makes.
+    """
+    assert is_near_miss_version(">=3.11,<3.13") is False
+    assert is_near_miss_version("<3.13") is False
+
+
+def test_near_miss_version_notice_quotes_the_spec():
+    notice = near_miss_version_notice("3.12.x")
+    assert "'3.12.x'" in notice
+    assert "micromamba environment" in notice
 
 
 def test_satisfies_matching_versions():

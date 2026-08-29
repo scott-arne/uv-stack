@@ -28,6 +28,11 @@ from uv_stack.operations.pyproject import (
     write_tracking,
 )
 from uv_stack.parse import canonical_name, ownership_name, requirement_name
+from uv_stack.pyversion import (
+    PLAIN_VERSION_RE,
+    is_near_miss_version,
+    near_miss_version_notice,
+)
 from uv_stack.resolver import Resolver
 from uv_stack.runner import Command, Runner
 
@@ -45,7 +50,6 @@ DEFAULT_PROJECT_PYTHON = "3.12"
 #: source lives here and ``cli/refresh_cmd.py`` imports it.
 SKIPPED_REMOVAL_NOTICE = "Not auto-removed (edit pyproject.toml manually): {entry}"
 
-_VERSION_RE = re.compile(r"^\d+(\.\d+)*$")
 _IMPLEMENTATION_RE = re.compile(r"^(cpython|pypy|graalpy)[-@]")
 
 
@@ -344,7 +348,7 @@ def _is_python_passthrough(spec: str) -> bool:
         return True
     if "@" in spec:
         return True
-    if _VERSION_RE.match(spec):
+    if PLAIN_VERSION_RE.match(spec):
         return True
     return bool(_IMPLEMENTATION_RE.match(spec))
 
@@ -372,12 +376,20 @@ def resolve_project_python(
     result = runner.run(micromamba_python_path(spec), capture=True, check=False)
     path = result.stdout.strip()
     if result.returncode != 0 or not path:
-        raise EnvError(
-            f"Could not resolve micromamba environment '{spec}' to an interpreter.",
-            hint=(
+        # The default hint reads as an instruction to create an env by this
+        # name, which for a botched version sends the user in exactly the wrong
+        # direction — nobody wants a micromamba env called '3.12.x'.
+        hint = (
+            near_miss_version_notice(spec)
+            if is_near_miss_version(spec)
+            else (
                 f"Ensure the env exists ('stack create env {render_positional_arg(spec)}') "
                 "and that MAMBA_ROOT_PREFIX is set, or pass --python <version>."
-            ),
+            )
+        )
+        raise EnvError(
+            f"Could not resolve micromamba environment '{spec}' to an interpreter.",
+            hint=hint,
         )
     return path
 

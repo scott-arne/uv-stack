@@ -1,10 +1,67 @@
-"""Pure helpers for comparing Python versions.
+"""Pure helpers for reading and comparing Python version specs.
 
 These are pure helpers for comparing the interpreter version an env *config*
-requests against the one an env *actually* runs.
+requests against the one an env *actually* runs, and for judging whether a
+*project* interpreter spec is a version at all.
+
+The two jobs answer to different grammars and must not be mixed. An env's
+``python.txt`` is handed to conda, which takes full match specs — ``3.12.*``
+and ``>=3.11,<3.13`` are legal there. A project's ``[tool.uv-stack].python``
+is handed to uv, which takes none of those, so a value conda would accept is
+often a mistake in a project.
 """
 
 from __future__ import annotations
+
+import re
+
+#: A project interpreter spec uv understands as a version. Anything else that
+#: is not a path or an implementation form is read as a micromamba env name.
+#: Deliberately looser than :func:`is_comparable`, which additionally demands
+#: ASCII digits because it feeds ``uv pip compile --python-version``.
+PLAIN_VERSION_RE = re.compile(r"^\d+(\.\d+)*$")
+
+#: The shape of a value the user was plainly *trying* to write as a version.
+#: Anchored on a digit followed by a dot so that plausible environment names
+#: beginning with a digit — ``3d-modeling``, ``2024-baseline`` — do not match.
+_VERSION_ATTEMPT_RE = re.compile(r"^\d+\.")
+
+
+def is_near_miss_version(spec: str) -> bool:
+    """Whether ``spec`` reads as an attempted version that is not one.
+
+    A project spec that is not a version, a path, or an implementation form is
+    silently taken to name a micromamba environment, and every message from
+    there on talks about environments. For ``3.12.x`` or ``3.12.*`` that is a
+    misdirection: the user was writing a version, and being told to create an
+    environment called ``3.12.x`` sends them the wrong way entirely.
+
+    Only for *project* specs. An env's ``python.txt`` is read by conda, where
+    ``3.12.*`` is a correct match spec rather than a botched version.
+
+    :param spec: The raw interpreter spec.
+    :returns: ``True`` when ``spec`` starts with digits and a dot but is not a
+        plain dotted version.
+    """
+    return bool(_VERSION_ATTEMPT_RE.match(spec)) and not PLAIN_VERSION_RE.match(spec)
+
+
+def near_miss_version_notice(spec: str) -> str:
+    """The one sentence every surface uses for a near-miss project version.
+
+    Shared so the warning ``stack edit`` prints before anything runs and the
+    hint ``stack refresh`` attaches after the probe fails cannot drift apart:
+    they describe one condition seen at two moments.
+
+    :param spec: The offending spec.
+    :returns: The message, without a trailing newline.
+    """
+    return (
+        f"'{spec}' looks like a Python version but is not a plain one "
+        "(digits and dots only), so it is read as a micromamba environment "
+        "name. Use a plain version such as 3.12, or name an environment that "
+        "exists."
+    )
 
 
 def parse_python_info(stdout: str) -> tuple[str | None, str | None]:

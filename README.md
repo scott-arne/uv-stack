@@ -246,6 +246,12 @@ Choosing the project's interpreter with `--python`:
 - **Anything else is treated as a micromamba environment name** — the project
   uses that environment's interpreter. `stack create project ds --python main`
   builds the project on `main`'s Python.
+- A botched version — `3.12.*`, `3.12.x` — is not a version either, so it lands
+  in the case above. It is still refused, but the message names the typo rather
+  than telling you to create an environment called `3.12.x`. `stack edit
+  project` warns about one in the tracking table when the editor exits. (Note
+  that `3.12.*` *is* legal in an environment's `python.txt`, which conda reads,
+  not uv.)
 - With no `--python`, the default comes from `$UV_STACK_PROJECT_PYTHON`, then
   `<config-root>/project-python.txt`, then `3.12`.
 

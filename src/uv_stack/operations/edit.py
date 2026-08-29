@@ -25,6 +25,7 @@ from uv_stack.operations.pyproject import (
     read_tracking,
     validate_tracking_write,
 )
+from uv_stack.pyversion import is_near_miss_version, near_miss_version_notice
 from uv_stack.render import render_environment_yml, render_requirements_in
 from uv_stack.resolver import Resolver, bundle_self_references
 
@@ -135,8 +136,9 @@ def validate_project(config: ConfigRoot, cwd: Path) -> Validation:
 
     :param config: Config root, for resolving the tracked stack.
     :param cwd: The directory holding ``pyproject.toml``.
-    :returns: Warnings; a single advisory when the file carries no
-        ``[tool.uv-stack]`` table.
+    :returns: Warnings: a single advisory when the file carries no
+        ``[tool.uv-stack]`` table, otherwise resolution warnings plus one for
+        a ``python`` value that reads as a botched version.
     :raises ConfigError: When the file was deleted, is unreadable, its
         tracking table fails the schema, ``[project.dependencies]`` is
         malformed, or the file would be refused by the write preflight.
@@ -166,7 +168,14 @@ def validate_project(config: ConfigRoot, cwd: Path) -> Validation:
     resolver = Resolver(config)
     stack = resolver.resolve(tracking.stack)
     resolver.flatten(stack)
-    return Validation(list(stack.warnings), tracked=True)
+    warnings = list(stack.warnings)
+    if tracking.python is not None and is_near_miss_version(tracking.python):
+        # A warning rather than a refusal: whether a non-version spec names a
+        # real environment is a question about this machine, and answering it
+        # needs the micromamba probe this validator deliberately excludes. A
+        # near-miss version is the one case decidable without one.
+        warnings.append(near_miss_version_notice(tracking.python))
+    return Validation(warnings, tracked=True)
 
 
 def validate(config: ConfigRoot, kind: str, name: str, cwd: Path) -> Validation:

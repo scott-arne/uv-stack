@@ -664,6 +664,41 @@ def test_resolve_project_python_prefixes_leading_dash_name_in_hint(
     assert "stack create env -- --recreate" in str(exc_info.value.hint)
 
 
+def test_resolve_project_python_near_miss_version_hint(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """A botched version must not be answered with "create an env by that name".
+
+    '3.12.x' reaches the probe only because it failed the version test, so the
+    default hint tells the user to run 'stack create env 3.12.x' — an
+    instruction nobody wants carried out, and one that hides the actual typo.
+    """
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    rec = RecordingRunner(responder=_missing_env_responder)
+    with pytest.raises(EnvError) as exc_info:
+        resolve_project_python(config_tree, rec, "3.12.x")
+    hint = str(exc_info.value.hint)
+    assert "looks like a Python version" in hint
+    assert "stack create env" not in hint
+
+
+def test_resolve_project_python_plausible_env_name_keeps_default_hint(
+    config_tree: ConfigRoot, monkeypatch
+):
+    """The near-miss arm must not swallow the case it was carved out of.
+
+    'nope' is indistinguishable from an env the user has yet to create, so the
+    create-it hint is still the right answer there.
+    """
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    rec = RecordingRunner(responder=_missing_env_responder)
+    with pytest.raises(EnvError) as exc_info:
+        resolve_project_python(config_tree, rec, "nope")
+    hint = str(exc_info.value.hint)
+    assert "stack create env nope" in hint
+    assert "looks like a Python version" not in hint
+
+
 @pytest.mark.parametrize(
     "spec, passthrough",
     [

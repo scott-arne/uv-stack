@@ -232,6 +232,14 @@ def create_project(
     strict: bool,
 ) -> None:
     """Create a uv project in the current directory from the resolved stack TOKENS."""
+    if python is not None and not python.strip():
+        raise click.UsageError("--python requires a non-empty version.")
+    if python is not None:
+        # ProjectTracking refuses a padded value, and it is constructed deep in
+        # init_project where a pydantic error would surface as a traceback.
+        # Normalizing the flag here reserves that refusal for a pyproject.toml
+        # the user padded by hand, which is the only place it is informative.
+        python = python.strip()
     options = ProjectOptions(
         python=python,
         name=name,

@@ -483,6 +483,33 @@ def test_reserved_name_subtable_refused_stack_and_applied(tmp_path: Path):
     assert "[tool.uv-stack.applied] shadows the 'applied' field" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "python_value",
+    ['""', '"   "', '" 3.12 "', '"3.12\\n"'],
+    ids=["empty", "blank", "padded", "trailing-newline"],
+)
+def test_read_tracking_refuses_a_blank_or_padded_python(
+    tmp_path: Path, python_value: str
+):
+    """The schema's python check must surface as a ConfigError, not a traceback.
+
+    ``ProjectTracking`` raises a bare pydantic error, which is a ``ValueError``
+    and so reaches the CLI edge unhandled. This is the wrapper that makes the
+    refusal usable, and the only reason the field can be tightened at all.
+    """
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n'
+        "[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        "applied = []\n"
+        f"python = {python_value}\n"
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert str(pyproject) in str(excinfo.value)
+
+
 def test_subtable_only_document_reserved_name_refused(tmp_path: Path):
     """Reserved-name subtable alone (implicit parent) is refused; non-reserved reads None.
 

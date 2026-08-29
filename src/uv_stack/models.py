@@ -6,7 +6,7 @@ and bundles are validated from the mappings parsed out of their YAML files.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Profile(BaseModel):
@@ -89,7 +89,9 @@ class ProjectTracking(BaseModel):
     :param version: Tracking schema version (always 1 for this release).
     :param stack: The create-time stack tokens, verbatim.
     :param python: The raw ``--python`` value when one was given; ``None``
-        keeps the project portable (machine defaults apply).
+        keeps the project portable (machine defaults apply). An empty or
+        space-padded string is refused rather than stored — see
+        :meth:`_check_python`.
     :param applied: The flattened requirements uv-stack last applied.
     :param pending: Intent record for an in-flight refresh/init: the target
         applied list, written before uv mutations and cleared by the final
@@ -104,3 +106,31 @@ class ProjectTracking(BaseModel):
     python: str | None = None
     applied: list[str] = Field(default_factory=list)
     pending: list[str] | None = Field(default=None)
+
+    @field_validator("python")
+    @classmethod
+    def _check_python(cls, value: str | None) -> str | None:
+        """Refuse a ``python`` value that is empty or space-padded.
+
+        Both are silently wrong rather than loudly wrong without this. The
+        selector treats ``""`` as unset and falls through to the machine
+        default, so an emptied value reads as "no preference" instead of the
+        mistake it is; and padding defeats the version test, so ``" 3.12 "``
+        is taken to name a micromamba environment. Refusing here rather than
+        stripping keeps the file the user's, and puts every reader —
+        ``refresh``, ``show project``, ``status``, and the ``stack edit``
+        re-offer loop — behind one gate.
+
+        :param value: The raw field value.
+        :returns: The value, unchanged, when it is acceptable.
+        :raises ValueError: When the string is empty or has surrounding
+            whitespace. Pydantic wraps this; ``read_tracking`` turns the
+            wrapper into a :class:`~uv_stack.errors.ConfigError`.
+        """
+        if value is None:
+            return value
+        if not value.strip():
+            raise ValueError("must not be empty; remove the key to use the default")
+        if value != value.strip():
+            raise ValueError(f"must not be padded with whitespace: {value!r}")
+        return value

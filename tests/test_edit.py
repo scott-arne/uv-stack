@@ -626,3 +626,51 @@ def test_validate_project_refuses_a_non_table_project_value(
     with pytest.raises(ConfigError) as excinfo:
         validate(config_tree, "project", "", project)
     assert "must be a table" in excinfo.value.message
+
+
+def _write_tracked_project(project: Path, python: str) -> None:
+    """Write a valid tracked ``pyproject.toml`` whose only variable is ``python``."""
+    project.mkdir(exist_ok=True)
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\ndependencies = []\n\n'
+        f'[tool.uv-stack]\nversion = 1\nstack = ["ds"]\npython = "{python}"\n',
+        encoding="utf-8",
+    )
+
+
+def test_validate_project_warns_on_a_near_miss_python(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    """A botched version is reported here, before the user leaves the editor.
+
+    Nothing else catches it until the next refresh runs the micromamba probe,
+    and by then the message talks about environments rather than the typo.
+    """
+    project = tmp_path / "proj"
+    _write_tracked_project(project, "3.12.x")
+    result = validate(config_tree, "project", "", project)
+    assert result.tracked is True
+    assert len(result.warnings) == 1
+    assert "looks like a Python version" in result.warnings[0]
+    assert "3.12.x" in result.warnings[0]
+
+
+def test_validate_project_accepts_a_plain_python_without_warning(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    project = tmp_path / "proj"
+    _write_tracked_project(project, "3.12")
+    assert validate(config_tree, "project", "", project) == ([], True)
+
+
+def test_validate_project_does_not_warn_on_a_plausible_env_name(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    """An env name is not this validator's to judge — it has no probe to judge with.
+
+    Warning on every non-version value would fire on the ordinary, correct case
+    of pointing a project at a shared environment.
+    """
+    project = tmp_path / "proj"
+    _write_tracked_project(project, "main")
+    assert validate(config_tree, "project", "", project) == ([], True)

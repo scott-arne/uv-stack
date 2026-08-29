@@ -3762,6 +3762,48 @@ def test_create_project_no_track_flag(tmp_path: Path, monkeypatch):
     assert captured["track"] is False
 
 
+def test_create_project_empty_python_is_a_usage_error(tmp_path: Path, monkeypatch):
+    """An empty --python must be refused, not treated as "use the default".
+
+    Passing it through reaches the selector, which reads '' as unset and picks
+    the machine default — the interpreter the flag was given to override.
+    """
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.create.init_project",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "create", "project", "ds", "--python", "  "]
+    )
+    assert result.exit_code == 2
+    assert "non-empty version" in _flat_panel(result)
+
+
+def test_create_project_python_is_stripped_before_tracking(
+    tmp_path: Path, monkeypatch
+):
+    """A padded --python is normalized here rather than refused deep in init.
+
+    ProjectTracking refuses padding, and it is constructed inside init_project
+    where a pydantic error is a ValueError — a traceback at the CLI edge. The
+    schema's refusal is reserved for a pyproject.toml the user padded by hand.
+    """
+    root = _seeded_root(tmp_path)
+    captured: dict[str, object] = {}
+
+    def _fake_init(config, runner, tokens, options, *, cwd):
+        captured["python"] = options.python
+        return []
+
+    monkeypatch.setattr("uv_stack.cli.create.init_project", _fake_init)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "create", "project", "ds", "--python", " 3.12 "]
+    )
+    assert result.exit_code == 0
+    assert captured["python"] == "3.12"
+
+
 # ---------------------------------------------------------------------------
 # refresh
 # ---------------------------------------------------------------------------
