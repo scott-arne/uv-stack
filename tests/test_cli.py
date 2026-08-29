@@ -504,6 +504,44 @@ def test_show_missing_env_errors(tmp_path: Path):
     assert "ghost" in result.output
 
 
+@pytest.mark.parametrize(
+    "break_it,expected,hint",
+    [
+        (lambda path: path.mkdir(), "Not a regular file", "Remove or rename"),
+        (
+            lambda path: path.symlink_to(path.parent / "nowhere"),
+            "Broken symlink",
+            "Point it at a real file",
+        ),
+    ],
+    ids=["directory", "dangling-symlink"],
+)
+@pytest.mark.parametrize(
+    "args", [["show", "env", "main"], ["upgrade", "main"]], ids=["show", "upgrade"]
+)
+def test_load_env_names_a_non_regular_stack_path(
+    tmp_path: Path, args, break_it, expected, hint
+):
+    """The guard lives in ``require_env``, so every ``load_env`` caller has it.
+
+    ``stack edit`` pins this for itself; these two prove the fix was not
+    local to it. Both would otherwise call an occupied stack.txt path missing
+    and hint at ``stack create env``, which refuses that very path.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = _env_root(tmp_path)
+    path = ConfigRoot(root).env_stack_path("main")
+    path.unlink()
+    break_it(path)
+    result = CliRunner().invoke(cli, ["--root", str(root), *args])
+    assert result.exit_code == 1
+    output = _flat_panel(result)
+    assert expected in output
+    assert hint in output
+    assert "Missing stack file" not in output
+
+
 # ---------------------------------------------------------------------------
 # resolve / doctor
 # ---------------------------------------------------------------------------

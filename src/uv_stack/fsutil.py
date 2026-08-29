@@ -121,6 +121,32 @@ def nofollow_read_flags() -> int | None:
     return os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK
 
 
+def require_regular_file(path: Path) -> None:
+    """Refuse a path that exists but is not a regular file.
+
+    ``Path.is_file()`` cannot tell a directory named ``stack.txt`` from an
+    absent one, so any existence test built on it reports "missing" for a path
+    that is very much present. That is worse than unhelpful: the hint such a
+    check gives is ``stack create``, which opens ``O_EXCL``, sees the entry,
+    and refuses — leaving the user with two commands that contradict each
+    other. Call this *before* any ``is_file()`` existence test on the same
+    path. On a genuinely absent path it is a no-op.
+
+    :param path: The path to check.
+    :raises ConfigError: When something other than a regular file is there.
+    """
+    if path.is_symlink() and not path.exists():
+        raise ConfigError(
+            f"Broken symlink: {path}",
+            hint="Point it at a real file, or remove it.",
+        )
+    if path.exists() and not path.is_file():
+        raise ConfigError(
+            f"Not a regular file: {path}",
+            hint="Remove or rename whatever is at that path.",
+        )
+
+
 class Published(NamedTuple):
     """How :func:`link_or_copy_no_replace` published a file, and what it saw.
 

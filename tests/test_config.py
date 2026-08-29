@@ -239,3 +239,37 @@ def test_require_env_reports_a_missing_stack_file(tmp_path: Path):
         ConfigRoot(tmp_path).require_env("ghost")
     assert "Missing stack file for env 'ghost'" in excinfo.value.message
     assert "stack create env ghost TOKENS..." in (excinfo.value.hint or "")
+
+
+@pytest.mark.parametrize(
+    "break_it,expected,hint",
+    [
+        (lambda path: path.mkdir(), "Not a regular file", "Remove or rename"),
+        (
+            lambda path: path.symlink_to(path.parent / "nowhere"),
+            "Broken symlink",
+            "Point it at a real file",
+        ),
+    ],
+    ids=["directory", "dangling-symlink"],
+)
+def test_require_env_names_a_non_regular_stack_path(
+    tmp_path: Path, break_it, expected, hint
+):
+    """Something occupying stack.txt is not the same as nothing being there.
+
+    ``env_exists`` answers with ``is_file()``, which is False either way, so
+    without the guard both report "Missing stack file" and hint at ``stack
+    create env`` — which opens ``O_EXCL``, sees the entry, and refuses. Every
+    caller of ``require_env`` inherits this, ``show env`` and ``upgrade``
+    included.
+    """
+    config = ConfigRoot(tmp_path)
+    path = config.env_stack_path("main")
+    path.parent.mkdir(parents=True)
+    break_it(path)
+    with pytest.raises(ConfigError) as excinfo:
+        config.require_env("main")
+    assert expected in excinfo.value.message
+    assert str(path) in excinfo.value.message
+    assert hint in (excinfo.value.hint or "")

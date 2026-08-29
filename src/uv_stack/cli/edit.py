@@ -24,6 +24,7 @@ from uv_stack.errors import (
     ResolutionError,
     ToolError,
 )
+from uv_stack.fsutil import require_regular_file
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.edit import missing_project_error, validate
 from uv_stack.operations.pyproject import read_tracking
@@ -57,31 +58,6 @@ def _env_target(config: ConfigRoot, name: str, file: str) -> Path:
     return paths[file](name)
 
 
-def _require_regular_file(path: Path) -> None:
-    """Refuse a target that exists but is not a regular file.
-
-    ``Path.is_file()`` cannot tell a directory named ``channels.txt`` from an
-    absent optional file, so without this the editor is handed a path it can
-    never write. For the same reason this must run *before* any
-    ``is_file()``-based existence test on the same path: that test cannot
-    distinguish "absent" from "present but unusable", so it would claim the
-    resource is missing and send the user to ``stack create``, which sees the
-    entry and refuses. On a genuinely absent path this is a no-op.
-
-    :raises ConfigError: When something other than a regular file is there.
-    """
-    if path.is_symlink() and not path.exists():
-        raise ConfigError(
-            f"Broken symlink: {path}",
-            hint="Point it at a real file, or remove it.",
-        )
-    if path.exists() and not path.is_file():
-        raise ConfigError(
-            f"Not a regular file: {path}",
-            hint="Remove or rename whatever is at that path.",
-        )
-
-
 def _resolve_target(config: ConfigRoot, kind: str, name: str, file: str) -> Path:
     """Decide which file to open, refusing to create a resource by accident.
 
@@ -95,7 +71,7 @@ def _resolve_target(config: ConfigRoot, kind: str, name: str, file: str) -> Path
     """
     if kind == "profile":
         target = config.profile_path(name)
-        _require_regular_file(target)
+        require_regular_file(target)
         if not target.is_file():
             raise ConfigError(
                 f"Missing profile: {target}",
@@ -106,7 +82,7 @@ def _resolve_target(config: ConfigRoot, kind: str, name: str, file: str) -> Path
             )
     elif kind == "bundle":
         target = config.bundle_path(name)
-        _require_regular_file(target)
+        require_regular_file(target)
         if not target.is_file():
             raise ConfigError(
                 f"Missing bundle: {target}",
@@ -116,16 +92,15 @@ def _resolve_target(config: ConfigRoot, kind: str, name: str, file: str) -> Path
                 ),
             )
     elif kind == "env":
-        # require_env tests stack.txt with is_file(), so a dangling link reads
-        # as an absent file and its hint sends the user to `stack create`,
-        # which refuses the same path because its O_EXCL open sees the link.
-        _require_regular_file(config.env_stack_path(name))
+        # require_env guards stack.txt itself; this covers the target only when
+        # --file names one of the optional sources, which require_env never
+        # looks at.
         config.require_env(name)
         target = _env_target(config, name, file)
-        _require_regular_file(target)
+        require_regular_file(target)
     else:
         target = Path.cwd() / "pyproject.toml"
-        _require_regular_file(target)
+        require_regular_file(target)
         if not target.is_file():
             # Shared with the post-edit re-check so both moments give the same
             # hint; see operations/edit.missing_project_error.
@@ -203,7 +178,7 @@ def _edit_loop(
         # env sources are read through an is_file() test that calls a directory
         # or a dangling symlink absent, so validation would pass on a target
         # the next `stack edit` refuses.
-        _require_regular_file(target)
+        require_regular_file(target)
         try:
             warnings = validate(config, kind, name, cwd)
         except NewerSchemaError:

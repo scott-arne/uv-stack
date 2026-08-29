@@ -16,6 +16,7 @@ import yaml
 from pydantic import ValidationError
 
 from uv_stack.errors import ConfigError
+from uv_stack.fsutil import require_regular_file
 from uv_stack.hints import render_positional_arg
 from uv_stack.models import Bundle, EnvConfig, Profile
 from uv_stack.parse import first_clean_line, read_clean_lines
@@ -252,8 +253,13 @@ class ConfigRoot:
         the identical message.
 
         :param name: The environment name.
-        :raises ConfigError: When ``stack.txt`` is missing.
+        :raises ConfigError: When ``stack.txt`` is missing, or when something
+            that is not a regular file occupies its path.
         """
+        # Must precede env_exists, whose is_file() calls a directory here
+        # absent and would send the user to `stack create env`, which refuses
+        # the same path.
+        require_regular_file(self.env_stack_path(name))
         if self.env_exists(name):
             return
         raise ConfigError(
