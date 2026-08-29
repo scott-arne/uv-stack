@@ -149,6 +149,37 @@ def test_argv_keeps_an_existing_path_with_spaces_intact(tmp_path: Path):
     assert editor_argv(editor, tmp_path / "t.txt") == [str(exe), str(tmp_path / "t.txt")]
 
 
+def test_argv_keeps_a_relative_path_with_a_separator_intact(tmp_path: Path, monkeypatch):
+    """A separator makes the string path-like, so the space is not a split."""
+    exe = tmp_path / "my editor"
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    editor = EditorCommand("./my editor", "$EDITOR", from_flag=False)
+    assert editor_argv(editor, tmp_path / "t.txt") == [
+        "./my editor",
+        str(tmp_path / "t.txt"),
+    ]
+
+
+def test_argv_ignores_a_cwd_file_named_like_the_whole_command(
+    tmp_path: Path, monkeypatch
+):
+    """An unrelated cwd file must not decide how the command is spelled.
+
+    ``Path("code -w").is_file()`` resolves against the current directory, so
+    without the path-like test a file that happens to be named ``code -w``
+    would swallow the flag and hand ``execvp`` a program that does not exist.
+    """
+    (tmp_path / "code -w").write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    editor = EditorCommand("code -w", "$EDITOR", from_flag=False)
+    assert editor_argv(editor, tmp_path / "t.txt") == [
+        "code",
+        "-w",
+        str(tmp_path / "t.txt"),
+    ]
+
+
 @pytest.mark.parametrize(
     "rung", ["UV_STACK_EDITOR", "editor.txt", "VISUAL", "EDITOR"]
 )

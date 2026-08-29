@@ -68,13 +68,31 @@ def resolve_editor(config: ConfigRoot, flag: str | None) -> EditorCommand:
     raise ConfigError("No editor configured.", hint=_CHAIN_HINT)
 
 
+def _is_path_like(command: str) -> bool:
+    """Whether a command string is spelled as a path, not as a program name.
+
+    ``Path.is_file()`` resolves a bare name against the current directory, so
+    on its own it lets an unrelated file decide how the command is split: a
+    file named ``code -w`` in the cwd would make that whole string ``argv[0]``
+    and hand ``execvp`` a program that does not exist.
+
+    :param command: The configured command string.
+    :returns: True when the string is absolute, ``~``-prefixed, or contains a
+        path separator.
+    """
+    if command.startswith("~") or Path(command).is_absolute():
+        return True
+    return os.sep in command or (os.altsep is not None and os.altsep in command)
+
+
 def editor_argv(editor: EditorCommand, target: Path) -> list[str]:
     """Build the argv that opens ``target`` in ``editor``.
 
-    A command string that names an existing file is used verbatim: an absolute
-    path may legitimately contain spaces, and ``shlex`` would split it into
-    arguments that do not exist. Anything else is a small shell-like command
-    line and is split, so ``code -w`` and ``emacsclient -nw`` work.
+    A command string that is spelled as a path *and* names an existing file is
+    used verbatim: such a path may legitimately contain spaces, and ``shlex``
+    would split it into arguments that do not exist. Anything else is a small
+    shell-like command line and is split, so ``code -w`` and ``emacsclient
+    -nw`` work no matter what the current directory happens to contain.
 
     :param editor: The resolved command and its source.
     :param target: The file to open, appended as the final argument.
@@ -82,7 +100,7 @@ def editor_argv(editor: EditorCommand, target: Path) -> list[str]:
     :raises ConfigError: When the command cannot be split because its quoting
         is unbalanced, or splits to nothing at all.
     """
-    if Path(editor.command).is_file():
+    if _is_path_like(editor.command) and Path(editor.command).is_file():
         return [editor.command, str(target)]
     try:
         parts = shlex.split(editor.command)

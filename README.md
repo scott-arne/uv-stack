@@ -332,8 +332,9 @@ The editor is chosen from the first of these that is set:
 5. `$EDITOR`
 
 The value is a command line, so `code -w` and `emacsclient -nw` both work; a
-value that names an existing file is used as-is, so a path containing spaces
-needs no quoting. The edited file is appended as the final argument. An empty
+value that is spelled as a path — absolute, `~`-prefixed, or containing a `/` —
+and names an existing file is used as-is, so a path containing spaces needs no
+quoting. The edited file is appended as the final argument. An empty
 environment variable or `editor.txt` is skipped rather than treated as a
 choice, so an exported-but-empty `$VISUAL` does not shadow `$EDITOR`. If none
 of the five is set, `stack edit` says so and stops — it will not drop you into
