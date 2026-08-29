@@ -295,6 +295,30 @@ def test_argv_survives_expansion_failure_on_the_split_branch(
     ]
 
 
+def test_argv_keeps_an_unexpandable_tilde_path_with_a_space_intact(
+    tmp_path: Path, monkeypatch
+):
+    """A ``~`` that expands to nothing is still judged by whether it exists.
+
+    ``~nosuchuser`` names no user, so ``expanduser`` returns it unchanged
+    without raising. That is not an expansion failure and must not be treated
+    as one: the path still exists on disk, so it belongs on the
+    single-argument branch. Splitting it instead would shred the space and
+    hand ``execvp`` two arguments that name nothing.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    exe = tmp_path / "~nosuchuser" / "My Editor" / "code"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    command = "~nosuchuser/My Editor/code"
+    editor = EditorCommand(command, "$EDITOR", from_flag=False)
+    assert editor_argv(editor, tmp_path / "t.txt") == [
+        command,
+        str(tmp_path / "t.txt"),
+    ]
+
+
 @pytest.mark.parametrize(
     "rung", ["UV_STACK_EDITOR", "editor.txt", "VISUAL", "EDITOR"]
 )

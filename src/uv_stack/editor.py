@@ -88,15 +88,18 @@ def _is_path_like(command: str) -> bool:
 def _expand_tilde_if_present(path: str) -> str:
     """Expand a leading ``~`` in a path, or return the path unchanged.
 
-    When the path starts with ``~``, attempt to expand it. If expansion fails
-    (no home directory can be determined), the original path is returned, which
-    will fail at launch the way a nonexistent absolute path does. Non-``~``
-    paths are returned as-is to preserve forms like ``./editor``, since
+    When the path starts with ``~``, attempt to expand it. The original is
+    returned unchanged both when no home directory can be determined and when
+    there is nothing to expand — ``~nosuchuser`` names no user, so
+    ``expanduser`` leaves it alone without raising. Callers cannot tell those
+    two apart from the return value and should not try; either way the result
+    is a path that either names a file or does not. Non-``~`` paths are
+    returned as-is to preserve forms like ``./editor``, since
     ``str(Path('./editor'))`` would drop the ``./`` and turn a
     directory-relative command into a ``$PATH`` lookup.
 
     :param path: A path string that may start with ``~``.
-    :returns: The expanded path if expansion succeeds, otherwise the original.
+    :returns: The expanded path, or the original when it did not expand.
     """
     if not path.startswith("~"):
         return path
@@ -122,15 +125,14 @@ def _launchable_path(command: str) -> str | None:
 
     :param command: The configured command string.
     :returns: The path to launch, or ``None`` when the command is not spelled
-        as a path, names no existing file, or cannot be expanded.
+        as a path or names no existing file.
     """
     if not _is_path_like(command):
         return None
+    # An unexpanded ``~`` needs no special case here. It survives expansion
+    # only when it names nothing to expand, and the existence test below is
+    # what decides whether it is launchable either way.
     expanded = _expand_tilde_if_present(command)
-    # Detect expansion failure for ~ paths: if it started with ~ but came
-    # back unchanged, expansion failed, so degrade to split.
-    if command.startswith("~") and expanded == command:
-        return None
     if not Path(expanded).is_file():
         return None
     return expanded
