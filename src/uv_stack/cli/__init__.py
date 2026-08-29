@@ -182,8 +182,6 @@ RichHelpFormatter.command_panel_class = _AlignedCommandPanel
 
 click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.SHOW_ARGUMENTS = True
-
-
 click.rich_click.COMMAND_GROUPS = {
     "stack": [
         # 'create' is cross-cutting — it makes environments, projects,

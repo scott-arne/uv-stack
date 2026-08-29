@@ -3168,32 +3168,37 @@ def test_edit_malformed_stored_editor_preserves_a_bracketed_source(
 
     The editor *command* is deliberately not interpolated (see editor_argv), so
     the user data on this row is the config-root path the source is spelled
-    with.
+    with. The fragment must be alphabetic: rich leaves numeric tags like [1]
+    literal, so the assertion would pass with the protection removed.
     """
-    root = _seeded_root(tmp_path).rename(tmp_path / "python-envs[1]")
+    root = _seeded_root(tmp_path).rename(tmp_path / "python-envs[x]")
     (root / "editor.txt").write_text('code "-w\n', encoding="utf-8")
     for var in ("UV_STACK_EDITOR", "VISUAL", "EDITOR"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("COLUMNS", "200")
     result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "ds"])
     assert result.exit_code == 1
-    assert "python-envs[1]" in _combined_output(result)
+    assert "python-envs[x]" in _combined_output(result)
 
 
 def test_edit_spawn_failure_preserves_a_bracketed_editor_path(
     tmp_path: Path, monkeypatch
 ):
-    """_spawn_error puts argv[0] into both the message and the hint."""
+    """_spawn_error puts argv[0] into both the message and the hint.
+
+    The fragment must be alphabetic: rich leaves numeric tags like [1] literal,
+    so the assertion would pass with the protection removed.
+    """
     root = _seeded_root(tmp_path)
     for var in ("UV_STACK_EDITOR", "VISUAL", "EDITOR"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("COLUMNS", "200")
-    missing = str(tmp_path / "bin[1]" / "nano")
+    missing = str(tmp_path / "bin[x]" / "nano")
     result = CliRunner().invoke(
         cli, ["--root", str(root), "edit", "profile", "ds", "--editor", missing]
     )
     assert result.exit_code == 1
-    assert "bin[1]" in _combined_output(result)
+    assert "bin[x]" in _combined_output(result)
 
 
 def test_edit_validator_failure_preserves_a_bracketed_path(tmp_path: Path, monkeypatch):
