@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 
@@ -21,15 +22,23 @@ def test_command_equality():
     assert Command(["uv", "pip", "check"]) == Command(["uv", "pip", "check"])
 
 
-def test_interactive_runner_protocol_is_satisfied():
-    """Both implementations satisfy the InteractiveRunner protocol.
+@pytest.mark.parametrize("implementation", [SubprocessRunner, RecordingRunner])
+def test_interactive_runner_protocol_is_satisfied(implementation):
+    """Both implementations match the InteractiveRunner protocol's signature.
 
-    The import itself is the guard: deleting or renaming the protocol would
-    fail here rather than at the first CLI call site.
+    mypy is configured over ``src`` only, so a ``list[InteractiveRunner]``
+    annotation here would assert nothing, and ``callable()`` passes for any
+    method of any shape. Comparing the signatures is what actually catches the
+    drift that matters — a renamed parameter, an added required one, a changed
+    return type — in the one direction static checking does not cover, since
+    neither class inherits the protocol and nothing forces them to keep up
+    with it.
+
+    The import is the second guard: deleting or renaming the protocol fails
+    here rather than at the first CLI call site.
     """
-    runners: list[InteractiveRunner] = [SubprocessRunner(), RecordingRunner()]
-    for runner in runners:
-        assert callable(runner.run_interactive)
+    reference = inspect.signature(InteractiveRunner.run_interactive)
+    assert inspect.signature(implementation.run_interactive) == reference
 
 
 def test_recording_runner_records_and_returns_default():
