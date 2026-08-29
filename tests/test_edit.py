@@ -6,7 +6,8 @@ import pytest
 
 from uv_stack.config import ConfigRoot
 from uv_stack.editor import EditorCommand, editor_argv, resolve_editor
-from uv_stack.errors import ConfigError
+from uv_stack.errors import ConfigError, NewerSchemaError, ResolutionError
+from uv_stack.operations.edit import missing_project_error, validate
 
 
 @pytest.fixture(autouse=True)
@@ -215,3 +216,130 @@ def test_leading_empty_executable_is_rejected(tmp_path: Path):
     with pytest.raises(ConfigError) as excinfo:
         editor_argv(editor, tmp_path / "t.txt")
     assert excinfo.value.message == "No editor configured."
+
+
+def test_validate_profile_accepts_a_good_profile(config_tree: ConfigRoot):
+    assert validate(config_tree, "profile", "ds", config_tree.root) == []
+
+
+def test_validate_profile_rejects_a_broken_schema(config_tree: ConfigRoot):
+    config_tree.profile_path("ds").write_text("includes: not-a-list\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        validate(config_tree, "profile", "ds", config_tree.root)
+
+
+def test_validate_profile_rejects_undecodable_bytes(config_tree: ConfigRoot):
+    config_tree.profile_path("ds").write_bytes(b"includes:\n  - \xff\xfe\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "profile", "ds", config_tree.root)
+    assert "not valid UTF-8" in excinfo.value.message
+
+
+def test_validate_bundle_rejects_a_self_reference(config_tree: ConfigRoot):
+    # At edit time the bundle exists, so the resolver's recursion guard makes a
+    # self-reference expand silently to nothing. Only an explicit check sees it.
+    config_tree.bundle_path("standard").write_text(
+        "includes:\n  - standard\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "bundle", "standard", config_tree.root)
+    assert "cannot include itself" in excinfo.value.message
+
+
+def test_validate_bundle_rejects_a_missing_include(config_tree: ConfigRoot):
+    config_tree.bundle_path("standard").write_text(
+        "includes:\n  - profile:ghost\n", encoding="utf-8"
+    )
+    with pytest.raises(ResolutionError):
+        validate(config_tree, "bundle", "standard", config_tree.root)
+
+
+def test_validate_env_accepts_the_seeded_env(config_tree: ConfigRoot):
+    assert validate(config_tree, "env", "main", config_tree.root) == []
+
+
+def test_validate_env_rejects_a_missing_profile(config_tree: ConfigRoot):
+    config_tree.env_stack_path("main").write_text("profile:ghost\n", encoding="utf-8")
+    with pytest.raises(ResolutionError):
+        validate(config_tree, "env", "main", config_tree.root)
+
+
+def test_validate_env_rejects_an_undecodable_local_requirements_file(
+    config_tree: ConfigRoot,
+):
+    # render_requirements_in only emits '-r <path>' for this file and never
+    # opens it, so nothing downstream would notice the bad bytes.
+    config_tree.env_local_path("main").write_bytes(b"-e \xff\xfe/pkg\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "env", "main", config_tree.root)
+    assert "not valid UTF-8" in excinfo.value.message
+
+
+def test_validate_project_warns_when_untracked(config_tree: ConfigRoot, tmp_path: Path):
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    warnings = validate(config_tree, "project", "", project)
+    assert len(warnings) == 1
+    assert "[tool.uv-stack]" in warnings[0]
+
+
+def test_validate_project_reports_a_deleted_pyproject(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    # An editor that deleted the file must not read back as "untracked".
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "project", "", tmp_path)
+    assert "No pyproject.toml" in excinfo.value.message
+
+
+def test_validate_project_resolves_tracked_stack_tokens(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    # `stack refresh` resolves and flattens this same list, so a shape-only
+    # check would accept a file the very next command rejects.
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n'
+        "[tool.uv-stack]\nversion = 1\nstack = [\"profile:ghost\"]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ResolutionError):
+        validate(config_tree, "project", "", project)
+
+
+def test_validate_project_propagates_a_newer_schema(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n'
+        "[tool.uv-stack]\nversion = 2\nstack = []\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(NewerSchemaError):
+        validate(config_tree, "project", "", project)
+
+
+def test_validate_project_reuses_the_pre_launch_missing_hint(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    """A deleted pyproject must give the same way forward as an absent one.
+
+    The pre-launch check in cli/edit.py and this post-edit re-check are the
+    same condition seen at two moments, so the spec requires one hint. Both
+    call missing_project_error; this asserts the validator's error is
+    indistinguishable from it.
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    shared = missing_project_error(empty)
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "project", "", empty)
+    assert excinfo.value.message == shared.message
+    assert excinfo.value.hint == shared.hint
+    assert "stack create project" in (shared.hint or "")
