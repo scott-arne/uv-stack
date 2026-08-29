@@ -330,15 +330,17 @@ def test_subprocess_runner_interactive_inherits_the_terminal(tmp_path):
     stand_in = tmp_path / "stdin.txt"
     stand_in.write_text("")
     saved = os.dup(0)
-    with open(stand_in) as replacement:
-        os.dup2(replacement.fileno(), 0)
-        try:
-            expected = repr([(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in (0, 1, 2)])
-            status = SubprocessRunner().run_interactive(
-                Command([sys.executable, "-c", probe, str(seen)])
-            )
-        finally:
-            os.dup2(saved, 0)
-            os.close(saved)
+    try:
+        with open(stand_in) as replacement:
+            os.dup2(replacement.fileno(), 0)
+            try:
+                expected = repr([(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in (0, 1, 2)])
+                status = SubprocessRunner().run_interactive(
+                    Command([sys.executable, "-c", probe, str(seen)])
+                )
+            finally:
+                os.dup2(saved, 0)
+    finally:
+        os.close(saved)
     assert status == 0
     assert seen.read_text() == expected
