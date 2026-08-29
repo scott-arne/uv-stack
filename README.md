@@ -472,7 +472,7 @@ All state lives under one directory, resolved in this order:
 ```text
 ~/.config/python-envs/
 ├── project-python.txt        # optional: default --python for `create project`
-├── editor.txt                # optional: editor command for 'stack edit'
+├── editor.txt                # optional: editor command for `stack edit`
 ├── profiles/
 │   └── <name>.yaml
 ├── bundles/
