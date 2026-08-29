@@ -27,7 +27,6 @@ from uv_stack.errors import (
 from uv_stack.fsutil import require_regular_file
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.edit import missing_project_error, validate
-from uv_stack.operations.pyproject import read_tracking
 from uv_stack.operations.scaffold import validate_name
 from uv_stack.runner import Command, InteractiveRunner, SubprocessRunner
 
@@ -129,14 +128,20 @@ def _argv(editor: EditorCommand, target: Path) -> list[str]:
         raise
 
 
-def _next_step(kind: str, name: str, target: Path) -> None:
-    """Print the command that makes the edit take effect."""
+def _next_step(kind: str, name: str, tracked: bool | None) -> None:
+    """Print the command that makes the edit take effect.
+
+    :param kind: One of ``profile``, ``bundle``, ``env``, ``project``.
+    :param name: The resource name; ignored unless ``kind`` is ``env``.
+    :param tracked: Whether the project carries a ``[tool.uv-stack]`` table,
+        as reported by validation; ignored unless ``kind`` is ``project``.
+    """
     if kind == "env":
         echo(f"Apply it with: stack upgrade {render_positional_arg(name)}")
     elif kind == "project":
         # An untracked pyproject validates with a warning, but refresh refuses
         # it outright, so naming refresh here would contradict that warning.
-        if read_tracking(target) is not None:
+        if tracked:
             echo("Apply it with: stack refresh")
     else:
         echo("Applies on the next 'stack upgrade' or 'stack refresh'.")
@@ -180,7 +185,7 @@ def _edit_loop(
         # the next `stack edit` refuses.
         require_regular_file(target)
         try:
-            warnings = validate(config, kind, name, cwd)
+            result = validate(config, kind, name, cwd)
         except NewerSchemaError:
             raise
         except (ConfigError, ResolutionError) as error:
@@ -195,8 +200,8 @@ def _edit_loop(
             continue
         shown = Path(os.path.realpath(target)) if target.is_symlink() else target
         echo(f"Validated {shown}")
-        render_warnings(warnings)
-        _next_step(kind, name, target)
+        render_warnings(result.warnings)
+        _next_step(kind, name, result.tracked)
         return
 
 

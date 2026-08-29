@@ -15,6 +15,7 @@ path, so the error already names the file. A net at this level could only say
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
@@ -26,6 +27,21 @@ from uv_stack.operations.pyproject import (
 )
 from uv_stack.render import render_environment_yml, render_requirements_in
 from uv_stack.resolver import Resolver, bundle_self_references
+
+
+class Validation(NamedTuple):
+    """What validation found, and what the caller would otherwise re-derive.
+
+    :param warnings: Non-fatal findings to report alongside success.
+    :param tracked: Whether the project carries a ``[tool.uv-stack]`` table;
+        ``None`` for every other kind, where the question does not arise.
+        Reported here because :func:`validate_project` parsed the file to
+        answer it already, and the file cannot change between that parse and
+        the caller acting on it.
+    """
+
+    warnings: list[str]
+    tracked: bool | None = None
 
 
 def missing_project_error(cwd: Path) -> ConfigError:
@@ -46,20 +62,20 @@ def missing_project_error(cwd: Path) -> ConfigError:
     )
 
 
-def validate_profile(config: ConfigRoot, name: str) -> list[str]:
+def validate_profile(config: ConfigRoot, name: str) -> Validation:
     """Validate an edited profile.
 
     :param config: Config root.
     :param name: Profile name.
-    :returns: An empty list; a profile references nothing, so it produces no
+    :returns: No warnings; a profile references nothing, so it produces no
         resolution warnings.
     :raises ConfigError: When the YAML is unreadable or fails the schema.
     """
     config.load_profile(name)
-    return []
+    return Validation([])
 
 
-def validate_bundle(config: ConfigRoot, name: str) -> list[str]:
+def validate_bundle(config: ConfigRoot, name: str) -> Validation:
     """Validate an edited bundle.
 
     :param config: Config root.
@@ -83,10 +99,10 @@ def validate_bundle(config: ConfigRoot, name: str) -> list[str]:
     resolver = Resolver(config)
     stack = resolver.resolve(bundle.includes)
     resolver.flatten(stack)
-    return list(stack.warnings)
+    return Validation(list(stack.warnings))
 
 
-def validate_env(config: ConfigRoot, name: str) -> list[str]:
+def validate_env(config: ConfigRoot, name: str) -> Validation:
     """Validate every source file of an edited environment.
 
     The whole env is validated regardless of which file was opened: the source
@@ -111,10 +127,10 @@ def validate_env(config: ConfigRoot, name: str) -> list[str]:
         # opening it, so an explicit read is the only thing that sees a decode
         # failure in what the user may have just edited.
         read_text_utf8(local)
-    return list(stack.warnings)
+    return Validation(list(stack.warnings))
 
 
-def validate_project(config: ConfigRoot, cwd: Path) -> list[str]:
+def validate_project(config: ConfigRoot, cwd: Path) -> Validation:
     """Validate an edited project ``pyproject.toml``.
 
     :param config: Config root, for resolving the tracked stack.
@@ -135,10 +151,13 @@ def validate_project(config: ConfigRoot, cwd: Path) -> list[str]:
         raise missing_project_error(cwd)
     tracking = read_tracking(pyproject)
     if tracking is None:
-        return [
-            f"{pyproject} has no [tool.uv-stack] table; 'stack refresh' will "
-            "not manage this project."
-        ]
+        return Validation(
+            [
+                f"{pyproject} has no [tool.uv-stack] table; 'stack refresh' "
+                "will not manage this project."
+            ],
+            tracked=False,
+        )
     # Both of these are things `stack refresh` does before it mutates anything,
     # and neither has a side effect. Skipping them lets the re-offer loop call
     # a file valid that the next refresh refuses.
@@ -147,10 +166,10 @@ def validate_project(config: ConfigRoot, cwd: Path) -> list[str]:
     resolver = Resolver(config)
     stack = resolver.resolve(tracking.stack)
     resolver.flatten(stack)
-    return list(stack.warnings)
+    return Validation(list(stack.warnings), tracked=True)
 
 
-def validate(config: ConfigRoot, kind: str, name: str, cwd: Path) -> list[str]:
+def validate(config: ConfigRoot, kind: str, name: str, cwd: Path) -> Validation:
     """Validate the sources for ``kind``/``name`` after an edit.
 
     :param config: Config root.

@@ -389,7 +389,7 @@ def test_leading_empty_executable_is_rejected(tmp_path: Path):
 
 
 def test_validate_profile_accepts_a_good_profile(config_tree: ConfigRoot):
-    assert validate(config_tree, "profile", "ds", config_tree.root) == []
+    assert validate(config_tree, "profile", "ds", config_tree.root).warnings == []
 
 
 def test_validate_profile_rejects_a_broken_schema(config_tree: ConfigRoot):
@@ -449,7 +449,7 @@ def test_validate_bundle_rejects_a_missing_include(config_tree: ConfigRoot):
 
 
 def test_validate_env_accepts_the_seeded_env(config_tree: ConfigRoot):
-    assert validate(config_tree, "env", "main", config_tree.root) == []
+    assert validate(config_tree, "env", "main", config_tree.root).warnings == []
 
 
 def test_validate_env_rejects_a_missing_profile(config_tree: ConfigRoot):
@@ -498,9 +498,10 @@ def test_validate_project_warns_when_untracked(config_tree: ConfigRoot, tmp_path
     (project / "pyproject.toml").write_text(
         '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8"
     )
-    warnings = validate(config_tree, "project", "", project)
-    assert len(warnings) == 1
-    assert "[tool.uv-stack]" in warnings[0]
+    result = validate(config_tree, "project", "", project)
+    assert result.tracked is False
+    assert len(result.warnings) == 1
+    assert "[tool.uv-stack]" in result.warnings[0]
 
 
 def test_validate_project_reports_a_deleted_pyproject(
