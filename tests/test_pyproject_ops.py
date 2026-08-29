@@ -678,3 +678,56 @@ def test_find_span_survives_crlf(tmp_path: Path):
     raw = pyproject.read_bytes()
     assert b'name = "demo"\r\n' in raw
     assert read_tracking(pyproject) == _tracking()
+
+
+def test_read_project_dependency_names_refuses_a_non_list(tmp_path: Path):
+    """A scalar iterates as characters or not at all; both are refused."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('[project]\nname = "x"\nversion = "0.1.0"\ndependencies = 1\n')
+    with pytest.raises(ConfigError) as excinfo:
+        read_project_dependency_names(pyproject)
+    assert "must be an array" in excinfo.value.message
+
+    # String shape also refused: iterates as characters, not package names
+    pyproject.write_text('[project]\nname = "x"\nversion = "0.1.0"\ndependencies = "numpy"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        read_project_dependency_names(pyproject)
+    assert "must be an array" in excinfo.value.message
+
+
+@pytest.mark.parametrize("deps", ["[1]", '["numpy", 1]'], ids=["only", "mixed"])
+def test_read_project_dependency_names_refuses_a_non_string_element(
+    tmp_path: Path, deps: str
+):
+    """Skipping a non-string would under-report ownership, not just the shape.
+
+    The guard above promises an array *of strings*; a silently skipped element
+    also drops out of the set that decides what refresh is allowed to remove.
+    """
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        f'[project]\nname = "x"\nversion = "0.1.0"\ndependencies = {deps}\n'
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        read_project_dependency_names(pyproject)
+    assert "must be an array of strings" in excinfo.value.message
+    assert str(pyproject) in excinfo.value.message
+
+
+def test_read_tracking_refuses_a_non_table_tool(tmp_path: Path):
+    """A scalar 'tool' key would make the nested .get raise AttributeError."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text('tool = 1\n[project]\nname = "x"\nversion = "0.1.0"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        read_tracking(pyproject)
+    assert "must be a table" in excinfo.value.message
+
+
+def test_read_project_dependency_names_refuses_a_non_table_project(tmp_path: Path):
+    """Scalar and array-of-tables 'project' values are both refused."""
+    pyproject = tmp_path / "pyproject.toml"
+    for text in ('project = 1\n', 'project = "x"\n', '[[project]]\nname = "x"\n'):
+        pyproject.write_text(text)
+        with pytest.raises(ConfigError) as excinfo:
+            read_project_dependency_names(pyproject)
+        assert "must be a table" in excinfo.value.message

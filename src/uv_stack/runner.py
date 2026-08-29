@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Protocol
 
 from uv_stack.errors import ToolError
+from uv_stack.hints import render_positional_arg
 
 
 def _pty_supported() -> bool:
@@ -84,7 +85,7 @@ def _spawn_error(command: Command, error: OSError) -> ToolError:
     elif error.errno == errno.EACCES:
         # The message here reads "Permission denied", so the PATH hint below
         # would contradict it: the binary was found, it just cannot be run.
-        hint = f"{exe} is not executable. Try: chmod +x {exe}"
+        hint = f"{exe} is not executable. Try: chmod +x {render_positional_arg(exe)}"
     else:
         hint = f"Is {exe} installed and on PATH?"
     return ToolError(
@@ -134,6 +135,26 @@ class Runner(Protocol):
             or non-executable binary, or a working directory that cannot be
             entered. ``check`` does not suppress this: no process ran, so there
             is no exit code to hand back.
+        """
+        ...
+
+
+class InteractiveRunner(Protocol):
+    """Protocol for running a command that owns the terminal.
+
+    Separate from :class:`Runner` because the two modes are mutually
+    exclusive: ``Runner.run`` captures or tees output, which is exactly what a
+    full-screen editor cannot tolerate.
+    """
+
+    def run_interactive(self, command: Command) -> int:
+        """Run ``command`` with stdin, stdout, and stderr inherited.
+
+        :param command: The command to run.
+        :returns: The child's exit status when the child is waited for; a SIGINT
+            delivered to the foreground process group propagates as
+            ``KeyboardInterrupt`` instead.
+        :raises ToolError: When the process cannot be started at all.
         """
         ...
 
@@ -195,6 +216,25 @@ class SubprocessRunner:
                 detail=detail or None,
             )
         return CommandResult(returncode=returncode, stdout=stdout)
+
+    def run_interactive(self, command: Command) -> int:
+        """Hand the terminal to ``command`` and wait for it.
+
+        No redirection at all. ``run``'s pty allocation and stderr tee exist so
+        uv's progress bars survive capture; an editor needs a real stdin and
+        would be broken by either.
+
+        :param command: The command to run.
+        :returns: The child's exit status when the child is waited for; a SIGINT
+            delivered to the foreground process group propagates as
+            ``KeyboardInterrupt`` instead.
+        :raises ToolError: When the process cannot be started at all.
+        """
+        try:
+            completed = subprocess.run(command.args, cwd=command.cwd)
+        except OSError as error:
+            raise _spawn_error(command, error) from error
+        return completed.returncode
 
     @staticmethod
     def _run_with_pty(command: Command) -> tuple[int, str]:
@@ -271,3 +311,10 @@ class RecordingRunner:
         if self.responder is not None:
             return self.responder(command)
         return CommandResult(returncode=0, stdout="")
+
+    def run_interactive(self, command: Command) -> int:
+        """Record an interactive launch and report a scripted status."""
+        self.commands.append(command)
+        if self.responder is not None:
+            return self.responder(command).returncode
+        return 0

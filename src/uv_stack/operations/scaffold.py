@@ -27,8 +27,11 @@ _OVERWRITE_HINT = "Edit the file directly or choose another name."
 _SHADOW_HINT = "Unqualified tokens prefer profiles over bundles; choose another name."
 
 
-def _validate_name(kind: str, name: str) -> None:
-    """Validate a profile/bundle/environment name.
+def validate_name(kind: str, name: str) -> None:
+    """Reject a resource name that is not a safe file stem.
+
+    Public because ``stack edit`` builds a path from a user-supplied NAME and
+    must apply the identical rule the create commands apply.
 
     :param kind: Type of entity ("profile", "bundle", "environment").
     :param name: Name to validate.
@@ -202,7 +205,7 @@ def write_profile(
     :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
         neither refuses nor degrades to no locking on; its docstring has the rule.
     """
-    _validate_name("profile", name)
+    validate_name("profile", name)
     shadow_message = (
         f"Profile '{name}' would shadow the existing bundle: {config.bundle_path(name)}"
     )
@@ -249,7 +252,7 @@ def write_bundle(
     :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
         neither refuses nor degrades to no locking on; its docstring has the rule.
     """
-    _validate_name("bundle", name)
+    validate_name("bundle", name)
     self_refs = bundle_self_references(name, tokens)
     if self_refs:
         raise ConfigError(
@@ -385,7 +388,7 @@ def write_env_sources(
     :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
         neither refuses nor degrades to no locking on; its docstring has the rule.
     """
-    _validate_name("environment", name)
+    validate_name("environment", name)
     # Preflight, adoption, both publishes and the withdrawal are one operation.
     # Unlocked, a competitor can adopt the python.txt this call published, win
     # the stack.txt race, and then lose its interpreter pin when this call's
@@ -509,7 +512,7 @@ def write_env_python(config: ConfigRoot, name: str, python: str) -> Path:
     :raises ConfigError: If ``name`` is not a valid environment name, if the
         environment has no ``stack.txt``, or if the per-name lock cannot be used.
     """
-    _validate_name("environment", name)
+    validate_name("environment", name)
     with name_lock(config.env_lock_path(name), name):
         stack_path = config.env_stack_path(name)
         if not stack_path.exists():

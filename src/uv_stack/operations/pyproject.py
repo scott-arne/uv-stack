@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import tomllib
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -145,6 +146,30 @@ def _subtable_keys(text: str) -> set[str]:
     }
 
 
+def _table(data: dict[str, Any], key: str, pyproject: Path) -> dict[str, Any]:
+    """Fetch a top-level table, refusing a present-but-non-table value.
+
+    ``data.get(key, {}).get(...)`` reads naturally and raises ``AttributeError``
+    the moment the key holds a scalar or an array of tables — not a
+    ``UvStackError``, so it escapes the CLI edge as a traceback. Every refusal
+    on this path has to be catchable: ``stack edit`` re-offers the editor on a
+    ``ConfigError`` and can do nothing with a traceback.
+
+    :param data: A parsed TOML document.
+    :param key: The top-level key to fetch.
+    :param pyproject: Path, for the message.
+    :returns: The table, or an empty one when the key is absent.
+    :raises ConfigError: When the key is present but is not a table.
+    """
+    value = data.get(key, {})
+    if not isinstance(value, dict):
+        raise ConfigError(
+            f"[{key}] in {pyproject} must be a table.",
+            hint=f"Replace the '{key}' value with a [{key}] table.",
+        )
+    return value
+
+
 def read_tracking(pyproject: Path) -> ProjectTracking | None:
     """Load the tracking table, or ``None`` when file or table is absent.
 
@@ -156,7 +181,8 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     "Field required" for the very key the subtable spells out.
 
     :param pyproject: Path to ``pyproject.toml``.
-    :raises ConfigError: On TOML syntax errors or schema-invalid tables.
+    :raises ConfigError: On TOML syntax errors, schema-invalid tables, or when
+        ``[tool]`` is present but is not a table.
     """
     if not pyproject.is_file():
         return None
@@ -167,7 +193,7 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
         raise ConfigError(
             f"Invalid TOML in {pyproject}: {exc}", hint="Fix the TOML syntax."
         ) from exc
-    table = data.get("tool", {}).get("uv-stack")
+    table = _table(data, "tool", pyproject).get("uv-stack")
     if table is None:
         return None
     if not isinstance(table, dict):
@@ -392,18 +418,36 @@ def read_project_dependency_names(pyproject: Path) -> set[str]:
     Includes names from PEP 508 direct references (``pkg @ https://...``).
     VCS-style entries (``git+https://...``) remain excluded.
 
-    Unreadable/missing files yield the empty set (refresh's own tracking
-    read reports real errors).
+    Unreadable/missing files yield the empty set; a readable file with the
+    wrong shape is refused.
+
+    :raises ConfigError: When ``[project.dependencies]`` is not an array, or
+        holds an element that is not a string.
     """
     try:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return set()
-    dependencies = data.get("project", {}).get("dependencies", [])
+    dependencies = _table(data, "project", pyproject).get("dependencies", [])
+    if not isinstance(dependencies, list):
+        # A bare string is the dangerous shape: it iterates as characters, so
+        # ownership would be computed from single letters instead of failing.
+        # Anything else is a TypeError one frame later. PEP 621 says array.
+        raise ConfigError(
+            f"[project.dependencies] in {pyproject} must be an array of strings.",
+            hint="Replace the value with a list, e.g. dependencies = [].",
+        )
     names: set[str] = set()
     for dependency in dependencies:
-        if isinstance(dependency, str):
-            name = ownership_name(dependency)
-            if name:
-                names.add(name)
+        if not isinstance(dependency, str):
+            # Skipping it would under-report ownership, leaving refresh free to
+            # remove an entry the user wrote, and would break the promise the
+            # message above makes about the array's elements.
+            raise ConfigError(
+                f"[project.dependencies] in {pyproject} must be an array of strings.",
+                hint='Quote every entry, e.g. dependencies = ["numpy"].',
+            )
+        name = ownership_name(dependency)
+        if name:
+            names.add(name)
     return names

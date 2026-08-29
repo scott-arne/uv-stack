@@ -275,6 +275,7 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack create env NAME [TOKENS]...` | Scaffold (optional) and build a shared environment (`--recreate` wipes and rebuilds it: the lock is compiled first, and the conda layer is destroyed only if that succeeds) |
 | `stack create profile NAME PKG...` | Write a new profile YAML (`--description`, `--tag`) |
 | `stack create bundle NAME TOKEN...` | Write a new bundle YAML (`--description`, `--tag`) |
+| `stack edit KIND [NAME]` | Open a profile, bundle, env source, or project file in your editor and validate it when the editor exits |
 | `stack upgrade [NAMES]...` | Re-render, re-lock, and sync shared environments |
 | `stack refresh` | Re-resolve a tracked project against current profiles/bundles |
 | `stack status [NAMES]...` | Shared-env build state: drift, lock freshness, existence |
@@ -285,6 +286,80 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack doctor [--fix]` | Detect problems; `--fix` applies the safe repairs |
 | `stack completion bash\|zsh\|fish` | Print the shell-completion script |
 | `stack config init` | Create missing config directories (bare primitive) |
+
+### Editing configuration
+
+`stack edit` opens a config file in your editor and checks it the moment the
+editor exits. If the file does not validate, the error is shown and the editor
+is offered again, with your changes left in place. Nothing is reverted: if you
+decline the re-offer, the file stays exactly as you left it and the command
+exits non-zero. When stdin is not a terminal there is no re-offer at all — the
+error is printed and the command exits 1. Quitting the editor with a non-zero
+status (`:cq` in vi) aborts without validating at all.
+
+```bash
+stack edit profile ds              # profiles/ds.yaml
+stack edit bundle standard         # bundles/standard.yaml
+stack edit env                     # envs/main/stack.txt
+stack edit env chem --file python  # envs/chem/python.txt
+stack edit project                 # ./pyproject.toml
+```
+
+On success the command names the file it validated and how to apply the change:
+`stack upgrade NAME` for an environment, `stack refresh` for a tracked project,
+and for a profile or bundle a reminder that it takes effect on the next upgrade
+or refresh.
+
+`--file` selects which environment source to open and accepts `stack`
+(default), `python`, `micromamba`, `channels`, and `local`
+(`requirements.local.in`). It applies to `env` only. An optional source that
+does not exist yet is opened anyway, so this is how you add a
+`channels.txt`. `edit` never creates a profile, bundle, or environment — use
+`stack create` for that.
+
+Symlinked config files work, so a profile can live in a dotfiles repo and be
+linked into the config root. When the file you name is itself a symlink, the
+success line reports the real file it resolves to rather than the link, so you
+can see where the write landed. A link pointing at nothing is refused instead
+of followed.
+
+The editor is chosen from the first of these that is set:
+
+1. `--editor`
+2. `$UV_STACK_EDITOR`
+3. `<config-root>/editor.txt`
+4. `$VISUAL`
+5. `$EDITOR`
+
+The value is a command line, so `code -w` and `emacsclient -nw` both work; a
+value that is spelled as a path — absolute, `~`-prefixed, or containing a `/` —
+and names an existing file is used as a single argument, so a path containing
+spaces needs no quoting, and a leading `~` is expanded to your home directory.
+The edited file is appended as the final argument. An empty
+environment variable or `editor.txt` is skipped rather than treated as a
+choice, so an exported-but-empty `$VISUAL` does not shadow `$EDITOR`. If none
+of the five is set, `stack edit` says so and stops — it will not drop you into
+an editor you did not choose.
+
+`editor.txt` uses the same line grammar as the other config-root text files:
+the first non-blank line wins, and everything from a `#` onward is a comment.
+An editor command containing `#` would therefore be truncated, so set one of
+the environment variables instead if you need one.
+
+```bash
+echo 'code -w' > ~/.config/python-envs/editor.txt
+```
+
+**Use your editor's blocking flag.** `stack edit` validates the file at the
+moment the editor process exits. A GUI editor that hands the file to an
+already-running instance and returns immediately — `code` without `-w`,
+`subl` without `-w`, `gvim` without `-f` — exits before you have typed
+anything, so validation runs against the file as it was and reports success
+prematurely. This cannot be fixed from uv-stack's side; the fix is the flag:
+
+```bash
+stack edit profile ds --editor 'code -w'
+```
 
 ### Upgrading
 
@@ -399,6 +474,7 @@ All state lives under one directory, resolved in this order:
 ```text
 ~/.config/python-envs/
 ├── project-python.txt        # optional: default --python for `create project`
+├── editor.txt                # optional: editor command for `stack edit`
 ├── profiles/
 │   └── <name>.yaml
 ├── bundles/
@@ -423,6 +499,9 @@ All state lives under one directory, resolved in this order:
 | `UV_STACK_ROOT` | Config root (overridden by `--root`) |
 | `UV_ENV_ROOT` | The historical spelling of `UV_STACK_ROOT`; used only when `UV_STACK_ROOT` is unset or empty |
 | `UV_STACK_PROJECT_PYTHON` | Default interpreter spec for `stack create project` |
+| `UV_STACK_EDITOR` | Editor command for `stack edit`; beats `editor.txt`, `$VISUAL`, and `$EDITOR` |
+| `VISUAL` | Standard fallback editor for `stack edit`, below `editor.txt` |
+| `EDITOR` | Standard fallback editor for `stack edit`, consulted last |
 | `MAMBA_EXE` | Path to the micromamba binary; set by `micromamba shell init` and preferred over `PATH` lookup |
 
 ## Tips and gotchas

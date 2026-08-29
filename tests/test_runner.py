@@ -10,6 +10,7 @@ from uv_stack.runner import (
     _PTY_AVAILABLE,
     Command,
     CommandResult,
+    InteractiveRunner,
     RecordingRunner,
     SubprocessRunner,
     _spawn_error,
@@ -18,6 +19,17 @@ from uv_stack.runner import (
 
 def test_command_equality():
     assert Command(["uv", "pip", "check"]) == Command(["uv", "pip", "check"])
+
+
+def test_interactive_runner_protocol_is_satisfied():
+    """Both implementations satisfy the InteractiveRunner protocol.
+
+    The import itself is the guard: deleting or renaming the protocol would
+    fail here rather than at the first CLI call site.
+    """
+    runners: list[InteractiveRunner] = [SubprocessRunner(), RecordingRunner()]
+    for runner in runners:
+        assert callable(runner.run_interactive)
 
 
 def test_recording_runner_records_and_returns_default():
@@ -233,3 +245,102 @@ def test_subprocess_runner_unenterable_cwd_hints_the_directory(tmp_path):
     assert exc.value.returncode == 127
     assert "Cannot enter the working directory" in exc.value.hint
     assert "chmod +x" not in exc.value.hint
+
+
+def test_recording_runner_records_interactive_runs():
+    rec = RecordingRunner()
+    assert rec.run_interactive(Command(["vim", "/tmp/x.txt"])) == 0
+    assert rec.commands == [Command(["vim", "/tmp/x.txt"])]
+
+
+def test_recording_runner_interactive_uses_responder():
+    rec = RecordingRunner(responder=lambda command: CommandResult(returncode=3))
+    assert rec.run_interactive(Command(["vim", "/tmp/x.txt"])) == 3
+    assert rec.commands == [Command(["vim", "/tmp/x.txt"])]
+
+
+def test_subprocess_runner_interactive_returns_child_status():
+    runner = SubprocessRunner()
+    assert runner.run_interactive(Command([sys.executable, "-c", "raise SystemExit(0)"])) == 0
+    assert runner.run_interactive(Command([sys.executable, "-c", "raise SystemExit(7)"])) == 7
+
+
+def test_subprocess_runner_interactive_reports_a_missing_binary():
+    runner = SubprocessRunner()
+    with pytest.raises(ToolError) as excinfo:
+        runner.run_interactive(Command(["uv-stack-no-such-editor-xyz"]))
+    assert excinfo.value.returncode == 127
+
+
+def test_subprocess_runner_interactive_honours_cwd(tmp_path):
+    runner = SubprocessRunner()
+    marker = tmp_path / "here.txt"
+    status = runner.run_interactive(
+        Command(
+            [sys.executable, "-c", "import pathlib; pathlib.Path('here.txt').write_text('x')"],
+            cwd=tmp_path,
+        )
+    )
+    assert status == 0
+    assert marker.is_file()
+
+
+def test_subprocess_runner_interactive_reports_a_non_executable_binary(tmp_path):
+    """A non-executable file fails with the chmod hint, not the PATH hint."""
+    shim = tmp_path / "editor"
+    shim.write_text("#!/bin/sh\n")
+    runner = SubprocessRunner()
+    with pytest.raises(ToolError) as excinfo:
+        runner.run_interactive(Command([str(shim)]))
+    assert excinfo.value.returncode == 127
+    assert "not executable" in excinfo.value.hint
+    assert f"chmod +x {shim}" in excinfo.value.hint
+
+
+def test_subprocess_runner_interactive_shell_quotes_chmod_hint(tmp_path):
+    """A non-executable editor with spaces and metacharacters gets quoted."""
+    from uv_stack.hints import render_positional_arg
+
+    shim = tmp_path / "bad editor; rm -rf /"
+    shim.write_text("#!/bin/sh\n")
+    runner = SubprocessRunner()
+    with pytest.raises(ToolError) as excinfo:
+        runner.run_interactive(Command([str(shim)]))
+    assert excinfo.value.returncode == 127
+    assert "not executable" in excinfo.value.hint
+    assert f"chmod +x {render_positional_arg(str(shim))}" in excinfo.value.hint
+
+
+def test_subprocess_runner_interactive_inherits_the_terminal(tmp_path):
+    """An editor needs the real stdin, stdout and stderr, not pipes.
+
+    ``run`` deliberately captures and tees; this mode must not. Comparing the
+    child's fd identities against the parent's is the only assertion that
+    fails if any redirection is reintroduced.
+
+    pytest leaves the parent's stdin on /dev/null, so without replacing fd 0
+    a ``stdin=subprocess.DEVNULL`` regression would be indistinguishable.
+    """
+    probe = (
+        "import os, sys, pathlib; "
+        "pathlib.Path(sys.argv[1]).write_text("
+        "repr([(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in (0, 1, 2)]))"
+    )
+    seen = tmp_path / "fds.txt"
+    stand_in = tmp_path / "stdin.txt"
+    stand_in.write_text("")
+    saved = os.dup(0)
+    try:
+        with open(stand_in) as replacement:
+            os.dup2(replacement.fileno(), 0)
+            try:
+                expected = repr([(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in (0, 1, 2)])
+                status = SubprocessRunner().run_interactive(
+                    Command([sys.executable, "-c", probe, str(seen)])
+                )
+            finally:
+                os.dup2(saved, 0)
+    finally:
+        os.close(saved)
+    assert status == 0
+    assert seen.read_text() == expected

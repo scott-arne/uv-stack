@@ -996,3 +996,16 @@ def test_write_env_python_rejects_invalid_name(config_tree: ConfigRoot):
     with pytest.raises(ConfigError) as excinfo:
         write_env_python(config_tree, "a/b", "3.14")
     assert "Invalid environment name" in str(excinfo.value.message)
+
+
+def test_validate_name_is_public():
+    """`stack edit` builds paths from NAME, so it needs this rule by name.
+
+    One rule with one implementation: a second copy in the CLI would drift.
+    """
+    from uv_stack.operations.scaffold import validate_name
+
+    validate_name("profile", "ds")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_name("profile", "../../../etc/passwd")
+    assert "Invalid profile name" in excinfo.value.message
