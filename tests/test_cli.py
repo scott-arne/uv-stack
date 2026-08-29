@@ -2686,13 +2686,31 @@ def test_edit_project_prints_refresh_next_step(tmp_path: Path, monkeypatch):
     project = tmp_path / "proj"
     project.mkdir()
     (project / "pyproject.toml").write_text(
-        '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8"
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n'
+        "[tool.uv-stack]\nversion = 1\nstack = []\n",
+        encoding="utf-8",
     )
     monkeypatch.chdir(project)
     _install_editor(monkeypatch, _FakeEditor())
     result = CliRunner().invoke(cli, ["--root", str(root), "edit", "project"])
     assert result.exit_code == 0
     assert "Apply it with: stack refresh" in result.output
+
+
+def test_edit_untracked_project_prints_no_apply_hint(tmp_path: Path, monkeypatch):
+    """An untracked project validates with a warning but no apply hint."""
+    root = _seeded_root(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+    _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "project"])
+    assert result.exit_code == 0
+    assert "[tool.uv-stack]" in _combined_output(result)
+    assert "Apply it with:" not in result.output
 
 
 @pytest.mark.parametrize("kind", ["profile", "bundle"])
@@ -2743,6 +2761,44 @@ def test_edit_rejects_a_traversing_env_name(tmp_path: Path, monkeypatch):
     assert result.exit_code == 1
     assert "Invalid environment name" in _combined_output(result)
     assert fake.commands == []
+
+
+def test_edit_rejects_an_empty_env_name(tmp_path: Path, monkeypatch):
+    """An empty string is not a valid env name and must not default to 'main'."""
+    root = _env_root(tmp_path)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "env", ""])
+    assert result.exit_code == 1
+    assert "Invalid environment name" in _combined_output(result)
+    assert fake.commands == []
+
+
+def test_edit_rejects_a_traversing_bundle_name(tmp_path: Path, monkeypatch):
+    """Bundle traversal guard with write sentinel."""
+    root = _seeded_root(tmp_path)
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("untouched\n", encoding="utf-8")
+    fake = _install_editor(monkeypatch, _FakeEditor(lambda path: path.write_text("x")))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "bundle", "../../outside"])
+    assert result.exit_code == 1
+    assert "Invalid bundle name" in _combined_output(result)
+    assert fake.commands == []
+    assert outside.read_text() == "untouched\n"
+
+
+def test_edit_rejects_a_traversing_env_with_sentinel(tmp_path: Path, monkeypatch):
+    """Env traversal guard with write sentinel that can actually be reached."""
+    root = _env_root(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "stack.txt"
+    sentinel.write_text("untouched\n", encoding="utf-8")
+    fake = _install_editor(monkeypatch, _FakeEditor(lambda path: path.write_text("x")))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "env", "../../outside"])
+    assert result.exit_code == 1
+    assert "Invalid environment name" in _combined_output(result)
+    assert fake.commands == []
+    assert sentinel.read_text() == "untouched\n"
 
 
 def test_edit_refuses_a_missing_profile(tmp_path: Path, monkeypatch):
@@ -2806,6 +2862,40 @@ def test_edit_refuses_a_target_that_is_not_a_regular_file(tmp_path: Path, monkey
     assert result.exit_code == 1
     assert "Not a regular file" in _combined_output(result)
     assert fake.commands == []
+
+
+def test_edit_refuses_a_broken_symlink(tmp_path: Path, monkeypatch):
+    """A dangling symlink in an optional env file location is rejected."""
+    root = _env_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    channels = ConfigRoot(root).env_channels_path("main")
+    channels.unlink(missing_ok=True)
+    channels.symlink_to(tmp_path / "nonexistent.txt")
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "env", "main", "--file", "channels"]
+    )
+    assert result.exit_code == 1
+    assert "Broken symlink" in _combined_output(result)
+    assert fake.commands == []
+
+
+def test_edit_symlinked_profile_names_the_real_file(tmp_path: Path, monkeypatch):
+    """When the target is a symlink, the success line names the resolved file."""
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    real_file = tmp_path / "real-ds.yaml"
+    real_file.write_text("includes:\n  - numpy\n", encoding="utf-8")
+    cfg.profile_path("linked").unlink(missing_ok=True)
+    cfg.profile_path("linked").symlink_to(real_file)
+    _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "linked"])
+    assert result.exit_code == 0
+    assert str(real_file) in result.output
+    assert "linked" not in result.output or str(real_file) in result.output
 
 
 def test_edit_reports_no_configured_editor(tmp_path: Path, monkeypatch):

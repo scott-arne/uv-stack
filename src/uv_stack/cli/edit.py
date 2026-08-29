@@ -8,6 +8,7 @@ print the same panel a second time.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from uv_stack.errors import (
 )
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.edit import missing_project_error, validate
+from uv_stack.operations.pyproject import read_tracking
 from uv_stack.operations.scaffold import validate_name
 from uv_stack.runner import Command, InteractiveRunner, SubprocessRunner
 
@@ -64,6 +66,11 @@ def _require_regular_file(path: Path) -> None:
 
     :raises ConfigError: When something other than a regular file is there.
     """
+    if path.is_symlink() and not path.exists():
+        raise ConfigError(
+            f"Broken symlink: {path}",
+            hint="Point it at a real file, or remove it.",
+        )
     if path.exists() and not path.is_file():
         raise ConfigError(
             f"Not a regular file: {path}",
@@ -129,12 +136,15 @@ def _argv(editor: EditorCommand, target: Path) -> list[str]:
         raise
 
 
-def _next_step(kind: str, name: str) -> None:
+def _next_step(kind: str, name: str, target: Path) -> None:
     """Print the command that makes the edit take effect."""
     if kind == "env":
         echo(f"Apply it with: stack upgrade {render_positional_arg(name)}")
     elif kind == "project":
-        echo("Apply it with: stack refresh")
+        # An untracked pyproject validates with a warning, but refresh refuses
+        # it outright, so naming refresh here would contradict that warning.
+        if read_tracking(target) is not None:
+            echo("Apply it with: stack refresh")
     else:
         echo("Applies on the next 'stack upgrade' or 'stack refresh'.")
 
@@ -181,9 +191,10 @@ def _edit_loop(
             ):
                 sys.exit(1)
             continue
-        echo(f"Validated {target}")
+        shown = Path(os.path.realpath(target)) if target.is_symlink() else target
+        echo(f"Validated {shown}")
         render_warnings(warnings)
-        _next_step(kind, name)
+        _next_step(kind, name, target)
         return
 
 
@@ -237,7 +248,7 @@ def edit(
             )
         resource = ""
     elif kind == "env":
-        resource = name or "main"
+        resource = "main" if name is None else name
         # "environment" matches the wording `stack create env` uses.
         validate_name("environment", resource)
     elif name is None:
