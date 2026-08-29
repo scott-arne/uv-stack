@@ -150,7 +150,9 @@ class InteractiveRunner(Protocol):
         """Run ``command`` with stdin, stdout, and stderr inherited.
 
         :param command: The command to run.
-        :returns: The child's exit status.
+        :returns: The child's exit status when the child is waited for; a SIGINT
+            delivered to the foreground process group propagates as
+            ``KeyboardInterrupt`` instead.
         :raises ToolError: When the process cannot be started at all.
         """
         ...
@@ -222,7 +224,9 @@ class SubprocessRunner:
         would be broken by either.
 
         :param command: The command to run.
-        :returns: The child's exit status.
+        :returns: The child's exit status when the child is waited for; a SIGINT
+            delivered to the foreground process group propagates as
+            ``KeyboardInterrupt`` instead.
         :raises ToolError: When the process cannot be started at all.
         """
         try:
