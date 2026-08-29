@@ -2895,7 +2895,21 @@ def test_edit_symlinked_profile_names_the_real_file(tmp_path: Path, monkeypatch)
     result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "linked"])
     assert result.exit_code == 0
     assert str(real_file) in result.output
-    assert "linked" not in result.output or str(real_file) in result.output
+
+
+def test_edit_success_line_keeps_an_unresolved_parent_path(tmp_path: Path, monkeypatch):
+    """A symlinked parent is not resolved away; only a symlinked target is."""
+    real = tmp_path / "real"
+    real.mkdir()
+    root = _seeded_root(real)
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    linked_root = link / root.name
+    _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(linked_root), "edit", "profile", "ds"])
+    assert result.exit_code == 0
+    assert str(linked_root) in result.output
+    assert str(root) not in result.output
 
 
 def test_edit_reports_no_configured_editor(tmp_path: Path, monkeypatch):
