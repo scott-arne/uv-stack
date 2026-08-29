@@ -114,18 +114,20 @@ def validate_env(config: ConfigRoot, name: str) -> list[str]:
     """
     with _decoding(f"a file under {config.env_dir(name)}"):
         env = config.load_env(name)
+    with _decoding(f"a file under {config.root}"):
         resolver = Resolver(config)
         stack = resolver.resolve(env.stack)
         resolver.flatten(stack)
         render_requirements_in(stack, config, name)
         render_environment_yml(env)
+    with _decoding(f"a file under {config.env_dir(name)}"):
         local = config.env_local_path(name)
         if local.is_file():
             # render_requirements_in emits '-r <path>' for this file without
             # ever opening it, so an explicit read is the only thing that sees
             # a decode failure in what the user may have just edited.
             local.read_text(encoding="utf-8")
-        return list(stack.warnings)
+    return list(stack.warnings)
 
 
 def validate_project(config: ConfigRoot, cwd: Path) -> list[str]:

@@ -275,6 +275,19 @@ def test_validate_env_rejects_an_undecodable_local_requirements_file(
     assert "not valid UTF-8" in excinfo.value.message
 
 
+def test_validate_env_names_the_root_when_an_included_profile_is_undecodable(
+    config_tree: ConfigRoot,
+):
+    # The seeded env 'main' has stack '@standard', and bundle 'standard'
+    # includes profile 'ds'. Corrupting ds.yaml should report the root, not the
+    # env directory — the resolver reads profiles under <root>/profiles/.
+    config_tree.profile_path("ds").write_bytes(b"includes:\n  - \xff\xfe\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "env", "main", config_tree.root)
+    assert "not valid UTF-8" in excinfo.value.message
+    assert str(config_tree.env_dir("main")) not in excinfo.value.message
+
+
 def test_validate_project_warns_when_untracked(config_tree: ConfigRoot, tmp_path: Path):
     project = tmp_path / "proj"
     project.mkdir()
