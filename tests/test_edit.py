@@ -214,14 +214,15 @@ def test_argv_expands_a_tilde_path_without_a_space(tmp_path: Path, monkeypatch):
 def test_argv_splits_a_tilde_path_that_names_nothing(tmp_path: Path, monkeypatch):
     """A ``~`` path naming no file gets no error of its own.
 
-    It falls through to the split exactly as a nonexistent absolute path
-    does, so the launch fails in the runner and reports the command that was
-    actually tried.
+    It falls through to the split, and argv[0] is still expanded — the uniform
+    rule applies whether the file exists or not. The launch fails in the runner
+    and reports the expanded command that was actually tried, exactly as a
+    nonexistent absolute path does.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
     editor = EditorCommand("~/nope", "$EDITOR", from_flag=False)
     assert editor_argv(editor, tmp_path / "t.txt") == [
-        "~/nope",
+        str(tmp_path / "nope"),
         str(tmp_path / "t.txt"),
     ]
 
@@ -248,6 +249,48 @@ def test_argv_survives_a_home_directory_that_cannot_be_determined(
     assert editor_argv(editor, tmp_path / "t.txt") == [
         "~/My",
         "Editor/code",
+        str(tmp_path / "t.txt"),
+    ]
+
+
+def test_argv_expands_a_tilde_path_with_flags(tmp_path: Path, monkeypatch):
+    """A ``~`` path with flags is split *and* argv[0] is expanded.
+
+    The ``~/bin/ed -w`` and ``~/bin/ed`` forms should not diverge: the first
+    clause of the README — "The value is a command line, so ``code -w`` and
+    ``emacsclient -nw`` both work" — implies flags work with any command form.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    exe = tmp_path / "bin" / "ed"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    editor = EditorCommand("~/bin/ed -w", "$EDITOR", from_flag=False)
+    assert editor_argv(editor, tmp_path / "t.txt") == [
+        str(exe),
+        "-w",
+        str(tmp_path / "t.txt"),
+    ]
+
+
+def test_argv_survives_expansion_failure_on_the_split_branch(
+    tmp_path: Path, monkeypatch
+):
+    """The ``RuntimeError`` guard applies to the split branch too.
+
+    When ``Path.expanduser`` cannot determine a home directory, the error must
+    not escape as a traceback. Instead the command is used as-is, which will
+    fail at launch the way a nonexistent path already does.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def _no_home(self: Path) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "expanduser", _no_home)
+    editor = EditorCommand("~/bin/ed -w", "$EDITOR", from_flag=False)
+    assert editor_argv(editor, tmp_path / "t.txt") == [
+        "~/bin/ed",
+        "-w",
         str(tmp_path / "t.txt"),
     ]
 

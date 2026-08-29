@@ -85,6 +85,31 @@ def _is_path_like(command: str) -> bool:
     return os.sep in command or (os.altsep is not None and os.altsep in command)
 
 
+def _expand_tilde_if_present(path: str) -> str:
+    """Expand a leading ``~`` in a path, or return the path unchanged.
+
+    When the path starts with ``~``, attempt to expand it. If expansion fails
+    (no home directory can be determined), the original path is returned, which
+    will fail at launch the way a nonexistent absolute path does. Non-``~``
+    paths are returned as-is to preserve forms like ``./editor``, since
+    ``str(Path('./editor'))`` would drop the ``./`` and turn a
+    directory-relative command into a ``$PATH`` lookup.
+
+    :param path: A path string that may start with ``~``.
+    :returns: The expanded path if expansion succeeds, otherwise the original.
+    """
+    if not path.startswith("~"):
+        return path
+    try:
+        return str(Path(path).expanduser())
+    except RuntimeError:
+        # No home directory to expand against. Returning the original path
+        # degrades to a launch failure, which reports the command that was
+        # tried. Letting the RuntimeError out would be a traceback, since
+        # UvStackGroup.invoke handles only UvStackError and OSError.
+        return path
+
+
 def _launchable_path(command: str) -> str | None:
     """The command as a single launchable path, or ``None`` when it is not one.
 
@@ -101,18 +126,14 @@ def _launchable_path(command: str) -> str | None:
     """
     if not _is_path_like(command):
         return None
-    try:
-        expanded = Path(command).expanduser()
-    except RuntimeError:
-        # No home directory to expand against. Reporting the command as
-        # not-a-path degrades to the split below, which fails at launch the
-        # way a nonexistent path already does; letting the RuntimeError out
-        # would be a traceback, since UvStackGroup.invoke handles only
-        # UvStackError and OSError.
+    expanded = _expand_tilde_if_present(command)
+    # Detect expansion failure for ~ paths: if it started with ~ but came
+    # back unchanged, expansion failed, so degrade to split.
+    if command.startswith("~") and expanded == command:
         return None
-    if not expanded.is_file():
+    if not Path(expanded).is_file():
         return None
-    return str(expanded) if command.startswith("~") else command
+    return expanded
 
 
 def editor_argv(editor: EditorCommand, target: Path) -> list[str]:
@@ -120,11 +141,14 @@ def editor_argv(editor: EditorCommand, target: Path) -> list[str]:
 
     A command string that is spelled as a path *and* names an existing file is
     used as one argument: such a path may legitimately contain spaces, and
-    ``shlex`` would split it into arguments that do not exist. A leading ``~``
-    is expanded in that argument, because nothing downstream expands it.
-    Anything else is a small shell-like command line and is split, so ``code
-    -w`` and ``emacsclient -nw`` work no matter what the current directory
-    happens to contain.
+    ``shlex`` would split it into arguments that do not exist. Anything else is
+    a small shell-like command line and is split, so ``code -w`` and
+    ``emacsclient -nw`` work no matter what the current directory happens to
+    contain.
+
+    A leading ``~`` on ``argv[0]`` is expanded in both cases, because nothing
+    downstream expands it: the runner hands argv to ``execvp``, with no shell
+    behind it.
 
     :param editor: The resolved command and its source.
     :param target: The file to open, appended as the final argument.
@@ -147,4 +171,6 @@ def editor_argv(editor: EditorCommand, target: Path) -> list[str]:
         ) from error
     if not parts or not parts[0]:
         raise ConfigError("No editor configured.", hint=_CHAIN_HINT)
+    # Expand ~ in argv[0] to match the single-argument branch behavior.
+    parts[0] = _expand_tilde_if_present(parts[0])
     return [*parts, str(target)]
