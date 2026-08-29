@@ -123,6 +123,21 @@ def test_remove_tracking(tmp_path: Path):
     assert remove_tracking(pyproject) is False
 
 
+def test_remove_tracking_names_an_undecodable_file(tmp_path: Path):
+    """_read_exact refuses bad bytes the same way it refuses bad TOML.
+
+    Every command that mutates a project runs ``read_tracking`` first, which
+    would already have converted this — but a mutation entered through this
+    function alone must not be the one path that tracebacks.
+    """
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_bytes(b'[project]\nname = "\xff\xfe"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        remove_tracking(pyproject)
+    assert "not valid UTF-8" in excinfo.value.message
+    assert str(pyproject) in excinfo.value.message
+
+
 def test_python_omitted_when_none(tmp_path: Path):
     tracking = ProjectTracking(stack=["ds"], applied=["numpy"])
     text = render_tracking(tracking)

@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from uv_stack.errors import ConfigError
 from uv_stack.parse import clean_line, first_clean_line, read_clean_lines, requirement_name
 
 
@@ -20,6 +21,21 @@ def test_read_clean_lines_skips_blank_and_comment(tmp_path: Path):
 
 def test_read_clean_lines_missing_file_returns_empty(tmp_path: Path):
     assert read_clean_lines(tmp_path / "nope.in") == []
+
+
+def test_read_clean_lines_names_an_undecodable_file(tmp_path: Path):
+    """Every env source file is read through here, so this is where it converts.
+
+    ``UnicodeDecodeError`` is a ``ValueError``: uncaught it reaches the CLI
+    edge as a traceback, and caught further up it can no longer say which of
+    an env's five source files was the bad one.
+    """
+    f = tmp_path / "channels.txt"
+    f.write_bytes(b"conda-\xff\xfeforge\n")
+    with pytest.raises(ConfigError) as excinfo:
+        read_clean_lines(f)
+    assert "not valid UTF-8" in excinfo.value.message
+    assert str(f) in excinfo.value.message
 
 
 def test_first_clean_line_returns_default_when_empty(tmp_path: Path):

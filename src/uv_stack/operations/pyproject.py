@@ -16,7 +16,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from uv_stack.errors import ConfigError, NewerSchemaError
-from uv_stack.fsutil import atomic_write
+from uv_stack.fsutil import atomic_write, read_text_utf8
 from uv_stack.models import ProjectTracking
 from uv_stack.parse import ownership_name
 
@@ -57,10 +57,24 @@ def _read_exact(pyproject: Path) -> str:
 
     :param pyproject: Path to an existing ``pyproject.toml``.
     :returns: The file's exact text.
-    :raises ConfigError: If the file does not parse as TOML.
+    :raises ConfigError: If the file is not valid UTF-8, or does not parse as
+        TOML.
     """
-    with pyproject.open(encoding="utf-8", newline="") as handle:
-        text = handle.read()
+    try:
+        with pyproject.open(encoding="utf-8", newline="") as handle:
+            text = handle.read()
+    except UnicodeDecodeError as error:
+        # Hand-rolled rather than read_text_utf8 because newline="" is the
+        # whole point of this read and read_text cannot express it. The two
+        # commands that mutate a project both call read_tracking first, which
+        # would already have converted this; the conversion belongs here anyway
+        # so a caller reaching remove_tracking on its own gets an error rather
+        # than a traceback, and so this function refuses malformed bytes the
+        # same way it refuses malformed TOML.
+        raise ConfigError(
+            f"Cannot read {pyproject}: not valid UTF-8.",
+            hint="Re-save the file as UTF-8 text.",
+        ) from error
     try:
         tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
@@ -186,7 +200,7 @@ def read_tracking(pyproject: Path) -> ProjectTracking | None:
     """
     if not pyproject.is_file():
         return None
-    text = pyproject.read_text(encoding="utf-8")
+    text = read_text_utf8(pyproject)
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:

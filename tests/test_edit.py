@@ -403,6 +403,30 @@ def test_validate_profile_rejects_undecodable_bytes(config_tree: ConfigRoot):
     with pytest.raises(ConfigError) as excinfo:
         validate(config_tree, "profile", "ds", config_tree.root)
     assert "not valid UTF-8" in excinfo.value.message
+    assert str(config_tree.profile_path("ds")) in excinfo.value.message
+
+
+def test_validate_bundle_rejects_undecodable_bytes(config_tree: ConfigRoot):
+    """The bundle's own YAML, which only ``validate_bundle`` reads."""
+    config_tree.bundle_path("standard").write_bytes(b"includes:\n  - \xff\xfe\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "bundle", "standard", config_tree.root)
+    assert "not valid UTF-8" in excinfo.value.message
+    assert str(config_tree.bundle_path("standard")) in excinfo.value.message
+
+
+def test_validate_bundle_names_an_undecodable_include(config_tree: ConfigRoot):
+    """A decode failure reached through the resolver names the file it read.
+
+    The bundle itself decodes; ``ds.yaml``, which its includes pull in, does
+    not. The path is known only inside the read, so the message can only name
+    it if the conversion happens there — naming the config root instead leaves
+    the user to search a tree for the file they just broke.
+    """
+    config_tree.profile_path("ds").write_bytes(b"includes:\n  - \xff\xfe\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "bundle", "standard", config_tree.root)
+    assert str(config_tree.profile_path("ds")) in excinfo.value.message
 
 
 def test_validate_bundle_rejects_a_self_reference(config_tree: ConfigRoot):
@@ -443,19 +467,29 @@ def test_validate_env_rejects_an_undecodable_local_requirements_file(
     with pytest.raises(ConfigError) as excinfo:
         validate(config_tree, "env", "main", config_tree.root)
     assert "not valid UTF-8" in excinfo.value.message
+    assert str(config_tree.env_local_path("main")) in excinfo.value.message
 
 
-def test_validate_env_names_the_root_when_an_included_profile_is_undecodable(
+def test_validate_env_names_an_undecodable_included_profile(
     config_tree: ConfigRoot,
 ):
     # The seeded env 'main' has stack '@standard', and bundle 'standard'
-    # includes profile 'ds'. Corrupting ds.yaml should report the root, not the
-    # env directory — the resolver reads profiles under <root>/profiles/.
+    # includes profile 'ds'. Corrupting ds.yaml must report ds.yaml: the file
+    # the user opened was under the env directory, so a message scoped to
+    # either that directory or the config root would point away from the fault.
     config_tree.profile_path("ds").write_bytes(b"includes:\n  - \xff\xfe\n")
     with pytest.raises(ConfigError) as excinfo:
         validate(config_tree, "env", "main", config_tree.root)
     assert "not valid UTF-8" in excinfo.value.message
-    assert str(config_tree.env_dir("main")) not in excinfo.value.message
+    assert str(config_tree.profile_path("ds")) in excinfo.value.message
+
+
+def test_validate_env_names_the_undecodable_source_file(config_tree: ConfigRoot):
+    """An env has five source files; the message must say which one failed."""
+    config_tree.env_channels_path("main").write_bytes(b"conda-\xff\xfeforge\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate(config_tree, "env", "main", config_tree.root)
+    assert str(config_tree.env_channels_path("main")) in excinfo.value.message
 
 
 def test_validate_project_warns_when_untracked(config_tree: ConfigRoot, tmp_path: Path):
@@ -487,6 +521,7 @@ def test_validate_project_rejects_undecodable_bytes(
     with pytest.raises(ConfigError) as excinfo:
         validate(config_tree, "project", "", project)
     assert "not valid UTF-8" in excinfo.value.message
+    assert str(project / "pyproject.toml") in excinfo.value.message
 
 
 def test_validate_project_resolves_tracked_stack_tokens(

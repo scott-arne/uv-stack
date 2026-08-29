@@ -16,7 +16,7 @@ import yaml
 from pydantic import ValidationError
 
 from uv_stack.errors import ConfigError
-from uv_stack.fsutil import require_regular_file
+from uv_stack.fsutil import read_text_utf8, require_regular_file
 from uv_stack.hints import render_positional_arg
 from uv_stack.models import Bundle, EnvConfig, Profile
 from uv_stack.parse import first_clean_line, read_clean_lines
@@ -185,20 +185,12 @@ class ConfigRoot:
 
         :returns: The first clean line of ``editor.txt``, or ``None`` when the
             file is absent or holds nothing but blanks and comments.
-        :raises ConfigError: When the file is not valid UTF-8. The underlying
-            ``UnicodeDecodeError`` is a ``ValueError``, which the CLI edge does
-            not render, and this read happens before the editor launches, so
-            the post-edit validators cannot cover it.
+        :raises ConfigError: When the file is not valid UTF-8. Raised by
+            :func:`~uv_stack.fsutil.read_text_utf8` under the read; this one
+            matters enough to document because it happens before the editor
+            launches, so the post-edit validators cannot cover it.
         """
-        path = self.editor_path()
-        try:
-            line = first_clean_line(path, default="")
-        except UnicodeDecodeError as error:
-            raise ConfigError(
-                f"Cannot read {path}: it is not valid UTF-8.",
-                hint="Re-save editor.txt as UTF-8 text, or delete it.",
-            ) from error
-        return line or None
+        return first_clean_line(self.editor_path(), default="") or None
 
     def _load_yaml_model(
         self, path: Path, name: str, model: type[_ModelT]
@@ -219,7 +211,7 @@ class ConfigRoot:
                 hint=f"Create {path} or check the name.",
             )
         try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            data = yaml.safe_load(read_text_utf8(path))
         except yaml.YAMLError as exc:
             raise ConfigError(
                 f"Invalid YAML in {path}: {exc}",

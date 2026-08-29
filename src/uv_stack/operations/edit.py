@@ -5,16 +5,20 @@ consumes it already runs, so ``stack edit`` accepts exactly what the next
 ``stack upgrade`` or ``stack refresh`` would accept. Anything shallower would
 report success on a file the very next command rejects, which is the failure
 the validate-on-exit loop exists to prevent.
+
+Undecodable input needs no handling here. Every reader these functions reach
+converts its own ``UnicodeDecodeError`` in the frame that still holds the
+path, so the error already names the file. A net at this level could only say
+"a file under <directory>", which is the one thing the user cannot act on.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
+from uv_stack.fsutil import read_text_utf8
 from uv_stack.operations.pyproject import (
     read_project_dependency_names,
     read_tracking,
@@ -22,25 +26,6 @@ from uv_stack.operations.pyproject import (
 )
 from uv_stack.render import render_environment_yml, render_requirements_in
 from uv_stack.resolver import Resolver, bundle_self_references
-
-
-@contextmanager
-def _decoding(subject: str) -> Iterator[None]:
-    """Convert a UTF-8 decode failure into a ``ConfigError``.
-
-    ``UnicodeDecodeError`` is a ``ValueError``, so it is neither a
-    ``UvStackError`` nor an ``OSError`` and would escape the CLI edge as a
-    traceback — for what is really just another "fix it and re-open" state.
-
-    :param subject: What could not be read, for the message.
-    """
-    try:
-        yield
-    except UnicodeDecodeError as error:
-        raise ConfigError(
-            f"Cannot read {subject}: not valid UTF-8.",
-            hint="Re-save the file as UTF-8 text.",
-        ) from error
 
 
 def missing_project_error(cwd: Path) -> ConfigError:
@@ -70,8 +55,7 @@ def validate_profile(config: ConfigRoot, name: str) -> list[str]:
         resolution warnings.
     :raises ConfigError: When the YAML is unreadable or fails the schema.
     """
-    with _decoding(str(config.profile_path(name))):
-        config.load_profile(name)
+    config.load_profile(name)
     return []
 
 
@@ -81,12 +65,12 @@ def validate_bundle(config: ConfigRoot, name: str) -> list[str]:
     :param config: Config root.
     :param name: Bundle name.
     :returns: Resolution warnings.
-    :raises ConfigError: When the YAML fails the schema, or the bundle
-        includes itself.
+    :raises ConfigError: When the bundle's own YAML — or that of a profile or
+        bundle it includes — is unreadable or fails the schema, or when the
+        bundle includes itself.
     :raises ResolutionError: When an include cannot be resolved.
     """
-    with _decoding(str(config.bundle_path(name))):
-        bundle = config.load_bundle(name)
+    bundle = config.load_bundle(name)
     self_refs = bundle_self_references(name, bundle.includes)
     if self_refs:
         raise ConfigError(
@@ -96,11 +80,10 @@ def validate_bundle(config: ConfigRoot, name: str) -> list[str]:
                 "literal package, or drop the include."
             ),
         )
-    with _decoding(f"a file under {config.root}"):
-        resolver = Resolver(config)
-        stack = resolver.resolve(bundle.includes)
-        resolver.flatten(stack)
-        return list(stack.warnings)
+    resolver = Resolver(config)
+    stack = resolver.resolve(bundle.includes)
+    resolver.flatten(stack)
+    return list(stack.warnings)
 
 
 def validate_env(config: ConfigRoot, name: str) -> list[str]:
@@ -116,21 +99,18 @@ def validate_env(config: ConfigRoot, name: str) -> list[str]:
     :raises ConfigError: When a source file is unreadable or renders no output.
     :raises ResolutionError: When a stack token cannot be resolved.
     """
-    with _decoding(f"a file under {config.env_dir(name)}"):
-        env = config.load_env(name)
-    with _decoding(f"a file under {config.root}"):
-        resolver = Resolver(config)
-        stack = resolver.resolve(env.stack)
-        resolver.flatten(stack)
-        render_requirements_in(stack, config, name)
-        render_environment_yml(env)
-    with _decoding(f"a file under {config.env_dir(name)}"):
-        local = config.env_local_path(name)
-        if local.is_file():
-            # render_requirements_in emits '-r <path>' for this file without
-            # ever opening it, so an explicit read is the only thing that sees
-            # a decode failure in what the user may have just edited.
-            local.read_text(encoding="utf-8")
+    env = config.load_env(name)
+    resolver = Resolver(config)
+    stack = resolver.resolve(env.stack)
+    resolver.flatten(stack)
+    render_requirements_in(stack, config, name)
+    render_environment_yml(env)
+    local = config.env_local_path(name)
+    if local.is_file():
+        # render_requirements_in emits '-r <path>' for this file without ever
+        # opening it, so an explicit read is the only thing that sees a decode
+        # failure in what the user may have just edited.
+        read_text_utf8(local)
     return list(stack.warnings)
 
 
@@ -153,24 +133,21 @@ def validate_project(config: ConfigRoot, cwd: Path) -> list[str]:
         # table alike, so without this the deleted case reads as "untracked"
         # and exits successfully.
         raise missing_project_error(cwd)
-    with _decoding(str(pyproject)):
-        tracking = read_tracking(pyproject)
+    tracking = read_tracking(pyproject)
     if tracking is None:
         return [
             f"{pyproject} has no [tool.uv-stack] table; 'stack refresh' will "
             "not manage this project."
         ]
-    with _decoding(str(pyproject)):
-        # Both of these are things `stack refresh` does before it mutates
-        # anything, and neither has a side effect. Skipping them lets the
-        # re-offer loop call a file valid that the next refresh refuses.
-        read_project_dependency_names(pyproject)
-        validate_tracking_write(pyproject, tracking)
-    with _decoding(f"a file under {config.root}"):
-        resolver = Resolver(config)
-        stack = resolver.resolve(tracking.stack)
-        resolver.flatten(stack)
-        return list(stack.warnings)
+    # Both of these are things `stack refresh` does before it mutates anything,
+    # and neither has a side effect. Skipping them lets the re-offer loop call
+    # a file valid that the next refresh refuses.
+    read_project_dependency_names(pyproject)
+    validate_tracking_write(pyproject, tracking)
+    resolver = Resolver(config)
+    stack = resolver.resolve(tracking.stack)
+    resolver.flatten(stack)
+    return list(stack.warnings)
 
 
 def validate(config: ConfigRoot, kind: str, name: str, cwd: Path) -> list[str]:

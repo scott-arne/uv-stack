@@ -147,6 +147,29 @@ def require_regular_file(path: Path) -> None:
         )
 
 
+def read_text_utf8(path: Path) -> str:
+    """Read a file as UTF-8, naming it when the bytes do not decode.
+
+    ``UnicodeDecodeError`` is a ``ValueError``, so it is neither a
+    ``UvStackError`` nor an ``OSError`` and reaches the CLI edge as a traceback
+    — for what is really just "re-save this file". Converting it here, in the
+    frame that still holds the path, is what lets the message say *which* file:
+    a caller several layers up knows only the directory it started from, and
+    "a file under ~/.config/python-envs" is not something a user can act on.
+
+    :param path: The file to read.
+    :returns: The decoded text.
+    :raises ConfigError: When the bytes are not valid UTF-8.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise ConfigError(
+            f"Cannot read {path}: not valid UTF-8.",
+            hint="Re-save the file as UTF-8 text.",
+        ) from error
+
+
 class Published(NamedTuple):
     """How :func:`link_or_copy_no_replace` published a file, and what it saw.
 

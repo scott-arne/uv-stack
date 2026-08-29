@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from uv_stack.fsutil import read_text_utf8
+
 
 def clean_line(line: str) -> str:
     """Strip a trailing ``#`` comment and surrounding whitespace.
@@ -26,10 +28,11 @@ def read_clean_lines(path: Path) -> list[str]:
 
     :param path: File to read.
     :returns: Cleaned lines in order; an empty list if the file does not exist.
+    :raises ConfigError: When the file is not valid UTF-8.
     """
     if not path.is_file():
         return []
-    cleaned = (clean_line(raw) for raw in path.read_text(encoding="utf-8").splitlines())
+    cleaned = (clean_line(raw) for raw in read_text_utf8(path).splitlines())
     return [line for line in cleaned if line]
 
 
@@ -39,6 +42,7 @@ def first_clean_line(path: Path, default: str = "") -> str:
     :param path: File to read.
     :param default: Value returned when the file is missing or has no content.
     :returns: The first cleaned line, or ``default``.
+    :raises ConfigError: When the file is not valid UTF-8.
     """
     lines = read_clean_lines(path)
     return lines[0] if lines else default

@@ -81,7 +81,7 @@ def _bare_usage_warnings(
                 warnings.append(
                     template.format(name=name, location=f"envs/{env}/stack.txt", kind=kind)
                 )
-        except (OSError, UnicodeDecodeError):
+        except (UvStackError, OSError):
             continue  # unreadable envs are doctor's job, not create's
     try:
         bundles = config.list_bundles()
