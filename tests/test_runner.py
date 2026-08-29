@@ -10,6 +10,7 @@ from uv_stack.runner import (
     _PTY_AVAILABLE,
     Command,
     CommandResult,
+    InteractiveRunner,
     RecordingRunner,
     SubprocessRunner,
     _spawn_error,
@@ -18,6 +19,17 @@ from uv_stack.runner import (
 
 def test_command_equality():
     assert Command(["uv", "pip", "check"]) == Command(["uv", "pip", "check"])
+
+
+def test_interactive_runner_protocol_is_satisfied():
+    """Both implementations satisfy the InteractiveRunner protocol.
+
+    The import itself is the guard: deleting or renaming the protocol would
+    fail here rather than at the first CLI call site.
+    """
+    runners: list[InteractiveRunner] = [SubprocessRunner(), RecordingRunner()]
+    for runner in runners:
+        assert callable(runner.run_interactive)
 
 
 def test_recording_runner_records_and_returns_default():
@@ -244,6 +256,7 @@ def test_recording_runner_records_interactive_runs():
 def test_recording_runner_interactive_uses_responder():
     rec = RecordingRunner(responder=lambda command: CommandResult(returncode=3))
     assert rec.run_interactive(Command(["vim", "/tmp/x.txt"])) == 3
+    assert rec.commands == [Command(["vim", "/tmp/x.txt"])]
 
 
 def test_subprocess_runner_interactive_returns_child_status():
@@ -272,12 +285,27 @@ def test_subprocess_runner_interactive_honours_cwd(tmp_path):
     assert marker.is_file()
 
 
+def test_subprocess_runner_interactive_reports_a_non_executable_binary(tmp_path):
+    """A non-executable file fails with the chmod hint, not the PATH hint."""
+    shim = tmp_path / "editor"
+    shim.write_text("#!/bin/sh\n")
+    runner = SubprocessRunner()
+    with pytest.raises(ToolError) as excinfo:
+        runner.run_interactive(Command([str(shim)]))
+    assert excinfo.value.returncode == 127
+    assert "not executable" in excinfo.value.hint
+    assert f"chmod +x {shim}" in excinfo.value.hint
+
+
 def test_subprocess_runner_interactive_inherits_the_terminal(tmp_path):
     """An editor needs the real stdin, stdout and stderr, not pipes.
 
     ``run`` deliberately captures and tees; this mode must not. Comparing the
     child's fd identities against the parent's is the only assertion that
     fails if any redirection is reintroduced.
+
+    pytest leaves the parent's stdin on /dev/null, so without replacing fd 0
+    a ``stdin=subprocess.DEVNULL`` regression would be indistinguishable.
     """
     probe = (
         "import os, sys, pathlib; "
@@ -285,9 +313,18 @@ def test_subprocess_runner_interactive_inherits_the_terminal(tmp_path):
         "repr([(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in (0, 1, 2)]))"
     )
     seen = tmp_path / "fds.txt"
-    expected = repr([(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in (0, 1, 2)])
-    status = SubprocessRunner().run_interactive(
-        Command([sys.executable, "-c", probe, str(seen)])
-    )
+    stand_in = tmp_path / "stdin.txt"
+    stand_in.write_text("")
+    saved = os.dup(0)
+    with open(stand_in) as replacement:
+        os.dup2(replacement.fileno(), 0)
+        try:
+            expected = repr([(os.fstat(fd).st_dev, os.fstat(fd).st_ino) for fd in (0, 1, 2)])
+            status = SubprocessRunner().run_interactive(
+                Command([sys.executable, "-c", probe, str(seen)])
+            )
+        finally:
+            os.dup2(saved, 0)
+            os.close(saved)
     assert status == 0
     assert seen.read_text() == expected
