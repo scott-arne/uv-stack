@@ -2938,6 +2938,89 @@ def test_edit_refuses_a_non_regular_file_on_every_target_path(
     assert fake.commands == []
 
 
+@pytest.mark.parametrize(
+    "break_it,expected,hint",
+    [
+        (lambda path: path.mkdir(), "Not a regular file", "Remove or rename"),
+        (
+            lambda path: path.symlink_to(path.parent / "nowhere"),
+            "Broken symlink",
+            "Point it at a real file",
+        ),
+    ],
+    ids=["directory", "dangling-symlink"],
+)
+@pytest.mark.parametrize(
+    # The optional env files, whose readers test is_file() and so report a
+    # directory or a dangling symlink as absent. Nothing downstream of the
+    # editor notices, so only re-running the guard can.
+    "file,attr",
+    [
+        ("python", "env_python_path"),
+        ("micromamba", "env_micromamba_path"),
+        ("channels", "env_channels_path"),
+        ("local", "env_local_path"),
+    ],
+)
+def test_edit_refuses_a_target_the_editor_made_non_regular(
+    tmp_path: Path, monkeypatch, file, attr, break_it, expected, hint
+):
+    """The guard must run again after the editor exits, not only before it.
+
+    Without the second run the command blesses a path it refuses on the very
+    next invocation: validation reads the broken target as an absent optional
+    file and reports success. The refusal is raised outside the re-offer arm
+    because its hint tells the user to act in the shell, which is advice the
+    next editor session cannot follow.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = _env_root(tmp_path)
+    target = getattr(ConfigRoot(root), attr)("main")
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+
+    def _replace(path: Path) -> None:
+        path.unlink(missing_ok=True)
+        break_it(path)
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_replace))
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "env", "main", "--file", file], input="n\n"
+    )
+    assert result.exit_code == 1
+    output = _flat_panel(result)
+    assert f"{expected}: {target}" in output
+    assert hint in output
+    assert "Re-open the editor?" not in output
+    assert "Validated" not in output
+    assert "Apply it with:" not in output
+    assert len(fake.commands) == 1
+
+
+def test_edit_still_validates_an_optional_env_file_left_absent(
+    tmp_path: Path, monkeypatch
+):
+    """Opening an optional file and quitting without saving must still pass.
+
+    The post-editor guard is a no-op on a genuinely absent path, which is the
+    normal outcome of opening ``requirements.local.in`` for the first time.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = _env_root(tmp_path)
+    local = ConfigRoot(root).env_local_path("main")
+    assert not local.exists()
+    _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "env", "main", "--file", "local"]
+    )
+    assert result.exit_code == 0
+    assert not local.exists()
+    assert f"Validated {local}" in result.output
+    assert "Apply it with: stack upgrade main" in result.output
+
+
 def test_edit_symlinked_profile_names_the_real_file(tmp_path: Path, monkeypatch):
     """When the target is a symlink, the success line names the resolved file."""
     root = _seeded_root(tmp_path)

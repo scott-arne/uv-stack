@@ -181,6 +181,10 @@ def _edit_loop(
     put straight back into the editor with the error in view.
 
     :raises ToolError: When the editor cannot start or exits non-zero.
+    :raises ConfigError: When the editor left something other than a regular
+        file at the target. Deliberately outside the re-offer arm: the hint
+        tells the user to remove or rename what is there, which is work for
+        the shell, not for another editor session.
     :raises NewerSchemaError: Straight through; re-editing cannot resolve a
         forward-schema refusal, so offering the editor again would loop the
         user through an edit that can never satisfy the check.
@@ -195,6 +199,11 @@ def _edit_loop(
                 returncode=status,
                 hint="Exit the editor normally to have the file checked.",
             )
+        # The pre-launch guard cannot speak for what the editor did. Optional
+        # env sources are read through an is_file() test that calls a directory
+        # or a dangling symlink absent, so validation would pass on a target
+        # the next `stack edit` refuses.
+        _require_regular_file(target)
         try:
             warnings = validate(config, kind, name, cwd)
         except NewerSchemaError:
