@@ -2998,6 +2998,41 @@ def test_edit_refuses_a_target_the_editor_made_non_regular(
     assert len(fake.commands) == 1
 
 
+def test_edit_names_a_broken_stack_file_rather_than_calling_it_missing(
+    tmp_path: Path, monkeypatch
+):
+    """A ``stack.txt`` the editor broke is refused as non-regular, not absent.
+
+    Without the post-editor guard this falls through to ``require_env``, whose
+    ``is_file()`` test reports a directory as a missing stack file and sends
+    the user to ``stack create env``, which refuses the very same path because
+    its ``O_EXCL`` open sees it. That is the two-command deadlock the guard
+    exists to prevent, so the wording is the property worth pinning.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = _env_root(tmp_path)
+    target = ConfigRoot(root).env_stack_path("main")
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+
+    def _replace(path: Path) -> None:
+        path.unlink()
+        path.mkdir()
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_replace))
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "env", "main"], input="n\n"
+    )
+    assert result.exit_code == 1
+    output = _flat_panel(result)
+    assert f"Not a regular file: {target}" in output
+    assert "Missing stack file" not in output
+    assert "stack create env" not in output
+    assert "Validated" not in output
+    assert len(fake.commands) == 1
+
+
 def test_edit_still_validates_an_optional_env_file_left_absent(
     tmp_path: Path, monkeypatch
 ):
