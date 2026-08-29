@@ -213,11 +213,6 @@ def edit(
 ) -> None:
     """Open a config file in your editor.
 
-    The summary line is kept under 45 characters deliberately: click truncates
-    a command's short help to that width for the group listing, so a longer
-    first line would make the help assertion in the tests depend on where the
-    ellipsis lands.
-
     The file is validated when the editor exits. If it does not validate, the
     error is shown and the editor is offered again, with your changes left in
     place.

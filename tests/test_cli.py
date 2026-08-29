@@ -27,13 +27,6 @@ def _row_cells(output: str, name: str) -> list[str]:
 def _combined_output(result) -> str:
     """stdout plus stderr, tolerant of click versions that separate them."""
     try:
-        # In click 8.x with default CliRunner, result.output already includes
-        # stderr, and result.stderr contains the same content. Concatenating
-        # them would duplicate every error message. Also, when rich prints to
-        # error_console, CliRunner captures it in both streams, so we need to
-        # check if stderr is a subset of stdout to avoid duplication.
-        if result.output == result.stderr or result.stderr in result.output:
-            return result.output
         return result.output + result.stderr
     except (ValueError, AttributeError):
         return result.output
@@ -2593,6 +2586,7 @@ def test_edit_profile_opens_the_profile_file(tmp_path: Path, monkeypatch):
     assert fake.commands == [
         Command(["fake-editor", str(ConfigRoot(root).profile_path("ds"))])
     ]
+    assert "Applies on the next 'stack upgrade' or 'stack refresh'." in result.output
 
 
 def test_edit_env_defaults_to_the_stack_file_of_main(tmp_path: Path, monkeypatch):
@@ -2687,6 +2681,20 @@ def test_edit_accepts_non_env_kinds_without_file(tmp_path: Path, monkeypatch, ki
     assert len(fake.commands) == 1
 
 
+def test_edit_project_prints_refresh_next_step(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(project)
+    _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "project"])
+    assert result.exit_code == 0
+    assert "Apply it with: stack refresh" in result.output
+
+
 @pytest.mark.parametrize("kind", ["profile", "bundle"])
 def test_edit_requires_a_name_for_profile_and_bundle(tmp_path: Path, monkeypatch, kind):
     root = _seeded_root(tmp_path)
@@ -2705,7 +2713,7 @@ def test_edit_project_rejects_a_name(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "name", ["../../../etc/passwd", "../escape", "sub/dir", "a\\b"]
+    "name", ["../../../etc/passwd", "../escape", "sub/dir", "a\\b", "../../outside"]
 )
 def test_edit_rejects_a_traversing_name(tmp_path: Path, monkeypatch, name):
     """The traversal guard, which is the reason validate_name is applied here.
@@ -2923,7 +2931,7 @@ def test_edit_renders_the_failure_panel_exactly_once(tmp_path: Path, monkeypatch
         cli, ["--root", str(root), "edit", "profile", "ds"], input="n\n"
     )
     assert result.exit_code == 1
-    assert _combined_output(result).count("Invalid profile config in") == 1
+    assert result.output.count("Invalid profile config in") == 1
 
 
 def test_edit_does_not_prompt_without_a_tty(tmp_path: Path, monkeypatch):
@@ -3253,6 +3261,26 @@ def test_edit_help_documents_the_file_and_editor_options(monkeypatch):
     assert "env only" in output
     assert "stack" in output and "micromamba" in output and "local" in output
     assert "--editor" in output
+
+
+def test_stdin_is_tty_seam_delegates_to_stdin(monkeypatch):
+    """The _stdin_is_tty seam must call sys.stdin.isatty() in production."""
+    import sys
+
+    from uv_stack.cli.edit import _stdin_is_tty
+
+    class FakeStdin:
+        def __init__(self, is_tty):
+            self.is_tty = is_tty
+
+        def isatty(self):
+            return self.is_tty
+
+    monkeypatch.setattr(sys, "stdin", FakeStdin(True))
+    assert _stdin_is_tty() is True
+
+    monkeypatch.setattr(sys, "stdin", FakeStdin(False))
+    assert _stdin_is_tty() is False
 
 
 # ---------------------------------------------------------------------------
