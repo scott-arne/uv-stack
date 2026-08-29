@@ -3314,6 +3314,48 @@ def test_edit_reoffers_after_an_unresolvable_project_token(tmp_path: Path, monke
     assert "Validated" not in output
 
 
+@pytest.mark.parametrize("deps", ["[1]", '["numpy", 1]'], ids=["only", "mixed"])
+def test_edit_project_refuses_a_non_string_dependency(
+    tmp_path: Path, monkeypatch, deps
+):
+    """The refresh preflight must reject the shape its own message promises.
+
+    A non-string element skipped in silence also leaves the ownership set
+    short, so refresh would be free to remove an entry the user wrote. The
+    loop must see this as a ConfigError, not a traceback.
+    """
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n\n'
+        "[tool.uv-stack]\nversion = 1\nstack = []\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+
+    def _bad_dependency(path: Path) -> None:
+        path.write_text(
+            f'[project]\nname = "x"\nversion = "0.1.0"\ndependencies = {deps}\n\n'
+            "[tool.uv-stack]\nversion = 1\nstack = []\n",
+            encoding="utf-8",
+        )
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_bad_dependency))
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "project"], input="n\n")
+    assert result.exit_code == 1
+    output = _flat_panel(result)
+    # The bracketed table name survives rendering only because render_error
+    # builds a rich Text; as markup it would be eaten as a style tag.
+    assert "[project.dependencies]" in output
+    assert "must be an array of strings" in output
+    assert "Re-open the editor?" in output
+    assert "Validated" not in output
+    assert len(fake.commands) == 1
+
+
 def test_edit_reports_undecodable_local_requirements(tmp_path: Path, monkeypatch):
     """render_requirements_in emits '-r <path>' without opening the file.
 

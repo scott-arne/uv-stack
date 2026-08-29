@@ -421,7 +421,8 @@ def read_project_dependency_names(pyproject: Path) -> set[str]:
     Unreadable/missing files yield the empty set; a readable file with the
     wrong shape is refused.
 
-    :raises ConfigError: When ``[project.dependencies]`` is not an array.
+    :raises ConfigError: When ``[project.dependencies]`` is not an array, or
+        holds an element that is not a string.
     """
     try:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
@@ -438,8 +439,15 @@ def read_project_dependency_names(pyproject: Path) -> set[str]:
         )
     names: set[str] = set()
     for dependency in dependencies:
-        if isinstance(dependency, str):
-            name = ownership_name(dependency)
-            if name:
-                names.add(name)
+        if not isinstance(dependency, str):
+            # Skipping it would under-report ownership, leaving refresh free to
+            # remove an entry the user wrote, and would break the promise the
+            # message above makes about the array's elements.
+            raise ConfigError(
+                f"[project.dependencies] in {pyproject} must be an array of strings.",
+                hint='Quote every entry, e.g. dependencies = ["numpy"].',
+            )
+        name = ownership_name(dependency)
+        if name:
+            names.add(name)
     return names
