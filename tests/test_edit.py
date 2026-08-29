@@ -180,6 +180,78 @@ def test_argv_ignores_a_cwd_file_named_like_the_whole_command(
     ]
 
 
+def test_argv_expands_a_tilde_path_with_a_space(tmp_path: Path, monkeypatch):
+    """A ``~`` path with a space is one argument *and* is expanded.
+
+    Both halves matter. ``shlex`` would shred the path into arguments that
+    name nothing, and a surviving literal ``~`` would too: the runner hands
+    argv to ``execvp``, which has no shell behind it to expand the prefix.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    exe = tmp_path / "My Editor" / "code"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    editor = EditorCommand("~/My Editor/code", "$EDITOR", from_flag=False)
+    assert editor_argv(editor, tmp_path / "t.txt") == [
+        str(exe),
+        str(tmp_path / "t.txt"),
+    ]
+
+
+def test_argv_expands_a_tilde_path_without_a_space(tmp_path: Path, monkeypatch):
+    """Expansion is not a spaces-only concern; ``execvp`` needs it either way."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    exe = tmp_path / "bin" / "ed"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+    editor = EditorCommand("~/bin/ed", "$EDITOR", from_flag=False)
+    assert editor_argv(editor, tmp_path / "t.txt") == [
+        str(exe),
+        str(tmp_path / "t.txt"),
+    ]
+
+
+def test_argv_splits_a_tilde_path_that_names_nothing(tmp_path: Path, monkeypatch):
+    """A ``~`` path naming no file gets no error of its own.
+
+    It falls through to the split exactly as a nonexistent absolute path
+    does, so the launch fails in the runner and reports the command that was
+    actually tried.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    editor = EditorCommand("~/nope", "$EDITOR", from_flag=False)
+    assert editor_argv(editor, tmp_path / "t.txt") == [
+        "~/nope",
+        str(tmp_path / "t.txt"),
+    ]
+
+
+def test_argv_survives_a_home_directory_that_cannot_be_determined(
+    tmp_path: Path, monkeypatch
+):
+    """``Path.expanduser`` raises ``RuntimeError`` with no home to expand to.
+
+    ``UvStackGroup.invoke`` handles ``UvStackError`` and ``OSError`` only, so
+    that would escape as a traceback. Treating it as "not a usable path"
+    degrades to the split — today's behaviour — instead of crashing.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    exe = tmp_path / "My Editor" / "code"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def _no_home(self: Path) -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(Path, "expanduser", _no_home)
+    editor = EditorCommand("~/My Editor/code", "$EDITOR", from_flag=False)
+    assert editor_argv(editor, tmp_path / "t.txt") == [
+        "~/My",
+        "Editor/code",
+        str(tmp_path / "t.txt"),
+    ]
+
+
 @pytest.mark.parametrize(
     "rung", ["UV_STACK_EDITOR", "editor.txt", "VISUAL", "EDITOR"]
 )

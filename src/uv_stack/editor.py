@@ -85,14 +85,46 @@ def _is_path_like(command: str) -> bool:
     return os.sep in command or (os.altsep is not None and os.altsep in command)
 
 
+def _launchable_path(command: str) -> str | None:
+    """The command as a single launchable path, or ``None`` when it is not one.
+
+    A ``~`` prefix is expanded here rather than left for the runner: argv goes
+    to ``execvp``, with no shell behind it to expand anything, so a literal
+    ``~/bin/editor`` would name nothing. Only that form is rewritten. Every
+    other spelling already resolves as written, and putting it through ``Path``
+    would drop a leading ``./`` and so turn a directory-relative command into a
+    ``$PATH`` lookup.
+
+    :param command: The configured command string.
+    :returns: The path to launch, or ``None`` when the command is not spelled
+        as a path, names no existing file, or cannot be expanded.
+    """
+    if not _is_path_like(command):
+        return None
+    try:
+        expanded = Path(command).expanduser()
+    except RuntimeError:
+        # No home directory to expand against. Reporting the command as
+        # not-a-path degrades to the split below, which fails at launch the
+        # way a nonexistent path already does; letting the RuntimeError out
+        # would be a traceback, since UvStackGroup.invoke handles only
+        # UvStackError and OSError.
+        return None
+    if not expanded.is_file():
+        return None
+    return str(expanded) if command.startswith("~") else command
+
+
 def editor_argv(editor: EditorCommand, target: Path) -> list[str]:
     """Build the argv that opens ``target`` in ``editor``.
 
     A command string that is spelled as a path *and* names an existing file is
-    used verbatim: such a path may legitimately contain spaces, and ``shlex``
-    would split it into arguments that do not exist. Anything else is a small
-    shell-like command line and is split, so ``code -w`` and ``emacsclient
-    -nw`` work no matter what the current directory happens to contain.
+    used as one argument: such a path may legitimately contain spaces, and
+    ``shlex`` would split it into arguments that do not exist. A leading ``~``
+    is expanded in that argument, because nothing downstream expands it.
+    Anything else is a small shell-like command line and is split, so ``code
+    -w`` and ``emacsclient -nw`` work no matter what the current directory
+    happens to contain.
 
     :param editor: The resolved command and its source.
     :param target: The file to open, appended as the final argument.
@@ -100,8 +132,9 @@ def editor_argv(editor: EditorCommand, target: Path) -> list[str]:
     :raises ConfigError: When the command cannot be split because its quoting
         is unbalanced, or splits to nothing at all.
     """
-    if _is_path_like(editor.command) and Path(editor.command).is_file():
-        return [editor.command, str(target)]
+    launchable = _launchable_path(editor.command)
+    if launchable is not None:
+        return [launchable, str(target)]
     try:
         parts = shlex.split(editor.command)
     except ValueError as error:
