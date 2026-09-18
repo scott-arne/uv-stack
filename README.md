@@ -16,42 +16,6 @@ between two tools:
 | `micromamba` | The Python interpreter and conda-level binary packages (from `conda-forge`) |
 | `uv` | Every pip-level package — compiled to a lock file, then synced exactly |
 
-```mermaid
-flowchart LR
-    subgraph sources["You define these"]
-        P["profiles/*.yaml"]
-        B["bundles/*.yaml"]
-        S["envs/NAME/stack.txt"]
-        T["pyproject.toml<br>tool.uv-stack"]
-    end
-
-    R{{"stack create env<br>stack upgrade"}}
-    EY["environment.yml"]
-    RI["requirements.in"]
-    LK["requirements.lock.txt"]
-    ENV[("shared env: NAME")]
-
-    R2{{"stack create project<br>stack refresh"}}
-    D["pyproject.toml<br>dependencies"]
-    V[("project .venv")]
-
-    P --> R
-    B --> R
-    S --> R
-    R --> EY
-    R --> RI
-    EY -- "micromamba create" --> ENV
-    RI -- "uv pip compile" --> LK
-    LK -- "uv pip sync + check" --> ENV
-
-    P --> R2
-    B --> R2
-    T --> R2
-    R2 -- "records what it applied" --> T
-    R2 -- "uv add --no-sync" --> D
-    D -- "uv sync" --> V
-```
-
 `micromamba` builds the room (the interpreter and any conda-level binaries);
 `uv` furnishes it (fast, fully locked pip packages). The same profiles and
 bundles feed both destinations. The box on the left is what you author —
