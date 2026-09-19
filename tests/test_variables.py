@@ -139,6 +139,27 @@ def test_carriage_return_counts_as_multiline():
     assert placement_problem("numpy\rpandas")[0] == "multiline-entry"
 
 
+def test_trailing_backslash_is_refused_at_placement():
+    # An entry ending in a backslash continues onto the next line and swallows
+    # the requirement after it.
+    kind, explanation = placement_problem(r"-e ${DEV}\ ")
+    assert kind == "continuation-entry"
+    assert "backslash" in explanation
+
+
+def test_reference_free_entry_ending_in_backslash_is_refused():
+    # The continuation check applies to all entries, not just those with
+    # references.
+    kind, _ = placement_problem(r"numpy\ ")
+    assert kind == "continuation-entry"
+
+
+def test_check_placement_refuses_trailing_backslash():
+    with pytest.raises(ConfigError) as excinfo:
+        check_placement([r"-e /some/path\ "])
+    assert "backslash" in excinfo.value.message
+
+
 def test_malformed_reference_is_reported_before_placement():
     # This entry is BOTH malformed and in the ownership position; malformed wins.
     kind, explanation = placement_problem("${DEV")
@@ -382,5 +403,6 @@ def test_expansion_problem_is_none_for_a_safe_substitution():
     # An entry written as a comment stays one: expansion introduced nothing,
     # and placement already had its chance to refuse the entry.
     assert expansion_problem("#${DEV}/pkg", "#/home/me/dev/pkg") is None
-    # Likewise an entry that already ended in a separator.
+    # Placement refuses entries ending in a backslash, so expansion_problem
+    # deliberately does not re-judge them.
     assert expansion_problem("${DEV}\\", "/home/me/dev\\") is None

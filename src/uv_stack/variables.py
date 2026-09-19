@@ -163,6 +163,13 @@ def placement_problem(entry: str) -> tuple[str, str] | None:
             "condition 0: the entry spans more than one line; write one "
             "requirement per line",
         )
+    if entry.rstrip().endswith("\\"):
+        return (
+            "continuation-entry",
+            "a trailing backslash continues onto the next line and swallows "
+            "the requirement after it; write the path without a trailing "
+            "separator",
+        )
     fragment = _malformed_fragment(entry)
     if fragment is not None:
         return (
@@ -210,7 +217,8 @@ def check_placement(entries: Sequence[str], *, source: str | None = None) -> Non
             "A variable reference may only stand in a path or an option value: "
             "'-e ${DEV}/pkg', '--index-url ${HOST}/simple', or '${DEV}/pkg'. "
             "It may not name a distribution, and it may not sit inside a "
-            "'-r'/'-c' include."
+            "'-r'/'-c' include. A trailing backslash is a line continuation "
+            "and must be removed."
         ),
     )
 
@@ -255,7 +263,8 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
       next physical line, so a value that is a lone backslash turns
       ``-e ${DEV}`` into an entry that swallows whichever requirement the
       render writes after it. A backslash anywhere else is a path separator
-      and stays admitted;
+      and stays admitted. An entry written with a trailing backslash is
+      refused at placement;
     - it introduces a newline. A value that is pure whitespace preserves the
       token count but splits the entry across multiple lines;
     - it introduces or changes the ownership name. A value like
