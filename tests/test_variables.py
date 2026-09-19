@@ -402,6 +402,25 @@ def test_a_value_may_not_leave_a_reference_behind():
     assert "unsubstituted" in excinfo.value.message
 
 
+def test_a_value_may_append_a_semicolon_to_a_path_entry():
+    # Measured against uv, not assumed: uv honours an environment marker only on
+    # a NAME-shaped requirement ('requests;os_name=="never"' resolves to nothing,
+    # silently). On a path-shaped one it folds the ';' into the path instead --
+    # './pkg;os_name=="never"' and '-e /abs/pkg;os_name=="never"' both fail with
+    # 'Distribution not found at: file://...;os_name==%22never%22'. So a value
+    # that appends a marker to a path cannot suppress a dependency; it only picks
+    # a different path, which is what values are for.
+    variables = Variables(declared=("TAIL",), values={"TAIL": ';os_name=="never"'})
+    assert expand_all(["./${TAIL}"], variables) == ['./;os_name=="never"']
+    # The name-shaped case, where uv would honour the marker, is unreachable: it
+    # is exactly the case ownership_name() claims, so the ownership comparison
+    # refuses it. The two notions of "is this a name" coincide.
+    variables = Variables(declared=("T",), values={"T": 'victim;os_name=="never"'})
+    with pytest.raises(ConfigError) as excinfo:
+        expand_all(["${T}/../pkg"], variables)
+    assert "ownership name" in excinfo.value.message
+
+
 def test_expansion_problem_is_none_for_a_safe_substitution():
     assert expansion_problem("-e ${DEV}/pkg", "-e /home/me/dev/pkg") is None
     assert expansion_problem("${DEV}/pkg", "/home/me/dev/pkg") is None
