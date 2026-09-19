@@ -107,7 +107,9 @@ def _find_span(lines: list[str], path: Path) -> tuple[int, int] | None:
 
     A marker counts only when what follows it on the line is spaces, tabs, or
     a CR/LF terminator. A marker ended by any other ``splitlines`` separator
-    is left unmatched, so such a file is refused rather than rewritten.
+    is left unmatched. When the file's other marker still matches, that is a
+    refusal; when neither does, the file reads as having no block at all and
+    the block is appended below the stale markers.
 
     :param lines: The file split on newlines.
     :param path: The file, for the message.

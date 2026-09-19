@@ -281,6 +281,7 @@ def test_an_end_marker_ended_by_an_unrestorable_separator_is_refused(
     with pytest.raises(ConfigError) as excinfo:
         write_portable_ignore(config_tree)
     assert str(path) in excinfo.value.message
+    assert "END on line(s) none" in excinfo.value.message
     assert path.read_bytes() == before
 
 
@@ -300,6 +301,7 @@ def test_a_begin_marker_ended_by_an_unrestorable_separator_is_refused(
     with pytest.raises(ConfigError) as excinfo:
         write_portable_ignore(config_tree)
     assert str(path) in excinfo.value.message
+    assert "BEGIN on line(s) none" in excinfo.value.message
     assert path.read_bytes() == before
 
 
