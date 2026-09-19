@@ -183,15 +183,16 @@ def test_expand_all_leaves_entries_without_references_alone():
 
 
 def test_a_value_is_substituted_once_and_is_not_rescanned():
-    # '${OTHER}' inside a value is opaque text to this module's substitution,
-    # but uv expands environment variables in requirements files, so the
-    # residual reference would resolve against the environment. Refuse it.
+    # OTHER is declared and has a value, so a second pass would resolve the
+    # '${OTHER}' that DEV's value contains. The refusal quotes the reference
+    # verbatim and never mentions '/zzz', which is what proves the single pass.
     variables = Variables(
         declared=("DEV", "OTHER"), values={"DEV": "/a/${OTHER}/b", "OTHER": "/zzz"}
     )
     with pytest.raises(ConfigError) as excinfo:
         expand_all(["-e ${DEV}/pkg"], variables)
-    assert "unsubstituted" in excinfo.value.message
+    assert "${OTHER}" in excinfo.value.message
+    assert "/zzz" not in excinfo.value.message
 
 
 def test_a_backslash_in_a_value_survives_substitution():

@@ -269,10 +269,11 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
       reference resolves against the environment and bypasses this module's
       declared-name and undefined-value checks.
 
-    Each check asks whether the substitution *introduced* the syntax, not
-    whether the result already held it: an entry written that way was
+    The first five checks ask whether the substitution *introduced* the syntax,
+    not whether the result already held it: an entry written that way was
     placement's to judge, and re-judging it here would refuse text no value
-    produced.
+    produced. The last one cannot take that shape, for the reason given where
+    it is implemented.
 
     :param entry: The entry as written, unexpanded.
     :param expanded: The same entry after substitution.
