@@ -402,6 +402,19 @@ def test_a_value_may_not_leave_a_reference_behind():
     assert "unsubstituted" in excinfo.value.message
 
 
+def test_trailing_whitespace_does_not_hide_an_introduced_continuation():
+    # The entry survives placement because its own tail is not a backslash, so
+    # the expansion guard is the only thing standing between this value and a
+    # line that swallows the next requirement. It compares stripped tails for
+    # the same reason placement does: the rendered line is stripped, so the
+    # trailing space disappears and the backslash ends the line.
+    variables = Variables(declared=("DEV",), values={"DEV": "\\"})
+    assert placement_problem("-e ${DEV} ") is None
+    with pytest.raises(ConfigError) as excinfo:
+        expand_all(["-e ${DEV} "], variables)
+    assert "backslash" in excinfo.value.message
+
+
 def test_a_value_may_append_a_semicolon_to_a_path_entry():
     # Measured against uv, not assumed: uv honours an environment marker only on
     # a NAME-shaped requirement ('requests;os_name=="never"' resolves to nothing,

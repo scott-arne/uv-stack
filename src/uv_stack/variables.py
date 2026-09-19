@@ -269,7 +269,9 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
       ``-e ${DEV}`` into an entry that swallows whichever requirement the
       render writes after it. A backslash anywhere else is a path separator
       and stays admitted. An entry written with a trailing backslash is
-      refused at placement;
+      refused at placement. Both sides are compared after stripping trailing
+      whitespace, matching placement: the rendered line is stripped, so a
+      trailing space cannot stop the backslash from landing at its end;
     - it introduces a newline. A value that is pure whitespace preserves the
       token count but splits the entry across multiple lines;
     - it introduces or changes the ownership name. A value like
@@ -311,7 +313,7 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
                 f"expansion turned the token {original!r} into {result!r}, "
                 "which starts a comment"
             )
-    if expanded.endswith("\\") and not entry.endswith("\\"):
+    if expanded.rstrip().endswith("\\") and not entry.rstrip().endswith("\\"):
         return (
             "expansion left the entry ending in a backslash, which continues "
             "onto the next line"
