@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from uv_stack.errors import ConfigError  # noqa: F401 — used in later steps
+from uv_stack.errors import ConfigError
 from uv_stack.parse import ownership_name
 from uv_stack.variables import (
     Variables,
@@ -234,10 +234,11 @@ def test_every_undeclared_name_is_reported_at_once():
 
 @pytest.mark.parametrize("entry", _ADMITTED_WITH_REFERENCES)
 def test_expansion_preserves_the_token_count(entry):
-    # A value holding whitespace would split one token into two and turn an
-    # editable path into a second, unintended requirement. Task 2's refusal of
-    # whitespace in a value is what keeps this invariant true; this is the test
-    # that fails if that refusal is ever relaxed.
+    # A value holding embedded whitespace would split one token into two and
+    # turn an editable path into a second, unintended requirement. Task 2's
+    # refusal of whitespace in a value keeps this invariant true for the
+    # embedded case; expansion_problem's newline refusal covers the
+    # whitespace-only case that preserves token count but spans multiple lines.
     expanded = expand_all([entry], _vars(DEV="/home/me/dev", HOST="https://h"))[0]
     assert len(expanded.split()) == len(entry.split())
 
@@ -328,6 +329,15 @@ def test_a_value_may_not_continue_the_entry_onto_the_next_line():
     with pytest.raises(ConfigError) as excinfo:
         expand_all(["-e ${DEV}"], _vars(DEV="\\"))
     assert "backslash" in excinfo.value.message
+
+
+def test_a_value_may_not_introduce_a_newline():
+    # A pure-whitespace value preserves the token count but splits the entry
+    # across multiple lines, which is the multiline-entry shape placement
+    # refuses at condition 0.
+    with pytest.raises(ConfigError) as excinfo:
+        expand_all(["-e ${DEV}/pkg"], _vars(DEV="\n"))
+    assert "newline" in excinfo.value.message
 
 
 def test_expansion_problem_is_none_for_a_safe_substitution():

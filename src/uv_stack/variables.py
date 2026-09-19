@@ -14,11 +14,11 @@ uv-stack record keeps the unexpanded text and stays portable.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence  # noqa: F401 — used in later steps
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from uv_stack.errors import ConfigError  # noqa: F401 — used in later steps
-from uv_stack.parse import ownership_name  # noqa: F401 — used in later steps
+from uv_stack.errors import ConfigError
+from uv_stack.parse import ownership_name
 
 #: A well-formed reference. Braces are mandatory, so a bare ``$`` in a direct
 #: reference URL is never mistaken for one.
@@ -241,7 +241,7 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
     becomes the attached recursive include ``-r/deps.txt`` under ``DEV=-r`` —
     admitted going in, a second requirements file coming out.
 
-    Refusing whitespace leaves three ways a value can still rewrite the entry,
+    Refusing whitespace leaves four ways a value can still rewrite the entry,
     and each gets its own comparison across the substitution:
 
     - it carries an option of its own, caught by comparing each token's option
@@ -255,7 +255,9 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
       next physical line, so a value that is a lone backslash turns
       ``-e ${DEV}`` into an entry that swallows whichever requirement the
       render writes after it. A backslash anywhere else is a path separator
-      and stays admitted.
+      and stays admitted;
+    - it introduces a newline. A value that is pure whitespace preserves the
+      token count but splits the entry across multiple lines.
 
     Each check asks whether the substitution *introduced* the syntax, not
     whether the result already held it: an entry written that way was
@@ -288,6 +290,13 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
         return (
             "expansion left the entry ending in a backslash, which continues "
             "onto the next line"
+        )
+    if ("\n" in expanded or "\r" in expanded) and not (
+        "\n" in entry or "\r" in entry
+    ):
+        return (
+            "expansion introduced a newline, turning a single entry into "
+            "multiple lines"
         )
     return None
 
