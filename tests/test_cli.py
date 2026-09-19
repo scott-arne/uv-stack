@@ -4809,6 +4809,71 @@ def test_create_env_refuses_placement_before_resolving_tokens(
     assert "Missing bundle" not in panel
 
 
+def test_create_env_refuses_placement_before_checking_python(
+    config_tree: ConfigRoot, monkeypatch
+):
+    # '--python 3.12.*' alone is a UsageError; placement must still win,
+    # because its guard is the first statement of the body.
+    monkeypatch.setattr("uv_stack.cli.create._run_upgrade", lambda *a, **kw: None)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root", str(config_tree.root), "create", "env", "new",
+            "--recreate", "--python", "3.12.*", "${PKG}",
+        ],
+        env={"COLUMNS": "300"},
+    )
+    assert result.exit_code != 0
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "must be a plain version" not in panel
+
+
+def test_create_bundle_refuses_placement_before_classifying_tokens(
+    config_tree: ConfigRoot,
+):
+    # Under --strict an unqualified token is itself an error. Placement runs
+    # ahead of classify(), so the refusal is what the user hears about.
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root", str(config_tree.root), "create", "bundle", "b",
+            "--strict", "numpy", "${PKG}",
+        ],
+        env={"COLUMNS": "300"},
+    )
+    assert result.exit_code != 0
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "Unqualified token" not in panel
+
+
+def test_init_refuses_placement_before_resolving_tokens(tmp_path: Path, monkeypatch):
+    # Mirrors 'stack create env': '@nope' alone reports "Missing bundle", so
+    # a refusal here proves placement runs before resolution.
+    from uv_stack.config import ConfigRoot
+
+    root = tmp_path / "python-envs"
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "init"],
+        env={"COLUMNS": "300"},
+        input="y\ny\n\n@nope ${PKG}\n\n",
+    )
+    assert result.exit_code == 1
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "Missing bundle" not in panel
+    assert not ConfigRoot(root).env_stack_path("main").exists()
+
+
 def test_create_bundle_accepts_an_admitted_reference(config_tree: ConfigRoot):
     runner = CliRunner()
     result = runner.invoke(

@@ -464,6 +464,28 @@ def test_validate_env_rejects_a_missing_profile(config_tree: ConfigRoot):
         validate(config_tree, "env", "main", config_tree.root)
 
 
+def test_validate_bundle_refuses_placement_before_resolving_includes(
+    config_tree: ConfigRoot,
+):
+    # '@nope' alone raises ResolutionError. ConfigError here proves the
+    # placement guard runs before the resolver.
+    config_tree.bundle_path("qsar").write_text("includes:\n  - '@nope'\n  - ${PKG}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_bundle(config_tree, "qsar")
+    assert "Refused" in excinfo.value.message
+    assert "Missing bundle" not in excinfo.value.message
+
+
+def test_validate_env_refuses_placement_before_resolving_the_stack(
+    config_tree: ConfigRoot,
+):
+    config_tree.env_stack_path("main").write_text("@nope\n${PKG}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_env(config_tree, "main")
+    assert "Refused" in excinfo.value.message
+    assert "Missing bundle" not in excinfo.value.message
+
+
 def test_validate_env_rejects_an_undecodable_local_requirements_file(
     config_tree: ConfigRoot,
 ):
