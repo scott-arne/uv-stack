@@ -306,3 +306,27 @@ def test_status_non_comparable_python_is_not_drift(config_tree: ConfigRoot):
     # Should be ok, not python changed, because >=3.12 is not comparable.
     assert status.state == "ok"
     assert status.actual_python == "3.13.1"
+
+
+def test_status_reports_a_malformed_variables_file_as_a_config_error(
+    config_tree: ConfigRoot,
+):
+    config_tree.variables_path().write_text("2BAD\n")
+    runner = RecordingRunner(responder=_existing_env_responder)
+    status = env_status(config_tree, runner, "main")
+    assert status.state == "config error"
+    assert "variables.txt" in status.message
+
+
+def test_status_reports_an_undefined_variable_as_a_config_error(
+    config_tree: ConfigRoot,
+):
+    # 'DEV' is declared and referenced but has no value on this machine, which
+    # is the ordinary state of a freshly cloned root. 'stack status' must say so
+    # in the row rather than raising out of the whole table.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${DEV}/mypkg\n")
+    runner = RecordingRunner(responder=_existing_env_responder)
+    status = env_status(config_tree, runner, "main")
+    assert status.state == "config error"
+    assert "DEV" in status.message

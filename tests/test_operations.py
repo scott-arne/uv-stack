@@ -2825,3 +2825,18 @@ def test_refresh_never_passes_a_direct_reference_to_uv_remove(
     # when the direct reference is handed over verbatim, because "torch" is never
     # an argv element in its own right.
     assert remove_args == [["uv", "remove", "--no-sync", "scipy"]]
+
+
+def test_upgrade_writes_an_expanded_requirements_in(config_tree: ConfigRoot):
+    # The upgrade path is where this machine's values actually reach uv, and
+    # it is the only call site that writes the rendered text to disk. dry_run
+    # writes the generated files and runs no commands, which isolates the
+    # render from the rest of the pipeline.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=/home/me/code\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${DEV}/mypkg\n")
+    rec = RecordingRunner(responder=_existing_env_responder)
+    upgrade_env(config_tree, rec, "main", UpgradeOptions(dry_run=True))
+    text = config_tree.env_requirements_in("main").read_text()
+    assert "-e /home/me/code/mypkg" in text
+    assert "${DEV}" not in text

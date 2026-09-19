@@ -90,7 +90,8 @@ def env_status(config: ConfigRoot, runner: Runner, name: str) -> EnvStatus:
     try:
         env = config.load_env(name)
         stack = Resolver(config).resolve(env.stack)
-        expected_req = render_requirements_in(stack, config, name)
+        variables = config.load_variables()
+        expected_req = render_requirements_in(stack, config, name, variables)
         expected_yml = render_environment_yml(env)
     except UvStackError as error:
         return EnvStatus(

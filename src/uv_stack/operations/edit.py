@@ -120,7 +120,7 @@ def validate_env(config: ConfigRoot, name: str) -> Validation:
     resolver = Resolver(config)
     stack = resolver.resolve(env.stack)
     resolver.flatten(stack)
-    render_requirements_in(stack, config, name)
+    render_requirements_in(stack, config, name, None)
     render_environment_yml(env)
     local = config.env_local_path(name)
     if local.is_file():

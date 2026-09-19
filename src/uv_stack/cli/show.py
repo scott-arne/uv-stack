@@ -92,7 +92,7 @@ def _show_env(config: ConfigRoot, name: str, as_json: bool) -> None:
     for req in stack.inline:
         echo(f"  {req}")
     # Touch render to validate it produces text without error.
-    render_requirements_in(stack, config, name)
+    render_requirements_in(stack, config, name, config.load_variables())
 
 
 def _show_project(as_json: bool) -> None:

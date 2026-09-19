@@ -203,7 +203,7 @@ def upgrade_env(
 
     atomic_write(
         config.env_requirements_in(env_name),
-        render_requirements_in(stack, config, env_name),
+        render_requirements_in(stack, config, env_name, config.load_variables()),
     )
     atomic_write(
         config.env_environment_yml(env_name),

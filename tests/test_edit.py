@@ -674,3 +674,15 @@ def test_validate_project_does_not_warn_on_a_plausible_env_name(
     project = tmp_path / "proj"
     _write_tracked_project(project, "main")
     assert validate(config_tree, "project", "", project) == ([], True)
+
+
+def test_env_validation_does_not_need_this_machines_variable_values(
+    config_tree: ConfigRoot,
+):
+    # Editing a freshly cloned root is exactly what you do *before* filling in
+    # variables.local.txt. DEV is declared and referenced with no value here,
+    # which would be a hard error at render time -- and must not be one at
+    # edit time, because edit passes None.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${DEV}/mypkg\n")
+    assert validate(config_tree, "env", "main", config_tree.root).warnings == []
