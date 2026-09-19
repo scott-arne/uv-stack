@@ -268,18 +268,38 @@ def test_a_non_utf8_ignore_file_is_refused(config_tree: ConfigRoot):
 
 
 @pytest.mark.parametrize("separator", ["\x0c", "\x85", "\u2028", "\x1c"])
-def test_a_marker_ended_by_an_unrestorable_separator_is_refused(
+def test_an_end_marker_ended_by_an_unrestorable_separator_is_refused(
     config_tree: ConfigRoot, separator
 ):
     # splitlines() breaks on eleven separators and _terminator can put back
-    # only three, so matching a marker line ended by one of the other eight
+    # only three, so matching an END marker ended by one of the other eight
     # would delete that separator and glue the next line onto the marker.
     path = _write_bytes(
         config_tree, f"{BEGIN_MARKER}\nstale-entry\n{END_MARKER}{separator}after\n"
     )
     before = path.read_bytes()
-    with pytest.raises(ConfigError):
+    with pytest.raises(ConfigError) as excinfo:
         write_portable_ignore(config_tree)
+    assert str(path) in excinfo.value.message
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("separator", ["\x0c", "\x85", "\u2028", "\x1c"])
+def test_a_begin_marker_ended_by_an_unrestorable_separator_is_refused(
+    config_tree: ConfigRoot, separator
+):
+    # The END-side sibling cannot pin this half. The splice replaces the whole
+    # span, so whatever follows the BEGIN marker on its line is discarded
+    # either way and a BEGIN matched through an exotic separator corrupts
+    # nothing. Both comprehensions are held to the same strip set regardless,
+    # so that "marker" means one thing in each, and this is what pins it.
+    path = _write_bytes(
+        config_tree, f"{BEGIN_MARKER}{separator}stale-entry\n{END_MARKER}\n"
+    )
+    before = path.read_bytes()
+    with pytest.raises(ConfigError) as excinfo:
+        write_portable_ignore(config_tree)
+    assert str(path) in excinfo.value.message
     assert path.read_bytes() == before
 
 

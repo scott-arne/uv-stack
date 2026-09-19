@@ -107,8 +107,7 @@ def _find_span(lines: list[str], path: Path) -> tuple[int, int] | None:
 
     A marker counts only when what follows it on the line is spaces, tabs, or
     a CR/LF terminator. A marker ended by any other ``splitlines`` separator
-    is left unmatched, which surfaces as a refusal rather than as a splice
-    that silently eats the separator.
+    is left unmatched, so such a file is refused rather than rewritten.
 
     :param lines: The file split on newlines.
     :param path: The file, for the message.
@@ -116,11 +115,14 @@ def _find_span(lines: list[str], path: Path) -> tuple[int, int] | None:
     :raises ConfigError: On any other topology.
     """
     # The strip set is explicit because ``splitlines`` breaks on eleven
-    # separators while :func:`_terminator` can put back only three: a bare
-    # ``rstrip()`` would match a marker ended by one of the other eight, and
-    # the splice would then drop that separator and glue the following line
-    # onto the marker. Narrowing the set turns that file into a refusal
-    # while keeping the tolerance for a marker padded with spaces or tabs.
+    # separators while :func:`_terminator` can put back only three. Under a
+    # bare ``rstrip()`` an END marker ended by one of the other eight would
+    # match, and the splice — which restores only the END line's terminator —
+    # would eat that separator and glue the next line onto the marker. The
+    # BEGIN half prevents no such corruption, since whatever follows that
+    # marker on its line falls inside the replaced span, but it is held to
+    # the same rule so that a marker means one thing in both comprehensions.
+    # Either way, trailing spaces and tabs stay tolerated.
     begins = [i for i, line in enumerate(lines) if line.rstrip(" \t\r\n") == BEGIN_MARKER]
     ends = [i for i, line in enumerate(lines) if line.rstrip(" \t\r\n") == END_MARKER]
     if not begins and not ends:
