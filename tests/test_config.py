@@ -273,3 +273,156 @@ def test_require_env_names_a_non_regular_stack_path(
     assert expected in excinfo.value.message
     assert str(path) in excinfo.value.message
     assert hint in (excinfo.value.hint or "")
+
+
+def test_variables_paths(config_tree: ConfigRoot):
+    assert config_tree.variables_path() == config_tree.root / "variables.txt"
+    assert (
+        config_tree.variables_local_path() == config_tree.root / "variables.local.txt"
+    )
+
+
+def test_load_variables_on_a_root_with_no_variable_files(config_tree: ConfigRoot):
+    variables = config_tree.load_variables()
+    assert variables.declared == ()
+    assert dict(variables.values) == {}
+
+
+def test_load_variables_reads_declarations_and_values(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\n# a comment\nWORK\n")
+    config_tree.variables_local_path().write_text("DEV=/home/me/dev\n")
+    variables = config_tree.load_variables()
+    assert variables.declared == ("DEV", "WORK")
+    assert dict(variables.values) == {"DEV": "/home/me/dev"}
+    assert variables.undefined() == ["WORK"]
+
+
+def test_a_value_may_contain_an_equals_sign(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("HOST\n")
+    config_tree.variables_local_path().write_text("HOST=https://h/simple?a=b\n")
+    assert config_tree.load_variables().values["HOST"] == "https://h/simple?a=b"
+
+
+def test_spaces_around_the_separator_are_tolerated(config_tree: ConfigRoot):
+    # 'DEV = /x' is what a user writes by habit. The name is stripped before
+    # the declared-name lookup and the value before the whitespace refusal, so
+    # neither strip is cosmetic.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV = /home/me/dev\n")
+    assert config_tree.load_variables().values["DEV"] == "/home/me/dev"
+
+
+def test_a_value_is_tilde_expanded(config_tree: ConfigRoot, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/tester")
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=~/code\n")
+    assert config_tree.load_variables().values["DEV"] == "/home/tester/code"
+
+
+def test_an_environment_variable_wins_over_the_file(config_tree: ConfigRoot, monkeypatch):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=/from/file\n")
+    monkeypatch.setenv("DEV", "/from/env")
+    assert config_tree.load_variables().values["DEV"] == "/from/env"
+
+
+def test_an_empty_environment_variable_does_not_count(config_tree: ConfigRoot, monkeypatch):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=/from/file\n")
+    monkeypatch.setenv("DEV", "   ")
+    assert config_tree.load_variables().values["DEV"] == "/from/file"
+
+
+def test_an_environment_value_may_contain_a_hash(config_tree: ConfigRoot, monkeypatch):
+    # The file grammar strips '#' as a comment; the environment has no grammar.
+    config_tree.variables_path().write_text("DEV\n")
+    monkeypatch.setenv("DEV", "/a#b")
+    assert config_tree.load_variables().values["DEV"] == "/a#b"
+
+
+def test_an_environment_variable_for_an_undeclared_name_is_ignored(
+    config_tree: ConfigRoot, monkeypatch
+):
+    monkeypatch.setenv("NOPE", "/x")
+    assert dict(config_tree.load_variables().values) == {}
+
+
+def test_a_malformed_declaration_names_the_file_and_line(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\n2BAD\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "variables.txt" in excinfo.value.message
+    assert "line 2" in excinfo.value.message
+
+
+def test_a_duplicate_declaration_names_both_lines(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\nWORK\nDEV\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "lines 1 and 3" in excinfo.value.message
+
+
+def test_a_value_line_without_an_equals_sign_is_refused(config_tree: ConfigRoot):
+    # 'Line', capitalized: this message opens with the position, unlike the
+    # declaration message, which puts it mid-sentence.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV /home/me\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "Line 1" in excinfo.value.message
+    assert "not an assignment" in excinfo.value.message
+
+
+def test_an_undeclared_assignment_is_refused(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("NOPE=/x\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "NOPE" in excinfo.value.message
+
+
+def test_a_duplicate_assignment_names_both_lines(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=/a\nDEV=/b\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "lines 1 and 2" in excinfo.value.message
+
+
+def test_an_empty_value_is_refused(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "empty" in excinfo.value.message
+
+
+def test_a_value_containing_whitespace_is_refused(config_tree: ConfigRoot):
+    # 'DEV=--requirement /tmp' would turn the admitted '${DEV}/deps.txt' into a
+    # recursive include, which is what condition 3 exists to prevent.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=--requirement /tmp\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "whitespace" in excinfo.value.message
+
+
+def test_whitespace_is_refused_after_tilde_expansion(
+    config_tree: ConfigRoot, monkeypatch
+):
+    monkeypatch.setenv("HOME", "/home/my tester")
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=~/code\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "whitespace" in excinfo.value.message
+
+
+def test_an_environment_value_containing_whitespace_is_refused(
+    config_tree: ConfigRoot, monkeypatch
+):
+    config_tree.variables_path().write_text("DEV\n")
+    monkeypatch.setenv("DEV", "/a b")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "whitespace" in excinfo.value.message

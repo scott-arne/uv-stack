@@ -19,11 +19,134 @@ from uv_stack.errors import ConfigError
 from uv_stack.fsutil import read_text_utf8, require_regular_file
 from uv_stack.hints import render_positional_arg
 from uv_stack.models import Bundle, EnvConfig, Profile
-from uv_stack.parse import first_clean_line, read_clean_lines
+from uv_stack.parse import clean_line, first_clean_line, read_clean_lines
+from uv_stack.variables import NAME_RE, Variables
 
 _ModelT = TypeVar("_ModelT", Profile, Bundle)
 
 DEFAULT_ROOT = Path.home() / ".config" / "python-envs"
+
+
+def _numbered_clean_lines(path: Path) -> list[tuple[int, str]]:
+    """Clean, non-empty lines of ``path`` paired with their 1-based numbers.
+
+    The variable files report defects by line, which
+    :func:`~uv_stack.parse.read_clean_lines` cannot do because it discards
+    positions.
+
+    :param path: File to read; a missing file yields no lines.
+    :returns: ``(line number, cleaned text)`` pairs in file order.
+    :raises ConfigError: When the file is not valid UTF-8.
+    """
+    if not path.is_file():
+        return []
+    numbered = enumerate(read_text_utf8(path).splitlines(), start=1)
+    return [(number, clean_line(raw)) for number, raw in numbered if clean_line(raw)]
+
+
+def _parse_declarations(path: Path) -> list[str]:
+    """Parse ``variables.txt``: one name per line.
+
+    :param path: The declaration file.
+    :returns: The declared names in file order.
+    :raises ConfigError: On a malformed or duplicated name.
+    """
+    declared: list[str] = []
+    first_seen: dict[str, int] = {}
+    for number, text in _numbered_clean_lines(path):
+        if not NAME_RE.match(text):
+            raise ConfigError(
+                f"Invalid variable name on line {number} of {path}: {text!r}",
+                hint=(
+                    "A name must start with a letter or underscore and hold "
+                    "only letters, digits, and underscores. Declare one name "
+                    "per line; values belong in variables.local.txt."
+                ),
+            )
+        if text in first_seen:
+            raise ConfigError(
+                f"Variable {text!r} is declared twice in {path}: "
+                f"lines {first_seen[text]} and {number}.",
+                hint="Remove the duplicate line.",
+            )
+        first_seen[text] = number
+        declared.append(text)
+    return declared
+
+
+def _normalize_value(name: str, raw: str, where: str) -> str:
+    """Strip, expand ``~``, and validate one variable value.
+
+    The whitespace refusal runs *after* ``expanduser`` on purpose: what has to
+    be whitespace-free is the text that lands in ``requirements.in``, where a
+    space would split one entry into two arguments and could turn an admitted
+    ``${DEV}/deps.txt`` into a recursive include.
+
+    :param name: The variable being assigned, for the message.
+    :param raw: The value as written.
+    :param where: Human-readable origin, for the message.
+    :returns: The normalized value.
+    :raises ConfigError: When the value is empty or contains whitespace.
+    """
+    value = raw.strip()
+    if not value:
+        raise ConfigError(
+            f"Variable {name!r} has an empty value ({where}).",
+            hint="Give it a value, or delete the assignment.",
+        )
+    value = os.path.expanduser(value)
+    if any(character.isspace() for character in value):
+        raise ConfigError(
+            f"Variable {name!r} has a value containing whitespace ({where}): "
+            f"{value!r}",
+            hint=(
+                "A value is substituted into a whitespace-delimited "
+                "requirements file, so it may not contain whitespace — not "
+                "even after '~' expansion. Move the checkout somewhere without "
+                "a space in its path."
+            ),
+        )
+    return value
+
+
+def _parse_local_values(path: Path, declared: list[str], declared_path: Path) -> dict[str, str]:
+    """Parse ``variables.local.txt``: ``NAME=value``, one per line.
+
+    :param path: The value file.
+    :param declared: Names the root declares.
+    :param declared_path: The declaration file, for the message.
+    :returns: The values this machine's file supplies.
+    :raises ConfigError: On a line with no ``=``, an undeclared name, a
+        duplicate assignment, or a value that fails :func:`_normalize_value`.
+    """
+    values: dict[str, str] = {}
+    first_seen: dict[str, int] = {}
+    for number, text in _numbered_clean_lines(path):
+        name, separator, raw = text.partition("=")
+        name = name.strip()
+        if not separator:
+            raise ConfigError(
+                f"Line {number} of {path} is not an assignment: {text!r}",
+                hint="Write 'NAME=value', one per line.",
+            )
+        if name not in declared:
+            raise ConfigError(
+                f"Line {number} of {path} assigns {name!r}, which "
+                f"{declared_path} does not declare.",
+                hint=(
+                    f"Add {name!r} to {declared_path} so it travels with the "
+                    "root, or delete the line."
+                ),
+            )
+        if name in first_seen:
+            raise ConfigError(
+                f"Variable {name!r} is assigned twice in {path}: "
+                f"lines {first_seen[name]} and {number}.",
+                hint="Keep one assignment.",
+            )
+        first_seen[name] = number
+        values[name] = _normalize_value(name, raw, f"line {number} of {path}")
+    return values
 
 
 class ConfigRoot:
@@ -83,6 +206,20 @@ class ConfigRoot:
     def editor_path(self) -> Path:
         """Path to the root-level editor command file."""
         return self.root / "editor.txt"
+
+    def variables_path(self) -> Path:
+        """Path to the root's declared-variable list.
+
+        Travels with the root: it is the contract a clone must satisfy.
+        """
+        return self.root / "variables.txt"
+
+    def variables_local_path(self) -> Path:
+        """Path to this machine's variable values.
+
+        Does not travel; ``stack config portable`` adds it to the ignore block.
+        """
+        return self.root / "variables.local.txt"
 
     def profile_path(self, name: str) -> Path:
         return self.profiles_dir / f"{name}.yaml"
@@ -191,6 +328,30 @@ class ConfigRoot:
             launches, so the post-edit validators cannot cover it.
         """
         return first_clean_line(self.editor_path(), default="") or None
+
+    def load_variables(self) -> Variables:
+        """Load the root's declared names and this machine's values.
+
+        The environment overrides the file: a value exported in the shell wins
+        over ``variables.local.txt``, which lets a CI job or a one-off shell
+        point a root somewhere else without editing it. An unset or
+        whitespace-only environment variable is not a value and falls through
+        to the file. Only declared names are read from the environment, so an
+        unrelated variable that happens to share a name cannot leak in.
+
+        :returns: The declared names and the values available here.
+        :raises ConfigError: When either file is malformed.
+        """
+        declared = _parse_declarations(self.variables_path())
+        values = _parse_local_values(
+            self.variables_local_path(), declared, self.variables_path()
+        )
+        for name in declared:
+            raw = os.environ.get(name)
+            if raw is None or not raw.strip():
+                continue
+            values[name] = _normalize_value(name, raw, f"environment variable {name}")
+        return Variables(declared=tuple(declared), values=values)
 
     def _load_yaml_model(
         self, path: Path, name: str, model: type[_ModelT]

@@ -125,3 +125,34 @@ def _deadline(seconds):
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
+
+
+# Names the suite declares in variables.txt. Nothing reads the real
+# environment for them, so clearing them is free and makes the variable
+# tests independent of whoever runs them.
+_TEST_VARIABLE_NAMES = (
+    "A",
+    "B",
+    "DEV",
+    "HOST",
+    "NAME",
+    "NOPE",
+    "OPT",
+    "PACKAGE",
+    "PKG",
+    "ROOT",
+    "WORK",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_variable_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear any real environment value for a name the tests declare.
+
+    A test that wants an environment value calls ``monkeypatch.setenv``
+    in its own body, which runs after this fixture and so still wins.
+
+    :param monkeypatch: pytest's environment patcher.
+    """
+    for name in _TEST_VARIABLE_NAMES:
+        monkeypatch.delenv(name, raising=False)
