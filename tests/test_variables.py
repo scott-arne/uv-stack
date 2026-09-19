@@ -94,12 +94,22 @@ def test_ownership_position_is_the_only_failure_for_an_at_entry():
     assert "condition 2" not in explanation
 
 
-def test_marker_entry_fails_only_the_head_qualified_condition():
-    # ownership_name() returns None here because ';' terminates the name scan
-    # before the '@'-free string is claimed, so only condition 2 is violated.
+def test_a_marker_with_a_slash_does_not_hide_the_ownership_name():
+    # The '/' inside the marker must not make ownership_name() return None,
+    # which would let a plain requirement sneak past condition 1.
+    problem = placement_problem('${PACKAGE};os_name!="a/b"')
+    assert problem is not None
+    _, explanation = problem
+    assert "condition 1" in explanation
+
+
+def test_marker_entry_violates_conditions_1_and_2():
+    # The marker no longer hides the name, so this entry violates both
+    # condition 1 (ownership position) and condition 2 (not head-qualified),
+    # but still not condition 3.
     _, explanation = placement_problem('${PACKAGE}>=2 ; os_name != "n/a"')
+    assert "condition 1" in explanation
     assert "condition 2" in explanation
-    assert "condition 1" not in explanation
     assert "condition 3" not in explanation
 
 
