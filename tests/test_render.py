@@ -126,3 +126,14 @@ def test_rendered_output_never_adds_requirement_lines(config_tree: ConfigRoot):
     # requirements.local.in earns.
     assert len(body) == 3
     assert sum(line.startswith("-r ") for line in body) == 1
+
+
+def test_render_refuses_hostile_variable_value(config_tree: ConfigRoot):
+    # A value with a trailing backslash would turn the entry into a
+    # continuation, creating a line-count mismatch or merging two entries.
+    config_tree.profile_path("dev").write_text("includes:\n  - -e ${DEV}\n")
+    stack = ResolvedStack(profiles=["dev"], inline=[])
+    variables = Variables(declared=("DEV",), values={"DEV": "/opt/x\\"})
+    with pytest.raises(ConfigError) as excinfo:
+        render_requirements_in(stack, config_tree, "main", variables)
+    assert "backslash" in excinfo.value.message

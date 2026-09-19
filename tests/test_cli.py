@@ -504,6 +504,21 @@ def test_show_missing_env_errors(tmp_path: Path):
     assert "ghost" in result.output
 
 
+def test_show_env_fails_on_undefined_variable(tmp_path: Path):
+    from uv_stack.config import ConfigRoot
+
+    root = _env_root(tmp_path)
+    cfg = ConfigRoot(root)
+    cfg.variables_path().write_text("DEV\n")
+    cfg.profile_path("ds").write_text(
+        "description: Core data-science stack\n"
+        "includes:\n  - numpy\n  - -e ${DEV}/mypkg\n"
+    )
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "main"])
+    assert result.exit_code == 1
+    assert "DEV" in result.output
+
+
 @pytest.mark.parametrize(
     "break_it,expected,hint",
     [
