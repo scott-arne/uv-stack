@@ -22,6 +22,7 @@ from uv_stack.parse import read_clean_lines
 from uv_stack.pyversion import is_comparable
 from uv_stack.resolver import Resolver
 from uv_stack.runner import SubprocessRunner
+from uv_stack.variables import check_placement
 
 
 def _require_plain_python(python: str) -> None:
@@ -173,6 +174,7 @@ def create_env(
         print_activation_hint(name)
         return
     if tokens:
+        check_placement(list(tokens), source=str(config.env_stack_path(name)))
         if python is not None and recreate:
             # Only a recreate resolves the lock against this value. Creating
             # without --recreate compiles against the built interpreter's
@@ -269,6 +271,7 @@ def create_profile(
     tags: tuple[str, ...],
 ) -> None:
     """Create profiles/NAME.yaml from PACKAGES."""
+    check_placement(list(packages), source=str(config.profile_path(name)))
     path = write_profile(
         config, name, list(packages), description=description, tags=list(tags)
     )
@@ -296,6 +299,7 @@ def create_bundle(
     strict: bool,
 ) -> None:
     """Create bundles/NAME.yaml from stack TOKENS."""
+    check_placement(list(tokens), source=str(config.bundle_path(name)))
     # Strict and near-miss rules apply to the DIRECT tokens only...
     direct = Resolver(config, strict=strict).classify(list(tokens))
     render_warnings(direct.warnings)

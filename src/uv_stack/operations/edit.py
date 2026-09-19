@@ -28,6 +28,7 @@ from uv_stack.operations.pyproject import (
 from uv_stack.pyversion import is_near_miss_version, near_miss_version_notice
 from uv_stack.render import render_environment_yml, render_requirements_in
 from uv_stack.resolver import Resolver, bundle_self_references
+from uv_stack.variables import check_placement
 
 
 class Validation(NamedTuple):
@@ -70,9 +71,13 @@ def validate_profile(config: ConfigRoot, name: str) -> Validation:
     :param name: Profile name.
     :returns: No warnings; a profile references nothing, so it produces no
         resolution warnings.
-    :raises ConfigError: When the YAML is unreadable or fails the schema.
+    :raises ConfigError: When the YAML is unreadable or fails the schema, or
+        holds an entry that spans more than one line, holds a malformed
+        ``${NAME}`` reference, or places a reference where expansion would not
+        be safe.
     """
-    config.load_profile(name)
+    profile = config.load_profile(name)
+    check_placement(profile.includes, source=str(config.profile_path(name)))
     return Validation([])
 
 
@@ -97,6 +102,7 @@ def validate_bundle(config: ConfigRoot, name: str) -> Validation:
                 "literal package, or drop the include."
             ),
         )
+    check_placement(bundle.includes, source=str(config.bundle_path(name)))
     resolver = Resolver(config)
     stack = resolver.resolve(bundle.includes)
     resolver.flatten(stack)
@@ -117,6 +123,10 @@ def validate_env(config: ConfigRoot, name: str) -> Validation:
     :raises ResolutionError: When a stack token cannot be resolved.
     """
     env = config.load_env(name)
+    # Only this env's own stack.txt is checked. A profile it includes is
+    # validated when that file is edited; re-checking it here would attribute
+    # another file's defect to this edit, in a file the user cannot act on.
+    check_placement(env.stack, source=str(config.env_stack_path(name)))
     resolver = Resolver(config)
     stack = resolver.resolve(env.stack)
     resolver.flatten(stack)

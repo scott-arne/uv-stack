@@ -7,7 +7,13 @@ import pytest
 from uv_stack.config import ConfigRoot
 from uv_stack.editor import EditorCommand, editor_argv, resolve_editor
 from uv_stack.errors import ConfigError, NewerSchemaError, ResolutionError
-from uv_stack.operations.edit import missing_project_error, validate
+from uv_stack.operations.edit import (
+    missing_project_error,
+    validate,
+    validate_bundle,
+    validate_env,
+    validate_profile,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -686,3 +692,55 @@ def test_env_validation_does_not_need_this_machines_variable_values(
     config_tree.variables_path().write_text("DEV\n")
     config_tree.profile_path("ds").write_text("includes:\n  - -e ${DEV}/mypkg\n")
     assert validate(config_tree, "env", "main", config_tree.root).warnings == []
+
+
+def test_validate_profile_refuses_a_misplaced_reference(config_tree: ConfigRoot):
+    config_tree.profile_path("ds").write_text("includes:\n  - ${PACKAGE}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_profile(config_tree, "ds")
+    assert "${PACKAGE}" in excinfo.value.message
+    assert "ds.yaml" in excinfo.value.message
+
+
+def test_validate_profile_refuses_a_multiline_entry(config_tree: ConfigRoot):
+    config_tree.profile_path("ds").write_text('includes:\n  - "numpy\\npandas"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        validate_profile(config_tree, "ds")
+    assert "more than one line" in excinfo.value.message
+
+
+def test_validate_profile_accepts_an_admitted_reference(config_tree: ConfigRoot):
+    # No variables file exists, so this proves edit-time validation never
+    # consults this machine's values.
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${DEV}/pkg\n")
+    assert validate_profile(config_tree, "ds").warnings == []
+
+
+def test_validate_bundle_refuses_a_misplaced_reference(config_tree: ConfigRoot):
+    config_tree.bundle_path("qsar").write_text("includes:\n  - pkg:${NAME}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_bundle(config_tree, "qsar")
+    assert "qsar.yaml" in excinfo.value.message
+
+
+def test_validate_env_refuses_a_misplaced_reference(config_tree: ConfigRoot):
+    config_tree.env_stack_path("main").write_text("@standard\n${PACKAGE}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_env(config_tree, "main")
+    assert "stack.txt" in excinfo.value.message
+
+
+def test_validate_env_accepts_an_admitted_reference_with_no_values(
+    config_tree: ConfigRoot,
+):
+    config_tree.env_stack_path("main").write_text("@standard\n-e ${DEV}/pkg\n")
+    validate_env(config_tree, "main")
+
+
+def test_validate_env_does_not_reattribute_a_profile_defect(config_tree: ConfigRoot):
+    # 'main' includes 'ds' through @standard, and ds.yaml is broken -- but the
+    # user is editing the env, not the profile. Reporting another file's defect
+    # here gives them nothing to act on in the file they have open; editing
+    # ds.yaml is what catches it, and 'stack doctor' catches it root-wide.
+    config_tree.profile_path("ds").write_text("includes:\n  - ${PACKAGE}\n")
+    validate_env(config_tree, "main")

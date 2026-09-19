@@ -12,6 +12,7 @@ from uv_stack.operations.init import init_config_root
 from uv_stack.operations.scaffold import write_env_sources, write_starter_profile
 from uv_stack.operations.upgrade import UpgradeOptions
 from uv_stack.resolver import Resolver
+from uv_stack.variables import check_placement
 
 
 @click.command("init")
@@ -57,6 +58,7 @@ def init(config: ConfigRoot, yes: bool) -> None:
             # Validate before anything durable is written, mirroring
             # 'stack create env': bad tokens or malformed profiles must not
             # leave a half-created env behind.
+            check_placement(tokens, source=str(config.env_stack_path(name)))
             resolver = Resolver(config)
             stack = resolver.resolve(tokens)
             resolver.flatten(stack)

@@ -10,6 +10,7 @@ import rich_click
 from click.testing import CliRunner
 
 from uv_stack.cli import cli
+from uv_stack.config import ConfigRoot
 from uv_stack.runner import Command
 
 
@@ -4698,3 +4699,111 @@ def test_show_project_never_resolves_tokens(tmp_path: Path, monkeypatch, broken:
     as_json = runner.invoke(cli, ["--root", str(root), "show", "project", "--json"])
     assert as_json.exit_code == 0, _combined_output(as_json)
     assert json.loads(as_json.output)["stack"] == [token]
+
+
+def test_create_profile_refuses_a_misplaced_reference(config_tree: ConfigRoot):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(config_tree.root), "create", "profile", "bad", "${PKG}"]
+    )
+    assert result.exit_code != 0
+    assert not config_tree.profile_path("bad").exists()
+
+
+def test_create_profile_accepts_an_admitted_reference(config_tree: ConfigRoot):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root", str(config_tree.root),
+            "create", "profile", "dev", "--", "-e ${DEV}/pkg",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "${DEV}" in config_tree.profile_path("dev").read_text()
+
+
+def test_create_bundle_refuses_a_misplaced_reference(config_tree: ConfigRoot):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(config_tree.root), "create", "bundle", "bad", "${PKG}"]
+    )
+    assert result.exit_code != 0
+    assert not config_tree.bundle_path("bad").exists()
+
+
+def test_create_env_refuses_a_misplaced_reference(config_tree: ConfigRoot, monkeypatch):
+    monkeypatch.setattr("uv_stack.cli.create._run_upgrade", lambda *a, **kw: None)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli, ["--root", str(config_tree.root), "create", "env", "new", "${PKG}"]
+    )
+    assert result.exit_code != 0
+    assert not config_tree.env_stack_path("new").exists()
+
+
+def test_create_bundle_accepts_an_admitted_reference(config_tree: ConfigRoot):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root", str(config_tree.root),
+            "create", "bundle", "dev", "--", "-e ${DEV}/pkg",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "${DEV}" in config_tree.bundle_path("dev").read_text()
+
+
+def test_create_env_accepts_an_admitted_reference(config_tree: ConfigRoot, monkeypatch):
+    monkeypatch.setattr("uv_stack.cli.create._run_upgrade", lambda *a, **kw: None)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root", str(config_tree.root),
+            "create", "env", "new", "--", "-e ${DEV}/pkg",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "${DEV}" in config_tree.env_stack_path("new").read_text()
+
+
+def test_init_refuses_a_misplaced_reference_before_writing(tmp_path: Path, monkeypatch):
+    # 'stack init' takes its tokens from a prompt and calls write_env_sources
+    # directly, so it needs its own guard and its own proof.
+    from uv_stack.config import ConfigRoot
+
+    root = tmp_path / "python-envs"
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    runner = CliRunner()
+    # Prompts: seed starter? y | create env? y | name [main] | tokens: ${PKG}
+    # | python [3.12] — the command errors before anything is written.
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "init"],
+        input="y\ny\n\n${PKG}\n\n",
+    )
+    assert result.exit_code == 1
+    assert not ConfigRoot(root).env_stack_path("main").exists()
+
+
+def test_init_accepts_an_admitted_reference(tmp_path: Path, monkeypatch):
+    from uv_stack.config import ConfigRoot
+
+    root = tmp_path / "python-envs"
+    monkeypatch.setattr("uv_stack.cli.init_cmd._run_upgrade", lambda *a, **kw: None)
+    runner = CliRunner()
+    # Tokens are split on whitespace by 'stack init', so an editable entry
+    # cannot be typed at this prompt; a path operand is the admitted form
+    # that survives the split.
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "init"],
+        input="y\ny\n\n${DEV}/pkg\n\nn\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "${DEV}/pkg" in ConfigRoot(root).env_stack_path("main").read_text()
