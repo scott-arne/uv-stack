@@ -72,9 +72,9 @@ def validate_profile(config: ConfigRoot, name: str) -> Validation:
     :returns: No warnings; a profile references nothing, so it produces no
         resolution warnings.
     :raises ConfigError: When the YAML is unreadable or fails the schema, or
-        holds an entry that spans more than one line, holds a malformed
-        ``${NAME}`` reference, or places a reference where expansion would not
-        be safe.
+        holds an entry that spans more than one line, ends with a continuation
+        backslash, holds a malformed ``${NAME}`` reference, or places a
+        reference where expansion would not be safe.
     """
     profile = config.load_profile(name)
     check_placement(profile.includes, source=str(config.profile_path(name)))
@@ -90,8 +90,8 @@ def validate_bundle(config: ConfigRoot, name: str) -> Validation:
     :raises ConfigError: When the bundle's own YAML — or that of a profile or
         bundle it includes — is unreadable or fails the schema, or when the
         bundle includes itself, or holds an entry that spans more than one line,
-        holds a malformed ``${NAME}`` reference, or places a reference where
-        expansion would not be safe.
+        ends with a continuation backslash, holds a malformed ``${NAME}``
+        reference, or places a reference where expansion would not be safe.
     :raises ResolutionError: When an include cannot be resolved.
     """
     bundle = config.load_bundle(name)
@@ -122,9 +122,10 @@ def validate_env(config: ConfigRoot, name: str) -> Validation:
     :param name: Environment name.
     :returns: Resolution warnings.
     :raises ConfigError: When a source file is unreadable or renders no output,
-        or holds an entry that spans more than one line, holds a malformed
-        ``${NAME}`` reference, or places a reference where expansion would not
-        be safe.
+        or when the environment's own ``stack.txt`` holds an entry that spans
+        more than one line, ends with a continuation backslash, holds a
+        malformed ``${NAME}`` reference, or places a reference where expansion
+        would not be safe.
     :raises ResolutionError: When a stack token cannot be resolved.
     """
     env = config.load_env(name)

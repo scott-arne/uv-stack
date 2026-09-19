@@ -699,7 +699,7 @@ def test_validate_profile_refuses_a_misplaced_reference(config_tree: ConfigRoot)
     with pytest.raises(ConfigError) as excinfo:
         validate_profile(config_tree, "ds")
     assert "${PACKAGE}" in excinfo.value.message
-    assert "ds.yaml" in excinfo.value.message
+    assert str(config_tree.profile_path("ds")) in excinfo.value.message
 
 
 def test_validate_profile_refuses_a_multiline_entry(config_tree: ConfigRoot):
@@ -720,14 +720,27 @@ def test_validate_bundle_refuses_a_misplaced_reference(config_tree: ConfigRoot):
     config_tree.bundle_path("qsar").write_text("includes:\n  - pkg:${NAME}\n")
     with pytest.raises(ConfigError) as excinfo:
         validate_bundle(config_tree, "qsar")
-    assert "qsar.yaml" in excinfo.value.message
+    assert str(config_tree.bundle_path("qsar")) in excinfo.value.message
+
+
+def test_validate_bundle_reports_self_reference_before_placement(
+    config_tree: ConfigRoot,
+):
+    # edit.py deliberately orders the self-reference check ahead of
+    # check_placement, unlike cli/create.py. A bundle with both defects must
+    # report the self-reference, because that is the one the user can act on.
+    config_tree.bundle_path("qsar").write_text("includes:\n  - '@qsar'\n  - ${PKG}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_bundle(config_tree, "qsar")
+    assert "cannot include itself" in excinfo.value.message
+    assert "Refused" not in excinfo.value.message
 
 
 def test_validate_env_refuses_a_misplaced_reference(config_tree: ConfigRoot):
     config_tree.env_stack_path("main").write_text("@standard\n${PACKAGE}\n")
     with pytest.raises(ConfigError) as excinfo:
         validate_env(config_tree, "main")
-    assert "stack.txt" in excinfo.value.message
+    assert str(config_tree.env_stack_path("main")) in excinfo.value.message
 
 
 def test_validate_env_accepts_an_admitted_reference_with_no_values(

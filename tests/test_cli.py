@@ -4703,16 +4703,19 @@ def test_show_project_never_resolves_tokens(tmp_path: Path, monkeypatch, broken:
 
 def test_create_profile_refuses_a_misplaced_reference(config_tree: ConfigRoot):
     runner = CliRunner()
+    expected = str(config_tree.profile_path("bad"))
     result = runner.invoke(
         cli,
         ["--root", str(config_tree.root), "create", "profile", "bad", "${PKG}"],
-        env={"COLUMNS": "200"},
+        # Rich splits a path longer than the panel mid-token, and _flat_panel
+        # cannot rejoin it; size the console from the path rather than guessing.
+        env={"COLUMNS": str(len(expected) + 60)},
     )
     assert result.exit_code != 0
     assert not config_tree.profile_path("bad").exists()
     # The panel must name the file the entry was refused in; nothing else in
     # the suite holds the `source=` argument at this call site.
-    assert str(config_tree.profile_path("bad")) in _flat_panel(result)
+    assert expected in _flat_panel(result)
 
 
 def test_create_profile_accepts_an_admitted_reference(config_tree: ConfigRoot):
@@ -4730,27 +4733,80 @@ def test_create_profile_accepts_an_admitted_reference(config_tree: ConfigRoot):
 
 def test_create_bundle_refuses_a_misplaced_reference(config_tree: ConfigRoot):
     runner = CliRunner()
+    expected = str(config_tree.bundle_path("bad"))
     result = runner.invoke(
         cli,
         ["--root", str(config_tree.root), "create", "bundle", "bad", "${PKG}"],
-        env={"COLUMNS": "200"},
+        env={"COLUMNS": str(len(expected) + 60)},
     )
     assert result.exit_code != 0
     assert not config_tree.bundle_path("bad").exists()
-    assert str(config_tree.bundle_path("bad")) in _flat_panel(result)
+    assert expected in _flat_panel(result)
 
 
 def test_create_env_refuses_a_misplaced_reference(config_tree: ConfigRoot, monkeypatch):
     monkeypatch.setattr("uv_stack.cli.create._run_upgrade", lambda *a, **kw: None)
     runner = CliRunner()
+    expected = str(config_tree.env_stack_path("new"))
     result = runner.invoke(
         cli,
         ["--root", str(config_tree.root), "create", "env", "new", "${PKG}"],
-        env={"COLUMNS": "200"},
+        env={"COLUMNS": str(len(expected) + 60)},
     )
     assert result.exit_code != 0
     assert not config_tree.env_stack_path("new").exists()
-    assert str(config_tree.env_stack_path("new")) in _flat_panel(result)
+    assert expected in _flat_panel(result)
+
+
+def test_create_profile_refuses_placement_before_checking_the_name(
+    config_tree: ConfigRoot,
+):
+    # The guard is the first statement of the body, so placement is reported
+    # even when the name would also be rejected. Without that ordering this
+    # input reports "Invalid profile name" instead.
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(config_tree.root), "create", "profile", "../../evil", "${PKG}"],
+        env={"COLUMNS": "300"},
+    )
+    assert result.exit_code != 0
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "Invalid profile name" not in panel
+
+
+def test_create_bundle_refuses_placement_before_resolving_tokens(
+    config_tree: ConfigRoot,
+):
+    # '@nope' alone reports "Missing bundle"; with a misplaced reference
+    # present, placement must win because its guard runs first.
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(config_tree.root), "create", "bundle", "bad", "@nope", "${PKG}"],
+        env={"COLUMNS": "300"},
+    )
+    assert result.exit_code != 0
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "Missing bundle" not in panel
+
+
+def test_create_env_refuses_placement_before_resolving_tokens(
+    config_tree: ConfigRoot, monkeypatch
+):
+    monkeypatch.setattr("uv_stack.cli.create._run_upgrade", lambda *a, **kw: None)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(config_tree.root), "create", "env", "new", "@nope", "${PKG}"],
+        env={"COLUMNS": "300"},
+    )
+    assert result.exit_code != 0
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "Missing bundle" not in panel
 
 
 def test_create_bundle_accepts_an_admitted_reference(config_tree: ConfigRoot):
@@ -4791,17 +4847,18 @@ def test_init_refuses_a_misplaced_reference_before_writing(tmp_path: Path, monke
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
     )
     runner = CliRunner()
+    expected = str(ConfigRoot(root).env_stack_path("main"))
     # Prompts: seed starter? y | create env? y | name [main] | tokens: ${PKG}
     # | python [3.12] — the command errors before the env's stack.txt is written.
     result = runner.invoke(
         cli,
         ["--root", str(root), "init"],
-        env={"COLUMNS": "200"},
+        env={"COLUMNS": str(len(expected) + 60)},
         input="y\ny\n\n${PKG}\n\n",
     )
     assert result.exit_code == 1
     assert not ConfigRoot(root).env_stack_path("main").exists()
-    assert str(ConfigRoot(root).env_stack_path("main")) in _flat_panel(result)
+    assert expected in _flat_panel(result)
 
 
 def test_init_accepts_an_admitted_reference(tmp_path: Path, monkeypatch):
