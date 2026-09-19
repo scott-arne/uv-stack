@@ -141,10 +141,15 @@ def test_carriage_return_counts_as_multiline():
 
 def test_trailing_backslash_is_refused_at_placement():
     # An entry ending in a backslash continues onto the next line and swallows
-    # the requirement after it.
-    kind, explanation = placement_problem(r"-e ${DEV}\ ")
+    # the requirement after it. The bare shape is the one uv actually joins, so
+    # it is asserted directly; a raw string cannot end in a backslash, which is
+    # why the other cases here are written with trailing whitespace instead.
+    kind, explanation = placement_problem("-e ${DEV}\\")
     assert kind == "continuation-entry"
     assert "backslash" in explanation
+    # Trailing whitespace does not rescue it: the readers strip lines, so the
+    # backslash still lands at the end of the rendered line.
+    assert placement_problem(r"-e ${DEV}\ ")[0] == "continuation-entry"
 
 
 def test_reference_free_entry_ending_in_backslash_is_refused():

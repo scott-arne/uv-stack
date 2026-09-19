@@ -139,13 +139,18 @@ def _is_recursive_include(token: str) -> bool:
 def placement_problem(entry: str) -> tuple[str, str] | None:
     """Classify one entry, or return ``None`` when it is admitted.
 
-    Three refusals are distinguished so a caller that reports rather than
+    Four refusals are distinguished so a caller that reports rather than
     raises (``stack doctor``) can give each its own finding:
 
     - ``multiline-entry`` — the entry spans more than one physical line. This
       applies whether or not it holds a reference, because the admission
       conditions below are meaningless on a multi-line string: an admitted
       first line can smuggle an arbitrary second one.
+    - ``continuation-entry`` — the entry ends in a backslash. This applies
+      whether or not it holds a reference, for the same reason: a requirements
+      file joins such a line to the one after it, so the entry consumes
+      whichever requirement the render writes next. The entry is still a single
+      physical line, which is why it is not a ``multiline-entry``.
     - ``malformed-reference`` — some ``${`` does not open a well-formed
       reference. Checked before placement: it is the more basic defect, and a
       malformed opener makes the rest of the analysis unreliable.
@@ -193,7 +198,7 @@ def placement_problem(entry: str) -> tuple[str, str] | None:
 
 
 def check_placement(entries: Sequence[str], *, source: str | None = None) -> None:
-    """Refuse a multiline entry, a malformed reference, or a misplaced one.
+    """Refuse a multiline, continuation, malformed, or misplaced entry.
 
     Reports every offender at once, naming the condition each one failed, so a
     caller fixing a profile sees the whole list rather than one item per run.
