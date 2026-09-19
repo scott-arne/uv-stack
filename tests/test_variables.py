@@ -183,11 +183,15 @@ def test_expand_all_leaves_entries_without_references_alone():
 
 
 def test_a_value_is_substituted_once_and_is_not_rescanned():
-    # '${OTHER}' inside a value is opaque text, not a reference.
+    # '${OTHER}' inside a value is opaque text to this module's substitution,
+    # but uv expands environment variables in requirements files, so the
+    # residual reference would resolve against the environment. Refuse it.
     variables = Variables(
         declared=("DEV", "OTHER"), values={"DEV": "/a/${OTHER}/b", "OTHER": "/zzz"}
     )
-    assert expand_all(["-e ${DEV}/pkg"], variables) == ["-e /a/${OTHER}/b/pkg"]
+    with pytest.raises(ConfigError) as excinfo:
+        expand_all(["-e ${DEV}/pkg"], variables)
+    assert "unsubstituted" in excinfo.value.message
 
 
 def test_a_backslash_in_a_value_survives_substitution():
@@ -338,6 +342,27 @@ def test_a_value_may_not_introduce_a_newline():
     with pytest.raises(ConfigError) as excinfo:
         expand_all(["-e ${DEV}/pkg"], _vars(DEV="\n"))
     assert "newline" in excinfo.value.message
+
+
+def test_a_value_may_not_introduce_or_change_the_ownership_name():
+    # A value can introduce an ownership name where there was none, turning
+    # an admitted path into a direct reference whose distribution name came
+    # from a machine-local value.
+    with pytest.raises(ConfigError) as excinfo:
+        expand_all(["${ROOT}/files.example/pkg.whl"], _vars(ROOT="victim@https:/"))
+    assert "ownership" in excinfo.value.message
+
+
+def test_a_value_may_not_leave_a_reference_behind():
+    # Substitution is single-pass and values are opaque, so a nested reference
+    # survives into the expanded result where uv would expand it from the
+    # environment, bypassing this module's checks.
+    variables = Variables(
+        declared=("DEV", "OTHER"), values={"DEV": "/a/${OTHER}/b", "OTHER": "/zzz"}
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        expand_all(["-e ${DEV}/pkg"], variables)
+    assert "unsubstituted" in excinfo.value.message
 
 
 def test_expansion_problem_is_none_for_a_safe_substitution():

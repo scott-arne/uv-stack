@@ -241,7 +241,7 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
     becomes the attached recursive include ``-r/deps.txt`` under ``DEV=-r`` —
     admitted going in, a second requirements file coming out.
 
-    Refusing whitespace leaves four ways a value can still rewrite the entry,
+    Refusing whitespace leaves six ways a value can still rewrite the entry,
     and each gets its own comparison across the substitution:
 
     - it carries an option of its own, caught by comparing each token's option
@@ -257,7 +257,17 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
       render writes after it. A backslash anywhere else is a path separator
       and stays admitted;
     - it introduces a newline. A value that is pure whitespace preserves the
-      token count but splits the entry across multiple lines.
+      token count but splits the entry across multiple lines;
+    - it introduces or changes the ownership name. A value like
+      ``victim@https:/`` turns ``${ROOT}/files.example/pkg.whl`` into a direct
+      reference whose distribution name came from a machine-local value,
+      breaking the invariant that expansion never changes what a requirement
+      is named;
+    - it leaves a ``${...}`` behind. Substitution is single-pass and values
+      are opaque, so ``DEV=/a/${OTHER}/b`` leaves ``${OTHER}`` in the result.
+      uv expands environment variables in requirements files, so the residual
+      reference resolves against the environment and bypasses this module's
+      declared-name and undefined-value checks.
 
     Each check asks whether the substitution *introduced* the syntax, not
     whether the result already held it: an entry written that way was
@@ -298,6 +308,19 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
             "expansion introduced a newline, turning a single entry into "
             "multiple lines"
         )
+    if ownership_name(expanded) != ownership_name(entry):
+        return (
+            f"expansion changed the ownership name from {ownership_name(entry)!r} "
+            f"to {ownership_name(expanded)!r}"
+        )
+    # Every ${...} in an admitted entry is either a well-formed reference (and
+    # therefore substituted) or already refused by _malformed_fragment, so no
+    # opener may survive expansion. This is NOT an introduced-vs-already-there
+    # check: every entry with a reference contains OPENER before substitution,
+    # so "OPENER in expanded and OPENER not in entry" would be dead code. The
+    # invariant is that expansion removes every opener.
+    if OPENER in expanded:
+        return f"expansion left an unsubstituted reference in {expanded!r}"
     return None
 
 
