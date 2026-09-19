@@ -17,6 +17,7 @@ from uv_stack.fsutil import (
     atomic_write,
     atomic_write_new,
     name_lock,
+    read_text_utf8,
 )
 
 
@@ -1850,3 +1851,23 @@ def test_probe_locking_declines_on_a_symlink_at_probe_lock(tmp_path):
 
     assert probe_locking(lock_path) is False
     assert not target.exists(), "O_NOFOLLOW was bypassed and the target was created"
+
+
+def test_read_text_utf8_translates_newlines_by_default(tmp_path: Path):
+    path = tmp_path / "f.txt"
+    path.write_bytes(b"a\r\nb\r\n")
+    assert read_text_utf8(path) == "a\nb\n"
+
+
+def test_read_text_utf8_can_preserve_newlines_exactly(tmp_path: Path):
+    path = tmp_path / "f.txt"
+    path.write_bytes(b"a\r\nb\rc\n")
+    assert read_text_utf8(path, exact_newlines=True) == "a\r\nb\rc\n"
+
+
+def test_read_text_utf8_still_names_the_file_on_bad_bytes_when_exact(tmp_path: Path):
+    path = tmp_path / "f.txt"
+    path.write_bytes(b"\xff\xfe\n")
+    with pytest.raises(ConfigError) as excinfo:
+        read_text_utf8(path, exact_newlines=True)
+    assert str(path) in excinfo.value.message

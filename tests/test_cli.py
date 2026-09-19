@@ -4942,3 +4942,36 @@ def test_init_accepts_an_admitted_reference(tmp_path: Path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert "${DEV}/pkg" in ConfigRoot(root).env_stack_path("main").read_text()
+
+
+def test_config_portable_writes_the_block_and_prints_next_steps(
+    config_tree: ConfigRoot,
+):
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable"]
+    )
+    assert result.exit_code == 0, result.output
+    assert (config_tree.root / ".gitignore").is_file()
+    assert "variables.local.txt" in result.output
+    assert "git -C" in result.output
+    assert "init" in result.output
+
+
+def test_config_portable_dry_run_writes_nothing(config_tree: ConfigRoot):
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert not (config_tree.root / ".gitignore").exists()
+    assert "dry run" in result.output
+
+
+def test_config_portable_reports_a_malformed_block(config_tree: ConfigRoot):
+    (config_tree.root / ".gitignore").write_text(
+        "# BEGIN uv-stack — managed block, do not edit by hand.\na\n"
+    )
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable"]
+    )
+    assert result.exit_code != 0
+    assert "Malformed" in result.output
