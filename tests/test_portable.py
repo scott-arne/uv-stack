@@ -264,3 +264,33 @@ def test_a_non_utf8_ignore_file_is_refused(config_tree: ConfigRoot):
     with pytest.raises(ConfigError) as excinfo:
         write_portable_ignore(config_tree)
     assert "UTF-8" in excinfo.value.message
+    assert path.read_bytes() == b"\xff\xfe not utf-8\n"
+
+
+@pytest.mark.parametrize("separator", ["\x0c", "\x85", "\u2028", "\x1c"])
+def test_a_marker_ended_by_an_unrestorable_separator_is_refused(
+    config_tree: ConfigRoot, separator
+):
+    # splitlines() breaks on eleven separators and _terminator can put back
+    # only three, so matching a marker line ended by one of the other eight
+    # would delete that separator and glue the next line onto the marker.
+    path = _write_bytes(
+        config_tree, f"{BEGIN_MARKER}\nstale-entry\n{END_MARKER}{separator}after\n"
+    )
+    before = path.read_bytes()
+    with pytest.raises(ConfigError):
+        write_portable_ignore(config_tree)
+    assert path.read_bytes() == before
+
+
+def test_a_marker_line_with_trailing_blanks_is_still_matched(config_tree: ConfigRoot):
+    path = _write_bytes(
+        config_tree,
+        f"before\n{BEGIN_MARKER} \nstale-entry\n{END_MARKER}\t \nafter\n",
+    )
+    assert write_portable_ignore(config_tree).outcome == "updated"
+    text = path.read_bytes().decode("utf-8")
+    assert text.startswith("before\n")
+    assert text.endswith("after\n")
+    assert "stale-entry" not in text
+    assert BEGIN_MARKER in text

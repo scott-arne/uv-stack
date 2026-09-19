@@ -17,6 +17,7 @@ from __future__ import annotations
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
@@ -87,7 +88,7 @@ class PortableResult:
     """
 
     path: Path
-    outcome: str
+    outcome: Literal["created", "updated", "unchanged"]
     block: str
     is_repository: bool
 
@@ -104,13 +105,24 @@ def _find_span(lines: list[str], path: Path) -> tuple[int, int] | None:
     Anything else — a lone marker, a reversed pair, a nested pair — is a file
     a rewrite could corrupt, so the command refuses rather than guessing.
 
+    A marker counts only when what follows it on the line is spaces, tabs, or
+    a CR/LF terminator. A marker ended by any other ``splitlines`` separator
+    is left unmatched, which surfaces as a refusal rather than as a splice
+    that silently eats the separator.
+
     :param lines: The file split on newlines.
     :param path: The file, for the message.
     :returns: ``(begin index, end index)``, or ``None`` when there is no block.
     :raises ConfigError: On any other topology.
     """
-    begins = [i for i, line in enumerate(lines) if line.rstrip() == BEGIN_MARKER]
-    ends = [i for i, line in enumerate(lines) if line.rstrip() == END_MARKER]
+    # The strip set is explicit because ``splitlines`` breaks on eleven
+    # separators while :func:`_terminator` can put back only three: a bare
+    # ``rstrip()`` would match a marker ended by one of the other eight, and
+    # the splice would then drop that separator and glue the following line
+    # onto the marker. Narrowing the set turns that file into a refusal
+    # while keeping the tolerance for a marker padded with spaces or tabs.
+    begins = [i for i, line in enumerate(lines) if line.rstrip(" \t\r\n") == BEGIN_MARKER]
+    ends = [i for i, line in enumerate(lines) if line.rstrip(" \t\r\n") == END_MARKER]
     if not begins and not ends:
         return None
     if len(begins) == 1 and len(ends) == 1 and begins[0] < ends[0]:
@@ -179,6 +191,11 @@ def write_portable_ignore(
     line endings included, so a root that already ignores other things keeps
     doing so and a CRLF file stays a CRLF file.
 
+    That guarantee covers the file's contents, not its identity: a write goes
+    through :func:`atomic_write`, which publishes a new inode. Permissions
+    revert to the process default, a hardlinked ignore file is de-linked, and
+    a symlinked one is replaced by a regular file rather than written through.
+
     :param config: The config root.
     :param dry_run: Compute the outcome but write nothing. Malformed-topology
         refusals still raise, because the point of the dry run is to find out.
@@ -196,7 +213,7 @@ def write_portable_ignore(
         original = read_text_utf8(path, exact_newlines=True)
 
     if original is None:
-        outcome = "created"
+        outcome: Literal["created", "updated", "unchanged"] = "created"
         updated = block + "\n"
     else:
         # Everything below works on terminator-carrying lines, so the splice
