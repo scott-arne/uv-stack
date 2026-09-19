@@ -89,7 +89,9 @@ def validate_bundle(config: ConfigRoot, name: str) -> Validation:
     :returns: Resolution warnings.
     :raises ConfigError: When the bundle's own YAML — or that of a profile or
         bundle it includes — is unreadable or fails the schema, or when the
-        bundle includes itself.
+        bundle includes itself, or holds an entry that spans more than one line,
+        holds a malformed ``${NAME}`` reference, or places a reference where
+        expansion would not be safe.
     :raises ResolutionError: When an include cannot be resolved.
     """
     bundle = config.load_bundle(name)
@@ -119,7 +121,10 @@ def validate_env(config: ConfigRoot, name: str) -> Validation:
     :param config: Config root.
     :param name: Environment name.
     :returns: Resolution warnings.
-    :raises ConfigError: When a source file is unreadable or renders no output.
+    :raises ConfigError: When a source file is unreadable or renders no output,
+        or holds an entry that spans more than one line, holds a malformed
+        ``${NAME}`` reference, or places a reference where expansion would not
+        be safe.
     :raises ResolutionError: When a stack token cannot be resolved.
     """
     env = config.load_env(name)
