@@ -238,7 +238,9 @@ def init_project(
     # makes that split safe (spec "Projects and the ledger split").
     expanded_adds = expand_all(stack_adds, config.load_variables())
 
-    notice = _travel_notice(config, options.python)
+    # Only when the spec is actually recorded: --no-track removes the table
+    # below, so the advisory would name a trip nothing is taking.
+    notice = _travel_notice(config, options.python) if options.track else None
     if notice is not None:
         warnings.append(notice)
 

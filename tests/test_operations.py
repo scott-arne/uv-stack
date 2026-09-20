@@ -3487,6 +3487,30 @@ def test_refresh_warns_for_the_recorded_spec_when_no_flag_is_given(
     assert len(_travel_warnings(result.warnings)) == 1
 
 
+def test_init_no_track_stays_silent_about_an_interpreter_it_never_records(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """--no-track stores no spec, so there is no trip for one to survive.
+
+    The advisory's own wording ("Recording interpreter ... in pyproject.toml")
+    is false on this path. Asserting the table is absent as well as the
+    advisory keeps the test from passing on a run that merely warned about
+    something else.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    warnings = init_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder), ["ds"],
+        ProjectOptions(python="/opt/envs/x/bin/python", track=False),
+        cwd=project_dir,
+    )
+    assert _travel_warnings(warnings) == []
+    assert read_tracking(project_dir / "pyproject.toml") is None
+
+
 def test_refresh_dry_run_still_runs_the_placement_check(tmp_path: Path):
     """A dry run exists to find out, so the refusal comes before the plan.
 
