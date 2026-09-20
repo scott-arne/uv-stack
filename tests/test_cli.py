@@ -3840,6 +3840,48 @@ def test_create_project_python_is_stripped_before_tracking(
     assert captured["python"] == "3.12"
 
 
+def test_create_project_renders_advisories_from_a_failed_run(tmp_path: Path, monkeypatch):
+    """A failed create must still print the advisory for the spec it recorded.
+
+    init_project writes the tracking table before ``uv add`` runs, so a
+    failure there leaves the untravelable interpreter in pyproject.toml. The
+    advisory reaches the CLI only on the raised error — the warning list it
+    normally arrives on is never returned — so the command renders
+    error.resolution_warnings and re-raises into the group-level handler.
+    """
+    from uv_stack.errors import ToolError
+    from uv_stack.runner import CommandResult, RecordingRunner
+
+    root = _seeded_root(tmp_path)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    monkeypatch.chdir(project_dir)
+    # Keep the advisory off the fold so it can be matched whole.
+    monkeypatch.setenv("COLUMNS", "1000")
+
+    def _fail_add(command: Command) -> CommandResult:
+        if "add" in command.args:
+            raise ToolError("add failed", command=command.args, returncode=1)
+        return CommandResult(returncode=0, stdout="")
+
+    monkeypatch.setattr(
+        "uv_stack.cli.create.SubprocessRunner",
+        lambda: RecordingRunner(responder=_fail_add),
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--root", str(root), "create", "project", "ds",
+            "--python", "/opt/envs/x/bin/python",
+        ],
+    )
+    assert result.exit_code == 1
+    flat = _flat_panel(result)
+    assert "warning: Recording interpreter '/opt/envs/x/bin/python'" in flat
+    # Re-raised, so the group-level handler still rendered the error panel.
+    assert "add failed" in flat
+
+
 # ---------------------------------------------------------------------------
 # refresh
 # ---------------------------------------------------------------------------

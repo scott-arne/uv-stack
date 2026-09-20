@@ -22,6 +22,8 @@ from uv_stack.models import ProjectTracking
 from uv_stack.operations.create import ensure_env, env_micromamba_exists
 from uv_stack.operations.project import (
     PROJECT_PYTHON_ENV,
+    PYTHON_TRAVEL_PROSPECTIVE,
+    PYTHON_TRAVEL_RECORDED,
     ProjectOptions,
     _is_python_passthrough,
     init_project,
@@ -3453,18 +3455,28 @@ _TRAVEL_MATRIX = [
 ]
 
 
-def _travel_warnings(warnings: list[str]) -> list[str]:
-    """The travel advisories in a warning list.
+#: The openings a travel advisory can take, derived from the constants rather
+#: than restated, so a reworded advisory cannot quietly empty the filter below.
+_TRAVEL_OPENINGS = tuple(
+    opening.split("{spec}")[0]
+    for opening in (PYTHON_TRAVEL_RECORDED, PYTHON_TRAVEL_PROSPECTIVE)
+)
 
-    Both advisories open with 'Recording interpreter ', and nothing else
-    either operation emits does. Naming pyproject.toml would be the obvious
-    discriminator and is the wrong one: SKIPPED_REMOVAL_NOTICE mentions the
-    file too, and refresh puts both kinds in one list on its error path.
+
+def _travel_warnings(warnings: list[str]) -> list[str]:
+    """The travel advisories in a warning list, in either tense.
+
+    The two advisories no longer share one opening: a completed run says
+    'Recording interpreter ' and every prospective delivery says 'Would record
+    interpreter '. Nothing else either operation emits opens either way.
+    Naming pyproject.toml would be the obvious discriminator and is the wrong
+    one: SKIPPED_REMOVAL_NOTICE mentions the file too, and refresh puts both
+    kinds in one list on its error path.
 
     :param warnings: Warnings returned by init or refresh.
     :returns: Only the travel advisories, in order.
     """
-    return [w for w in warnings if w.startswith("Recording interpreter ")]
+    return [w for w in warnings if w.startswith(_TRAVEL_OPENINGS)]
 
 
 @pytest.mark.parametrize(("spec", "expected"), _TRAVEL_MATRIX)
@@ -3550,6 +3562,173 @@ def test_init_no_track_stays_silent_about_an_interpreter_it_never_records(
     )
     assert _travel_warnings(warnings) == []
     assert read_tracking(project_dir / "pyproject.toml") is None
+
+
+def _fail_on(word: str):
+    """A responder that raises ToolError for the uv subcommand ``word``.
+
+    :param word: An argument that identifies the command to fail, e.g. 'add'.
+    """
+
+    def responder(cmd: Command) -> CommandResult:
+        if word in cmd.args:
+            raise ToolError(f"{word} failed", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    return responder
+
+
+def test_init_failure_past_the_write_still_reports_the_spec_it_recorded(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """A tracked init that dies after the pending write must still say so.
+
+    The advisory used to ride only on the success return, so a run that wrote
+    the untravelable spec and then failed told nobody. Asserting the recorded
+    value alongside the wording is what makes the claim checkable: the present
+    tense is honest only because the table really is on disk.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_travel_addfail"
+    project_dir.mkdir()
+    with pytest.raises(ToolError) as excinfo:
+        init_project(
+            config_tree, RecordingRunner(responder=_fail_on("add")), ["ds"],
+            ProjectOptions(python="/opt/envs/x/bin/python"), cwd=project_dir,
+        )
+    travel = _travel_warnings(excinfo.value.resolution_warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Recording interpreter '/opt/envs/x/bin/python'")
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None and tracking.python == "/opt/envs/x/bin/python"
+
+
+def test_init_failure_above_the_write_only_predicts_the_recording(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """A fresh init that dies in uv init recorded nothing, and must say so.
+
+    uv init runs one line above the pending write, which makes this the only
+    reachable path where the advisory is delivered before the spec is on disk.
+    Without it, hardcoding the completed tense would pass every other travel
+    test here. The absent table is half the assertion: the future tense is
+    correct only because nothing was written.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_travel_initfail"
+    project_dir.mkdir()
+    with pytest.raises(ToolError) as excinfo:
+        init_project(
+            config_tree, RecordingRunner(responder=_fail_on("init")), ["ds"],
+            ProjectOptions(python="/opt/envs/x/bin/python"), cwd=project_dir,
+        )
+    travel = _travel_warnings(excinfo.value.resolution_warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Would record interpreter '/opt/envs/x/bin/python'")
+    assert read_tracking(project_dir / "pyproject.toml") is None
+
+
+def test_init_success_says_it_recorded_the_spec(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """A completed init wrote the spec, so the advisory stays in the present.
+
+    Suppressing the advisory outright, or moving everything to the future
+    tense, would satisfy the two failure tests above. This is the pin that
+    keeps the completed wording alive on the path that earns it.
+    """
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_travel_ok"
+    project_dir.mkdir()
+    warnings = init_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder), ["ds"],
+        ProjectOptions(python="/opt/envs/x/bin/python"), cwd=project_dir,
+    )
+    travel = _travel_warnings(warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Recording interpreter '/opt/envs/x/bin/python'")
+
+
+def test_refresh_dry_run_only_predicts_the_recording(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A dry run changes nothing, so it may not claim to have recorded anything.
+
+    The advisory used to be appended above the dry-run guard, so the one run
+    that is defined to touch nothing still said 'Recording'. Comparing the
+    file bytes either side is what separates a wording change from a fix: the
+    present tense is wrong precisely because the write did not happen.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_bytes()
+    result = refresh_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder),
+        RefreshOptions(python="/opt/envs/x/bin/python", dry_run=True), cwd=project_dir,
+    )
+    travel = _travel_warnings(result.warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Would record interpreter '/opt/envs/x/bin/python'")
+    assert pyproject.read_bytes() == before
+
+
+def test_refresh_failure_above_the_write_only_predicts_the_recording(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """An unresolvable env aborts refresh before the write, so nothing is recorded.
+
+    resolve_project_python sits one line above write_tracking, so the ledger
+    is untouched when it raises. The advisory reaches the user only on the
+    error, and the byte comparison is what proves the future tense is the true
+    reading rather than a guess about where the run died.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_bytes()
+    with pytest.raises(EnvError) as excinfo:
+        refresh_project(
+            config_tree, RecordingRunner(responder=_missing_env_responder),
+            RefreshOptions(python="scratch"), cwd=project_dir,
+        )
+    travel = _travel_warnings(excinfo.value.resolution_warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Would record interpreter 'scratch'")
+    assert pyproject.read_bytes() == before
+
+
+def test_refresh_success_says_it_recorded_the_spec(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A completed refresh wrote the spec, so the advisory stays in the present.
+
+    Counterpart to the init pin above, and for the same reason: without it,
+    suppressing the advisory on every path would pass the dry-run and
+    pre-write tests. Reading the table back ties the wording to the write.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    result = refresh_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder),
+        RefreshOptions(python="/opt/envs/x/bin/python"), cwd=project_dir,
+    )
+    travel = _travel_warnings(result.warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Recording interpreter '/opt/envs/x/bin/python'")
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None and tracking.python == "/opt/envs/x/bin/python"
 
 
 def test_refresh_dry_run_still_runs_the_placement_check(tmp_path: Path):
