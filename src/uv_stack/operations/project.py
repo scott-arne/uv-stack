@@ -239,10 +239,7 @@ def init_project(
     expanded_adds = expand_all(stack_adds, config.load_variables())
 
     # Only when the spec is actually recorded: --no-track removes the table
-    # below, so the advisory would name a trip nothing is taking. The advisory
-    # itself is built at each return below rather than here, because its tense
-    # turns on whether the write has happened yet and that is unknowable this
-    # far above it.
+    # below, so the advisory would name a trip nothing is taking.
     travel_spec = options.python if options.track else None
 
     # Adopt orphans left by a crashed tracked init/refresh (spec §2.3):
@@ -304,6 +301,12 @@ def init_project(
     # runs, and so both uv init and uv sync receive the same value.
     python = resolve_project_python(config, runner, options.python)
 
+    # Classified here, alongside the interpreter probe and above every write:
+    # the classifier reads the config root and can raise, and the delivery
+    # points below cannot afford to. Only the tense is left to them. This is
+    # the last point where a failure costs nothing.
+    travel = _travel_advisory(config, travel_spec)
+
     # Opting out is authoritative once the run commits to touching this
     # project, so this precedes every fallible uv step — but it deliberately
     # FOLLOWS the interpreter probe. A probe failure means nothing has been
@@ -345,14 +348,14 @@ def init_project(
         # run that raised.
         error.resolution_warnings = [
             *warnings,
-            *_travel_notices(config, travel_spec, recorded=recorded),
+            *_travel_notices(travel, recorded=recorded),
         ]
         raise
     finally:
         if tmp_req.exists():
             tmp_req.unlink()
 
-    return [*warnings, *_travel_notices(config, travel_spec, recorded=recorded)]
+    return [*warnings, *_travel_notices(travel, recorded=recorded)]
 
 
 def select_project_python(config: ConfigRoot, flag: str | None) -> str:
@@ -441,28 +444,70 @@ def python_travel_problem(config: ConfigRoot, spec: str) -> str | None:
     return None
 
 
-def _travel_notices(config: ConfigRoot, spec: str | None, *, recorded: bool) -> list[str]:
-    """The travel advisory for ``spec``, or an empty list when there is none.
+@dataclass(frozen=True)
+class TravelAdvisory:
+    """Both tenses of one travel advisory, rendered before any mutation.
+
+    The classification behind the wording reads the config root, which can
+    fail; choosing between two ready strings cannot. Carrying both tenses is
+    what lets the delivery points stay infallible while still saying the true
+    one (see :func:`_travel_advisory`).
+
+    :param prospective: The wording for a delivery above the tracking write.
+    :param recorded: The wording for a delivery below it.
+    """
+
+    prospective: str
+    recorded: str
+
+
+def _travel_advisory(config: ConfigRoot, spec: str | None) -> TravelAdvisory | None:
+    """Classify ``spec``'s travel problem and render both tenses of it.
+
+    Called ONCE per operation, above every write, every file created and every
+    command run, because :func:`python_travel_problem` consults
+    :meth:`~uv_stack.config.ConfigRoot.list_envs` and an unreadable envs
+    directory makes that raise. Classifying at each delivery point instead put
+    that OSError on the success returns, where it reported a completed run as
+    failed, and inside the error handlers, where it replaced the
+    :class:`~uv_stack.errors.UvStackError` actually being reported.
+
+    :param config: Configuration root, for the declared environment names.
+    :param spec: The spec about to be recorded, or ``None`` when unset.
+    :returns: The advisory in both tenses, or ``None`` when the spec travels.
+    :raises OSError: If the declared environments cannot be listed. Left to
+        propagate here, above the scaffolding, where the run has changed
+        nothing yet.
+    """
+    if spec is None:
+        return None
+    problem = python_travel_problem(config, spec)
+    if problem is None:
+        return None
+    reason = PYTHON_TRAVEL_REASON[problem]
+    return TravelAdvisory(
+        prospective=PYTHON_TRAVEL_PROSPECTIVE.format(spec=spec) + reason,
+        recorded=PYTHON_TRAVEL_RECORDED.format(spec=spec) + reason,
+    )
+
+
+def _travel_notices(advisory: TravelAdvisory | None, *, recorded: bool) -> list[str]:
+    """Pick ``advisory``'s tense, or an empty list when there is none.
 
     At most one advisory is ever produced. A list rather than an optional
     string because every caller splices the result into a warning list, and
     five copies of the same ``None`` check read worse than one empty list.
 
-    :param config: Configuration root.
-    :param spec: The spec about to be recorded, or ``None`` when unset.
-    :param recorded: Whether the tracking write has already put ``spec`` on
+    :param advisory: The pre-classified advisory, or ``None``.
+    :param recorded: Whether the tracking write has already put the spec on
         disk. Callers pass this rather than letting the advisory assume,
         because the same problem reads as a false claim when the record it
         describes does not exist yet.
     :returns: The warning text in a one-element list, or an empty list.
     """
-    if spec is None:
+    if advisory is None:
         return []
-    problem = python_travel_problem(config, spec)
-    if problem is None:
-        return []
-    opening = PYTHON_TRAVEL_RECORDED if recorded else PYTHON_TRAVEL_PROSPECTIVE
-    return [opening.format(spec=spec) + PYTHON_TRAVEL_REASON[problem]]
+    return [advisory.recorded if recorded else advisory.prospective]
 
 
 def resolve_project_python(
@@ -696,6 +741,15 @@ def refresh_project(
         applied=[*stack_adds, *adopted],
         pending=None,
     )
+
+    # Above the pre-flight so the dry run and the real run share one
+    # classification, and so no delivery point below can raise: the classifier
+    # reads the config root, and an unreadable envs directory surfacing from
+    # the success return would report a completed refresh as failed, while the
+    # same failure inside the handler would replace the error being reported.
+    # A dry run that fails here is correct — a dry run exists to find out.
+    travel = _travel_advisory(config, spec_flag)
+
     if not options.dry_run:
         validate_tracking_write(pyproject, pending_tracking)
 
@@ -709,7 +763,7 @@ def refresh_project(
         if not options.no_sync:
             planned.append(uv_sync(shown))
         return RefreshResult(
-            warnings=[*warnings, *_travel_notices(config, spec_flag, recorded=False)],
+            warnings=[*warnings, *_travel_notices(travel, recorded=False)],
             added=added,
             removed=removed,
             skipped_removals=skipped,
@@ -747,7 +801,7 @@ def refresh_project(
         # are gone for good, and this handler cannot tell which (see docstring).
         error.resolution_warnings = [
             *warnings,
-            *_travel_notices(config, spec_flag, recorded=recorded),
+            *_travel_notices(travel, recorded=recorded),
             *(SKIPPED_REMOVAL_NOTICE.format(entry=entry) for entry in skipped),
         ]
         raise
@@ -755,7 +809,7 @@ def refresh_project(
         if tmp_req.exists():
             tmp_req.unlink()
     return RefreshResult(
-        warnings=[*warnings, *_travel_notices(config, spec_flag, recorded=True)],
+        warnings=[*warnings, *_travel_notices(travel, recorded=True)],
         added=added,
         removed=removed,
         skipped_removals=skipped,

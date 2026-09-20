@@ -3905,6 +3905,151 @@ def test_refresh_success_says_it_recorded_the_spec(
     assert tracking is not None and tracking.python == "/opt/envs/x/bin/python"
 
 
+def _break_env_listing(monkeypatch) -> None:
+    """Make every ``list_envs`` call raise, as a failing mount does.
+
+    ``list_envs`` walks ``envs_dir`` with ``iterdir``, so an unreadable
+    directory or a dead network mount surfaces as OSError rather than an empty
+    list. Patching the class rather than one instance keeps the injection from
+    being sidestepped by an operation that builds its own ConfigRoot.
+
+    :param monkeypatch: The pytest monkeypatch fixture.
+    """
+
+    def unreadable(self: ConfigRoot) -> list[str]:
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(ConfigRoot, "list_envs", unreadable)
+
+
+def _watch_env_listing(monkeypatch, runner: RecordingRunner) -> list[list[str]]:
+    """Log what the run had already executed at each ``list_envs`` call.
+
+    One entry per lookup, holding the program name of every command issued so
+    far. The length therefore counts the lookups and each entry dates one:
+    an entry containing 'uv' is a lookup that happened after the run started
+    mutating the project, which is the shape the delivery-point classifier had.
+
+    :param monkeypatch: The pytest monkeypatch fixture.
+    :param runner: The runner whose recorded commands date each lookup.
+    :returns: The log, appended to as the run proceeds.
+    """
+    real_list_envs = ConfigRoot.list_envs
+    log: list[list[str]] = []
+
+    def spy(self: ConfigRoot) -> list[str]:
+        log.append([command.args[0] for command in runner.commands])
+        return real_list_envs(self)
+
+    monkeypatch.setattr(ConfigRoot, "list_envs", spy)
+    return log
+
+
+def test_init_env_listing_failure_aborts_before_anything_is_mutated(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """An unreadable envs directory must abort the run rather than outlive it.
+
+    Classifying the travel advisory at the delivery point put this OSError on
+    the success return, where uv add had run, the final ledger was written and
+    uv sync had completed: the CLI reported a failed run that had in fact done
+    everything it meant to. Asserting the absent pyproject and the unrun uv
+    commands is what separates an honest abort from a late complaint.
+    """
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    _break_env_listing(monkeypatch)
+    project_dir = tmp_path / "proj_travel_unreadable"
+    project_dir.mkdir()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(OSError) as excinfo:
+        init_project(
+            config_tree, runner, ["ds"],
+            ProjectOptions(python="scratch"), cwd=project_dir,
+        )
+    # The injected failure, not an incidental one.
+    assert excinfo.value.errno == errno.EACCES
+    assert not (project_dir / "pyproject.toml").exists()
+    assert [c.args[0] for c in runner.commands if c.args[0] == "uv"] == []
+
+
+def test_refresh_env_listing_failure_aborts_before_anything_is_mutated(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """The refresh counterpart: the same OSError, the same required timing.
+
+    refresh classifies above its own pre-flight, so the dry run and the real
+    run share one lookup and a failing mount costs the project nothing. The
+    byte comparison is the pin: before the hoist, this run rewrote the ledger
+    twice and ran uv before the OSError escaped.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    _break_env_listing(monkeypatch)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_bytes()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(OSError) as excinfo:
+        refresh_project(
+            config_tree, runner, RefreshOptions(python="scratch"), cwd=project_dir,
+        )
+    assert excinfo.value.errno == errno.EACCES
+    assert pyproject.read_bytes() == before
+    assert runner.commands == []
+
+
+def test_init_consults_the_declared_envs_once_and_before_it_starts(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """One lookup per run, above the scaffolding, on the path that succeeds.
+
+    The advisory still has to be delivered twice in principle (both tenses),
+    so the guard has to be the lookup rather than the wording: classify once,
+    format twice.
+    """
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_travel_once"
+    project_dir.mkdir()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    log = _watch_env_listing(monkeypatch, runner)
+    warnings = init_project(
+        config_tree, runner, ["ds"],
+        ProjectOptions(python="scratch"), cwd=project_dir,
+    )
+    assert len(_travel_warnings(warnings)) == 1
+    assert len(log) == 1
+    assert "uv" not in log[0]
+
+
+def test_init_failure_reuses_the_lookup_instead_of_repeating_it(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """The error handler formats a tense; it may not go back to the filesystem.
+
+    A lookup inside the handler can raise, and an OSError raised there replaces
+    the UvStackError being handled — the user loses the real failure and every
+    advisory attached to it. Pinning the surviving error and its advisory
+    alongside the single early lookup is what makes that unrepeatable.
+    """
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_travel_once_failed"
+    project_dir.mkdir()
+    runner = RecordingRunner(responder=_fail_on("add"))
+    log = _watch_env_listing(monkeypatch, runner)
+    with pytest.raises(ToolError) as excinfo:
+        init_project(
+            config_tree, runner, ["ds"],
+            ProjectOptions(python="scratch"), cwd=project_dir,
+        )
+    assert "add failed" in str(excinfo.value)
+    assert len(log) == 1
+    assert "uv" not in log[0]
+    travel = _travel_warnings(excinfo.value.resolution_warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Recording interpreter 'scratch'")
+
+
 def test_refresh_temp_file_failure_leaves_the_ledger_untouched(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):
