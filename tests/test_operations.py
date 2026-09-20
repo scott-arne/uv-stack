@@ -2971,7 +2971,11 @@ def _assert_seeded_hint(hint: str) -> None:
     """
     assert "copy of" in hint
     assert "re-run as a full upgrade" in hint
-    assert "stack converge --upgrade" in hint
+    # Both spellings, because the defect this replaced was advice that fit only
+    # one of the two commands reaching it. Either half going missing is the
+    # same defect again, pointed the other way.
+    assert "'stack upgrade' without --no-upgrade/--upgrade-package" in hint
+    assert "'stack converge --upgrade'" in hint
     assert "new empty file" not in hint
 
 
