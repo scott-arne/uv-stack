@@ -2905,6 +2905,7 @@ def test_the_recreate_branch_also_sees_the_existing_pins(config_tree: ConfigRoot
     )
     assert seen == ["numpy==1.26.0\n"]
     assert lock.read_text() == "numpy==1.26.0\n"
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
 
 
 def test_a_failed_compile_leaves_the_published_lock_untouched(config_tree: ConfigRoot):
@@ -2923,3 +2924,79 @@ def test_a_failed_compile_leaves_the_published_lock_untouched(config_tree: Confi
     assert lock.read_text() == "numpy==1.26.0\n"
     leftovers = list(lock.parent.glob(lock.name + ".*.tmp"))
     assert leftovers == []
+
+
+def test_candidate_lock_is_empty_when_lock_path_is_a_directory(config_tree: ConfigRoot):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.mkdir()  # Create a directory at the lock path
+    candidate = _new_candidate_lock(lock)
+    try:
+        assert candidate.read_text() == ""
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def test_candidate_lock_survives_concurrent_lock_removal(
+    config_tree: ConfigRoot, monkeypatch
+):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    # Simulate the lock disappearing between is_file() and read_bytes()
+    from pathlib import Path
+    original_read_bytes = Path.read_bytes
+
+    def mock_read_bytes(self):
+        if self == lock:
+            raise FileNotFoundError(f"{self}")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", mock_read_bytes)
+
+    candidate = _new_candidate_lock(lock)
+    try:
+        assert candidate.read_text() == ""
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def test_a_failed_compile_hint_names_the_published_lock(config_tree: ConfigRoot):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(config_tree, runner, "main", UpgradeOptions(no_upgrade=True))
+    assert caught.value.hint is not None
+    assert str(lock) in caught.value.hint
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
+def test_a_failed_compile_hint_names_the_published_lock_recreate_branch(
+    config_tree: ConfigRoot,
+):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(
+            config_tree, runner, "main", UpgradeOptions(recreate=True, no_upgrade=True)
+        )
+    assert caught.value.hint is not None
+    assert str(lock) in caught.value.hint
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []

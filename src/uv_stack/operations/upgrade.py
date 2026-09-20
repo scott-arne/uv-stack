@@ -23,7 +23,7 @@ from uv_stack.commands import (
     uv_pip_sync,
 )
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError, EnvError, UvStackError
+from uv_stack.errors import ConfigError, EnvError, ToolError, UvStackError
 from uv_stack.fsutil import atomic_write
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.create import ensure_env
@@ -99,10 +99,36 @@ def _new_candidate_lock(lock: Path) -> Path:
     try:
         if lock.is_file():
             candidate.write_bytes(lock.read_bytes())
+    except FileNotFoundError:
+        # Lost a race with a concurrent removal. An absent lock is already the
+        # empty-candidate case, so this is not a failure.
+        pass
     except BaseException:
         candidate.unlink(missing_ok=True)
         raise
     return candidate
+
+
+def _explain_candidate_lock(error: BaseException, lock: Path) -> None:
+    """Point a failed compile at the published lock behind the temp file.
+
+    uv compiles into a seeded copy of the lock, so its diagnostics name a
+    ``.tmp`` path that the unwind deletes on the way out. Without this the
+    user is left with an error about a file that no longer exists and no
+    mention of the lock it was copied from.
+
+    :param error: The exception about to be re-raised. Anything that is not a
+        :class:`ToolError`, and any error that already carries a hint, is left
+        alone.
+    :param lock: The published lock the candidate was seeded from.
+    """
+    if isinstance(error, ToolError) and error.hint is None:
+        error.hint = (
+            f"uv compiles into a copy of {lock}, so a '.tmp' path above names "
+            f"that copy, not a file you are missing. If {lock.name} itself "
+            "cannot be parsed, re-run without --no-upgrade/--upgrade-package: "
+            "a full upgrade ignores the existing pins and rewrites it."
+        )
 
 
 def _env_python(runner: Runner, env_name: str, *, probed: str | None = None) -> str:
@@ -298,9 +324,10 @@ def upgrade_env(
                 # handler below, which discards the candidate and leaves the
                 # published lock untouched.
                 tmp_lock.replace(lock)
-            except BaseException:
+            except BaseException as error:
                 if tmp_lock.exists():
                     tmp_lock.unlink()
+                _explain_candidate_lock(error, lock)
                 raise
         else:
             ensure_env(
@@ -324,9 +351,10 @@ def upgrade_env(
                     )
                 )
                 tmp_lock.replace(lock)
-            except BaseException:
+            except BaseException as error:
                 if tmp_lock.exists():
                     tmp_lock.unlink()
+                _explain_candidate_lock(error, lock)
                 raise
 
         runner.run(uv_pip_sync(python, lock))
