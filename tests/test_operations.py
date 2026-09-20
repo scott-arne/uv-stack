@@ -3221,22 +3221,33 @@ def test_the_ledger_keeps_the_unexpanded_entry(tmp_path: Path):
     config = _portable_root(tmp_path, "root-a", "/checkouts/a")
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
+    pyproject = project_dir / "pyproject.toml"
     captured: list[str] = []
+    # 'pending' is as durable as 'applied': it is written before 'uv add' and
+    # a crash in that window leaves it committed. The only place to observe it
+    # is inside the command the window brackets.
+    mid_run: list[list[str] | None] = []
 
     def responder(cmd: Command) -> CommandResult:
         if "add" in cmd.args and "-r" in cmd.args:
             captured.append(Path(cmd.args[cmd.args.index("-r") + 1]).read_text())
+            during = read_tracking(pyproject)
+            mid_run.append(during.pending if during is not None else None)
         return CommandResult(returncode=0, stdout="")
 
     init_project(
         config, RecordingRunner(responder=responder), ["dev"],
         ProjectOptions(python="3.12"), cwd=project_dir,
     )
-    tracking = read_tracking(project_dir / "pyproject.toml")
+    tracking = read_tracking(pyproject)
     assert tracking is not None
     assert "-e ${DEV}/widget" in tracking.applied
     assert "-e /checkouts/a/widget" not in tracking.applied
     assert "-e /checkouts/a/widget\n" in captured[0]
+    pending = mid_run[0]
+    assert pending is not None
+    assert "-e ${DEV}/widget" in pending
+    assert "-e /checkouts/a/widget" not in pending
 
 
 def test_two_roots_with_different_values_write_identical_ledgers(tmp_path: Path):
