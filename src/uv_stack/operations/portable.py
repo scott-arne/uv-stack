@@ -146,7 +146,8 @@ def _terminator(line: str) -> str:
     """The exact line terminator a line carries, or the empty string.
 
     :param line: One element of ``str.splitlines(keepends=True)``.
-    :returns: The terminator, or ``""`` for an unterminated final line.
+    :returns: CRLF, LF, or CR, the only three recognised. ``""`` both for
+        an unterminated final line and for one ended by any other separator.
     """
     for candidate in ("\r\n", "\n", "\r"):
         if line.endswith(candidate):
