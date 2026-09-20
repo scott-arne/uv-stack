@@ -152,8 +152,13 @@ def _explain_candidate_lock(error: BaseException, lock: Path, *, seeded: bool) -
         :class:`ToolError`, any error that already carries a hint, and any
         error from a command other than the compile, is left alone.
     :param lock: The published lock the candidate stands in for.
-    :param seeded: Whether the candidate was seeded from that lock, i.e. the
-        value the caller passed as ``seed`` to :func:`_new_candidate_lock`.
+    :param seeded: Whether seeding was REQUESTED — the same value the caller
+        passed as ``seed`` to :func:`_new_candidate_lock`, not whether a copy
+        was made. The two differ when the lock is absent or is not a regular
+        file, where that function returns an empty candidate anyway; the
+        seeded wording then names a copy that did not happen. Narrow enough to
+        leave alone, but it is why this parameter is the request, not the
+        outcome.
     """
     # The argv PREFIX, not membership: micromamba_remove and
     # micromamba_python_path both place the env name in argv as a bare element,
