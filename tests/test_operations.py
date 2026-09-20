@@ -2874,6 +2874,7 @@ def test_compile_sees_the_existing_pins(config_tree: ConfigRoot):
 
     def responder(cmd: Command) -> CommandResult:
         if "compile" in cmd.args:
+            _assert_compiles_to_candidate(cmd, lock)
             seen.append(_compile_output(cmd).read_text())
         return _existing_env_responder(cmd)
 
@@ -2906,14 +2907,12 @@ def test_the_recreate_branch_also_sees_the_existing_pins(config_tree: ConfigRoot
     assert lock.read_text() == "numpy==1.26.0\n"
 
 
-
-
 def test_a_failed_compile_leaves_the_published_lock_untouched(config_tree: ConfigRoot):
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("numpy==1.26.0\n")
 
-    def responder(cmd):
+    def responder(cmd: Command) -> CommandResult:
         if "compile" in cmd.args:
             raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
         return _existing_env_responder(cmd)
