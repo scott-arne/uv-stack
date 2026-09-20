@@ -97,6 +97,11 @@ def _new_candidate_lock(lock: Path) -> Path:
     os.close(tmp_fd)
     candidate = Path(tmp_name)
     try:
+        # is_file() rather than exists(): a non-regular file at the lock path
+        # must never be opened. A FIFO there reads as existing, and the copy
+        # below would block on it forever -- the same hazard fsutil guards
+        # against with O_NONBLOCK. An absent lock is handled by the arm below,
+        # not by this guard.
         if lock.is_file():
             candidate.write_bytes(lock.read_bytes())
     except FileNotFoundError:

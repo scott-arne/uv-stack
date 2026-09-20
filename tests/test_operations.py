@@ -2929,7 +2929,7 @@ def test_a_failed_compile_leaves_the_published_lock_untouched(config_tree: Confi
 def test_candidate_lock_is_empty_when_lock_path_is_a_directory(config_tree: ConfigRoot):
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
-    lock.mkdir()  # Create a directory at the lock path
+    lock.mkdir()  # A directory stands in for any non-regular file.
     candidate = _new_candidate_lock(lock)
     try:
         assert candidate.read_text() == ""
@@ -2944,16 +2944,15 @@ def test_candidate_lock_survives_concurrent_lock_removal(
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("numpy==1.26.0\n")
 
-    # Simulate the lock disappearing between is_file() and read_bytes()
-    from pathlib import Path
     original_read_bytes = Path.read_bytes
 
-    def mock_read_bytes(self):
+    def read_bytes_losing_the_race(self):
+        # The lock passes is_file() and is gone by the time it is read.
         if self == lock:
             raise FileNotFoundError(f"{self}")
         return original_read_bytes(self)
 
-    monkeypatch.setattr(Path, "read_bytes", mock_read_bytes)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes_losing_the_race)
 
     candidate = _new_candidate_lock(lock)
     try:
