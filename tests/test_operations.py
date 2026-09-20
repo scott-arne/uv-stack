@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import _deadline
 from uv_stack.commands import (
     micromamba_create,
     micromamba_python_info,
@@ -3054,9 +3055,13 @@ def test_an_env_named_compile_does_not_claim_the_compile_hint(config_tree: Confi
     assert caught.value.hint is None
 
 
-def test_full_upgrade_recovers_unreadable_lock(config_tree: ConfigRoot):
+@pytest.mark.parametrize("recreate", [False, True])
+def test_full_upgrade_recovers_unreadable_lock(config_tree: ConfigRoot, recreate: bool):
     # A plain upgrade passes --upgrade, so uv ignores the output file. An
-    # unreadable lock must not fail the operation.
+    # unreadable lock must not fail the operation. Both branches are covered
+    # for the same reason as test_the_recreate_branch_also_sees_the_existing_pins:
+    # upgrade_env decides whether to seed at two separate call sites, and a
+    # regression could reach one without the other.
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("numpy==1.26.0\n")
@@ -3064,7 +3069,7 @@ def test_full_upgrade_recovers_unreadable_lock(config_tree: ConfigRoot):
 
     try:
         runner = RecordingRunner(responder=_existing_env_responder)
-        upgrade_env(config_tree, runner, "main", UpgradeOptions())
+        upgrade_env(config_tree, runner, "main", UpgradeOptions(recreate=recreate))
         # The unseeded candidate replaced the lock: the old pins are gone,
         # which exists() alone would not have shown.
         assert lock.read_text() == ""
@@ -3091,9 +3096,11 @@ def test_full_upgrade_does_not_read_the_lock(config_tree: ConfigRoot):
 
 
 def test_candidate_lock_is_empty_when_lock_path_is_a_fifo(config_tree: ConfigRoot):
-    # A FIFO at the lock path must not hang; it should yield an empty candidate.
-    import signal
-
+    # What this pins is O_NONBLOCK, not the S_ISREG check: a FIFO with no
+    # writer reads EOF, so removing S_ISREG still yields an empty candidate --
+    # the directory test is what pins that. Without O_NONBLOCK the open never
+    # returns, which is a hang rather than a failure, so _deadline turns it
+    # into an ordinary assertion error.
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
 
@@ -3102,25 +3109,14 @@ def test_candidate_lock_is_empty_when_lock_path_is_a_fifo(config_tree: ConfigRoo
 
     os.mkfifo(lock)
     try:
-        # Guard with a timeout in case of regression (a hang would fail the test).
-        def timeout_handler(signum, frame):
-            raise TimeoutError("FIFO test timed out - likely hung on open")
-
-        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(2)  # 2 second timeout
-
-        try:
+        with _deadline(5.0):
             candidate = _new_candidate_lock(lock, seed=True)
-            try:
-                assert candidate.read_text() == ""
-            finally:
-                candidate.unlink(missing_ok=True)
+        try:
+            assert candidate.read_text() == ""
         finally:
-            signal.alarm(0)  # Cancel the alarm
-            signal.signal(signal.SIGALRM, old_handler)
+            candidate.unlink(missing_ok=True)
     finally:
-        if lock.exists():
-            os.unlink(lock)
+        os.unlink(lock)
 
 
 def test_seed_failure_surfaces_its_own_error(config_tree: ConfigRoot, monkeypatch):
