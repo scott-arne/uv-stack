@@ -73,7 +73,7 @@ def _should_upgrade_all(options: UpgradeOptions) -> bool:
     return not options.no_upgrade and not options.upgrade_packages
 
 
-def _new_candidate_lock(lock: Path) -> Path:
+def _new_candidate_lock(lock: Path, *, seed: bool) -> Path:
     """Create a sibling file to compile a candidate lock into.
 
     The candidate is seeded from the published lock when one exists. ``uv pip
@@ -81,13 +81,15 @@ def _new_candidate_lock(lock: Path) -> Path:
     empty file re-resolves everything: ``--no-upgrade`` would have nothing to
     preserve and ``--upgrade-package X`` would upgrade far more than ``X``.
     Seeding is what gives both flags their documented meaning. A full
-    ``--upgrade`` is unaffected — uv ignores the output file's pins when it is
-    passed.
+    ``--upgrade`` is not seeded at all: uv ignores those pins, so reading the
+    lock would only introduce a failure mode that buys nothing.
 
     Compiling into a copy rather than into the lock itself is what keeps the
     published lock intact when the compile fails; the caller's unwind path
     deletes the candidate and leaves the original untouched.
 
+    :param seed: Whether to seed the candidate from the published lock. Pass
+        False for a full upgrade, where uv ignores the output file.
     :param lock: The lock the candidate will replace once it is complete.
     :returns: Path to the newly created temp file.
     """
@@ -96,6 +98,8 @@ def _new_candidate_lock(lock: Path) -> Path:
     )
     os.close(tmp_fd)
     candidate = Path(tmp_name)
+    if not seed:
+        return candidate
     try:
         # is_file() rather than exists(): a non-regular file at the lock path
         # must never be opened. A FIFO there reads as existing, and the copy
@@ -317,7 +321,7 @@ def upgrade_env(
             # still standing. This narrows the window; it does not close it —
             # micromamba create or uv pip sync can still fail once the old
             # environment is gone.
-            tmp_lock = _new_candidate_lock(lock)
+            tmp_lock = _new_candidate_lock(lock, seed=not upgrade_all)
             try:
                 runner.run(
                     uv_pip_compile_for_version(
@@ -354,7 +358,7 @@ def upgrade_env(
 
             # Compile to a temp lock, then atomically replace, so a failed compile never
             # corrupts an existing lockfile.
-            tmp_lock = _new_candidate_lock(lock)
+            tmp_lock = _new_candidate_lock(lock, seed=not upgrade_all)
             try:
                 runner.run(
                     uv_pip_compile(

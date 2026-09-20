@@ -2847,7 +2847,7 @@ def test_candidate_lock_is_seeded_from_the_published_lock(config_tree: ConfigRoo
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("numpy==1.26.0\n")
-    candidate = _new_candidate_lock(lock)
+    candidate = _new_candidate_lock(lock, seed=True)
     try:
         assert candidate.read_text() == "numpy==1.26.0\n"
         assert candidate != lock
@@ -2859,7 +2859,7 @@ def test_candidate_lock_is_empty_when_no_lock_is_published(config_tree: ConfigRo
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
     assert not lock.exists()
-    candidate = _new_candidate_lock(lock)
+    candidate = _new_candidate_lock(lock, seed=True)
     try:
         assert candidate.read_text() == ""
     finally:
@@ -2931,7 +2931,7 @@ def test_candidate_lock_is_empty_when_lock_path_is_a_directory(config_tree: Conf
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.mkdir()  # A directory stands in for any non-regular file.
-    candidate = _new_candidate_lock(lock)
+    candidate = _new_candidate_lock(lock, seed=True)
     try:
         assert candidate.read_text() == ""
     finally:
@@ -2955,7 +2955,7 @@ def test_candidate_lock_survives_concurrent_lock_removal(
 
     monkeypatch.setattr(Path, "read_bytes", read_bytes_losing_the_race)
 
-    candidate = _new_candidate_lock(lock)
+    candidate = _new_candidate_lock(lock, seed=True)
     try:
         assert candidate.read_text() == ""
     finally:
@@ -3051,3 +3051,38 @@ def test_an_env_named_compile_does_not_claim_the_compile_hint(config_tree: Confi
         upgrade_env(config_tree, runner, "compile", UpgradeOptions(recreate=True))
     assert caught.value.command[1] == "remove"
     assert caught.value.hint is None
+
+
+def test_full_upgrade_recovers_unreadable_lock(config_tree: ConfigRoot):
+    # A plain upgrade passes --upgrade, so uv ignores the output file. An
+    # unreadable lock must not fail the operation.
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+    lock.chmod(0o000)
+
+    try:
+        runner = RecordingRunner(responder=_existing_env_responder)
+        upgrade_env(config_tree, runner, "main", UpgradeOptions())
+        # The lock was replaced despite being unreadable.
+        assert lock.exists()
+    finally:
+        lock.chmod(0o644)
+
+
+def test_full_upgrade_does_not_read_the_lock(config_tree: ConfigRoot):
+    # A full upgrade seeds with an empty candidate, so the compile must not
+    # see the published lock's contents.
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+    seen: list[str] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            seen.append(_compile_output(cmd).read_text())
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    upgrade_env(config_tree, runner, "main", UpgradeOptions())
+    assert seen == [""]
