@@ -2970,7 +2970,8 @@ def _assert_seeded_hint(hint: str) -> None:
     :param hint: The hint attached to the failed compile.
     """
     assert "copy of" in hint
-    assert "re-run without --no-upgrade/--upgrade-package" in hint
+    assert "re-run as a full upgrade" in hint
+    assert "stack converge --upgrade" in hint
     assert "new empty file" not in hint
 
 

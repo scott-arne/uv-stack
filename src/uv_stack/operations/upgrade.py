@@ -146,7 +146,9 @@ def _explain_candidate_lock(error: BaseException, lock: Path, *, seeded: bool) -
     of the lock, or a new empty file that a full upgrade resolves into from
     scratch. Calling the latter a copy would describe a read that never
     happened, and the recovery advice only helps when a full upgrade is still
-    an escape route rather than the mode that just failed.
+    an escape route rather than the mode that just failed. Two CLI commands now
+    reach this code and the spelling that escapes a seeded compile differs
+    between them, so the hint names both.
 
     :param error: The exception about to be re-raised. Anything that is not a
         :class:`ToolError`, any error that already carries a hint, and any
@@ -174,9 +176,10 @@ def _explain_candidate_lock(error: BaseException, lock: Path, *, seeded: bool) -
             error.hint = (
                 f"uv compiles into a copy of {lock}, so a '.tmp' path above "
                 f"names that copy, not a file you are missing. If {lock.name} "
-                "itself cannot be parsed, re-run without "
-                "--no-upgrade/--upgrade-package: a full upgrade ignores the "
-                "existing pins and rewrites it."
+                "itself cannot be parsed, re-run as a full upgrade, which "
+                "ignores the existing pins and rewrites it: 'stack upgrade' "
+                "without --no-upgrade/--upgrade-package, or "
+                "'stack converge --upgrade'."
             )
         else:
             error.hint = (
