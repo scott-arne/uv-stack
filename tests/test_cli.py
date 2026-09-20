@@ -5321,94 +5321,82 @@ def test_broken_pipe_error_is_not_recorded_as_an_environment_failure(
     assert "Summary" not in result.output
 
 
-def _upgrade_env_spy(attempted: list[str]):
-    """A stand-in for upgrade_env that records names without side effects.
 
-    :param attempted: Appended to with every name the fake is called with.
-    :returns: A callable with upgrade_env's signature.
+def _escape_victim(tmp_path: Path) -> Path:
+    """A directory outside the config root that a traversal would overwrite.
+
+    It carries the sources the pipeline keys on, so an unguarded NAME really
+    does reach it: without the guard the run exits 0 and replaces
+    ``requirements.in`` with generated content. A victim missing those files
+    would make the test pass for the wrong reason.
+
+    :param tmp_path: The test's temporary directory.
+    :returns: The victim directory.
     """
-    from uv_stack.operations.upgrade import UpgradeResult
-
-    def fake_upgrade(config, runner, name, options):
-        attempted.append(name)
-        return UpgradeResult(env_name=name)
-
-    return fake_upgrade
-
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "stack.txt").write_text("@standard\n")
+    (victim / "python.txt").write_text("3.12\n")
+    (victim / "requirements.in").write_text("DO NOT TOUCH\n")
+    return victim
 
 
-def test_converge_rejects_an_absolute_environment_name(tmp_path: Path, monkeypatch):
+def _assert_untouched(victim: Path) -> None:
+    """Pin that nothing outside the config root was written.
+
+    Asserted before the exit status so a regression names the damage rather
+    than a proxy for it.
+
+    :param victim: The directory built by :func:`_escape_victim`.
+    """
+    assert (victim / "requirements.in").read_text() == "DO NOT TOUCH\n"
+    assert not (victim / "environment.yml").exists()
+
+
+def test_converge_rejects_an_absolute_environment_name(tmp_path: Path) -> None:
     """An absolute NAME must not escape the config root.
 
-    ConfigRoot.env_dir joins the name onto <root>/envs, and an absolute name
-    would discard the left operand and land outside the root, where the
-    pipeline would overwrite generated files.
+    ``ConfigRoot.env_dir`` joins the name onto ``<root>/envs``, and an
+    absolute name discards the left operand and lands outside the root, where
+    the pipeline would overwrite generated files. ``--dry-run`` runs no
+    subprocess but still refreshes those files, so it is the arm that isolates
+    the write from the tooling.
     """
     root = _seeded_root(tmp_path)
-    victim = tmp_path / "victim"
-    victim.mkdir()
-    (victim / "stack.txt").write_text("@standard\n")
-    (victim / "python.txt").write_text("3.12\n")
-    (victim / "requirements.in").write_text("DO NOT TOUCH\n")
+    victim = _escape_victim(tmp_path)
 
-    attempted: list[str] = []
-    monkeypatch.setattr(
-        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_spy(attempted)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--dry-run", str(victim)]
     )
 
-    result = CliRunner().invoke(cli, ["--root", str(root), "converge", str(victim)])
-
+    _assert_untouched(victim)
     assert result.exit_code == 1
     assert "Invalid environment name" in result.output
-    assert (victim / "requirements.in").read_text() == "DO NOT TOUCH\n"
-    assert not (victim / "environment.yml").exists()
-    assert attempted == []
 
 
-def test_upgrade_rejects_an_absolute_environment_name(tmp_path: Path, monkeypatch):
-    """An absolute NAME must not escape the config root.
-
-    This is the upgrade command's side of the same guard.
-    """
+def test_upgrade_rejects_an_absolute_environment_name(tmp_path: Path) -> None:
+    """The upgrade command's side of the same guard."""
     root = _seeded_root(tmp_path)
-    victim = tmp_path / "victim"
-    victim.mkdir()
-    (victim / "stack.txt").write_text("@standard\n")
-    (victim / "python.txt").write_text("3.12\n")
-    (victim / "requirements.in").write_text("DO NOT TOUCH\n")
+    victim = _escape_victim(tmp_path)
 
-    attempted: list[str] = []
-    monkeypatch.setattr(
-        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_spy(attempted)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "upgrade", "--dry-run", str(victim)]
     )
 
-    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", str(victim)])
-
+    _assert_untouched(victim)
     assert result.exit_code == 1
     assert "Invalid environment name" in result.output
-    assert (victim / "requirements.in").read_text() == "DO NOT TOUCH\n"
-    assert not (victim / "environment.yml").exists()
-    assert attempted == []
 
 
-def test_converge_rejects_a_dotdot_bearing_environment_name(tmp_path: Path, monkeypatch):
-    """A ../-bearing NAME must not escape the config root."""
+def test_converge_rejects_a_dotdot_bearing_environment_name(tmp_path: Path) -> None:
+    """A '../'-bearing NAME must not escape the config root either."""
     root = _seeded_root(tmp_path)
-    victim = tmp_path / "victim"
-    victim.mkdir()
-    (victim / "stack.txt").write_text("@standard\n")
-    (victim / "python.txt").write_text("3.12\n")
-    (victim / "requirements.in").write_text("DO NOT TOUCH\n")
+    victim = _escape_victim(tmp_path)
 
-    attempted: list[str] = []
-    monkeypatch.setattr(
-        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_spy(attempted)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--dry-run", "../../victim"]
     )
 
-    result = CliRunner().invoke(cli, ["--root", str(root), "converge", "../victim"])
-
+    _assert_untouched(victim)
     assert result.exit_code == 1
     assert "Invalid environment name" in result.output
-    assert (victim / "requirements.in").read_text() == "DO NOT TOUCH\n"
-    assert not (victim / "environment.yml").exists()
-    assert attempted == []
