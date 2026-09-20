@@ -250,9 +250,16 @@ def create_project(
         track=not no_track,
         strict=strict,
     )
-    warnings = init_project(
-        config, SubprocessRunner(), list(tokens), options, cwd=Path.cwd()
-    )
+    try:
+        warnings = init_project(
+            config, SubprocessRunner(), list(tokens), options, cwd=Path.cwd()
+        )
+    except UvStackError as error:
+        # A failure suppresses the warning list these would have arrived on, so
+        # print them off the error; re-raise so the group-level handler still
+        # renders the error panel.
+        render_warnings(error.resolution_warnings)
+        raise
     render_warnings(warnings)
     console.print("[green]Project initialized.[/green]")
 

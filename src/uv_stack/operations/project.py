@@ -239,10 +239,11 @@ def init_project(
     expanded_adds = expand_all(stack_adds, config.load_variables())
 
     # Only when the spec is actually recorded: --no-track removes the table
-    # below, so the advisory would name a trip nothing is taking.
-    notice = _travel_notice(config, options.python) if options.track else None
-    if notice is not None:
-        warnings.append(notice)
+    # below, so the advisory would name a trip nothing is taking. The advisory
+    # itself is built at each return below rather than here, because its tense
+    # turns on whether the write has happened yet and that is unknowable this
+    # far above it.
+    travel_spec = options.python if options.track else None
 
     # Adopt orphans left by a crashed tracked init/refresh (spec §2.3):
     # durable from the FIRST write below. Skipped entirely with --no-track:
@@ -311,6 +312,7 @@ def init_project(
     fresh = not pyproject.is_file()
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-stack.", suffix=".txt")
     tmp_req = Path(tmp_name)
+    recorded = False
     try:
         with open(fd, "w", encoding="utf-8") as handle:
             for entry in expanded_adds:
@@ -321,16 +323,26 @@ def init_project(
             runner.run(_with_cwd(uv_init(python, options.name), cwd))
         if options.track:
             write_tracking(pyproject, pending_tracking)
+            recorded = True
         runner.run(_with_cwd(uv_add(tmp_req), cwd))
         if options.track:
             write_tracking(pyproject, final_tracking)
         if not options.no_sync:
             runner.run(_with_cwd(uv_sync(python), cwd))
+    except UvStackError as error:
+        # These advisories ride on the returned list, which a raised error
+        # never produces. Hand them to the error instead: a failure past the
+        # pending write leaves the spec on disk, so the caveat outlives the
+        # run that raised.
+        travel = _travel_notice(config, travel_spec, recorded=recorded)
+        error.resolution_warnings = [*warnings, *([travel] if travel is not None else [])]
+        raise
     finally:
         if tmp_req.exists():
             tmp_req.unlink()
 
-    return warnings
+    travel = _travel_notice(config, travel_spec, recorded=recorded)
+    return [*warnings, *([travel] if travel is not None else [])]
 
 
 def select_project_python(config: ConfigRoot, flag: str | None) -> str:
@@ -370,20 +382,27 @@ def _is_python_passthrough(spec: str) -> bool:
     return bool(_IMPLEMENTATION_RE.match(spec))
 
 
-#: Advisory wording for an interpreter spec that works here but will not
-#: travel. Keyed by :func:`python_travel_problem`'s return value.
-PYTHON_TRAVEL_NOTICE = {
+#: Why a recorded interpreter spec will not travel, keyed by
+#: :func:`python_travel_problem`'s return value. The opening that precedes it
+#: is chosen at delivery, because the same problem is worth saying in two
+#: tenses.
+PYTHON_TRAVEL_REASON = {
     "path": (
-        "Recording interpreter '{spec}' in pyproject.toml: a filesystem path "
-        "does not travel to another machine. A version, a uv implementation "
-        "form, or an environment name this root declares does."
+        "a filesystem path does not travel to another machine. A version, a uv "
+        "implementation form, or an environment name this root declares does."
     ),
     "undeclared-env": (
-        "Recording interpreter '{spec}' in pyproject.toml: this config root "
-        "declares no environment by that name, so the value will not resolve "
-        "on a machine that clones it."
+        "this config root declares no environment by that name, so the value "
+        "will not resolve on a machine that clones it."
     ),
 }
+
+#: 'Recording' is only true once the table holding the spec is on disk. Every
+#: other delivery point -- a dry run, a failure above the write -- is a
+#: prediction, and saying it in the present tense is a false claim about a
+#: durable record.
+PYTHON_TRAVEL_RECORDED = "Recording interpreter '{spec}' in pyproject.toml: "
+PYTHON_TRAVEL_PROSPECTIVE = "Would record interpreter '{spec}' in pyproject.toml: "
 
 
 def python_travel_problem(config: ConfigRoot, spec: str) -> str | None:
@@ -412,17 +431,24 @@ def python_travel_problem(config: ConfigRoot, spec: str) -> str | None:
     return None
 
 
-def _travel_notice(config: ConfigRoot, spec: str | None) -> str | None:
+def _travel_notice(config: ConfigRoot, spec: str | None, *, recorded: bool) -> str | None:
     """Return the advisory for ``spec``, or ``None`` when there is nothing to say.
 
     :param config: Configuration root.
     :param spec: The spec about to be recorded, or ``None`` when unset.
+    :param recorded: Whether the tracking write has already put ``spec`` on
+        disk. Callers pass this rather than letting the advisory assume,
+        because the same problem reads as a false claim when the record it
+        describes does not exist yet.
     :returns: The warning text, or ``None``.
     """
     if spec is None:
         return None
     problem = python_travel_problem(config, spec)
-    return None if problem is None else PYTHON_TRAVEL_NOTICE[problem].format(spec=spec)
+    if problem is None:
+        return None
+    opening = PYTHON_TRAVEL_RECORDED if recorded else PYTHON_TRAVEL_PROSPECTIVE
+    return opening.format(spec=spec) + PYTHON_TRAVEL_REASON[problem]
 
 
 def resolve_project_python(
@@ -640,10 +666,6 @@ def refresh_project(
     # the interpreter resolution below must agree on the value.
     spec_flag = options.python if options.python is not None else tracking.python
 
-    notice = _travel_notice(config, spec_flag)
-    if notice is not None:
-        warnings.append(notice)
-
     # Build both tables once, pre-flight the PENDING one (it is the first write
     # attempted), and keep the dry-run path write-free.
     pending_tracking = ProjectTracking(
@@ -672,17 +694,20 @@ def refresh_project(
         planned.append(uv_add(Path("<stack-requirements>")))
         if not options.no_sync:
             planned.append(uv_sync(shown))
+        travel = _travel_notice(config, spec_flag, recorded=False)
         return RefreshResult(
-            warnings=warnings,
+            warnings=[*warnings, *([travel] if travel is not None else [])],
             added=added,
             removed=removed,
             skipped_removals=skipped,
             planned=planned,
         )
 
+    recorded = False
     try:
         python = resolve_project_python(config, runner, spec_flag)
         write_tracking(pyproject, pending_tracking)
+        recorded = True
         fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-refresh.", suffix=".txt")
         tmp_req = Path(tmp_name)
         try:
@@ -704,13 +729,16 @@ def refresh_project(
         # These advisories ride on the RefreshResult, which a raised error never
         # produces. Hand them to the error instead: past the pending write some
         # are gone for good, and this handler cannot tell which (see docstring).
+        travel = _travel_notice(config, spec_flag, recorded=recorded)
         error.resolution_warnings = [
             *warnings,
+            *([travel] if travel is not None else []),
             *(SKIPPED_REMOVAL_NOTICE.format(entry=entry) for entry in skipped),
         ]
         raise
+    travel = _travel_notice(config, spec_flag, recorded=True)
     return RefreshResult(
-        warnings=warnings,
+        warnings=[*warnings, *([travel] if travel is not None else [])],
         added=added,
         removed=removed,
         skipped_removals=skipped,
