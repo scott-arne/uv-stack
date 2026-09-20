@@ -29,7 +29,7 @@ def _config_from_ctx(ctx: click.Context) -> ConfigRoot:
 def complete_env_names(
     ctx: click.Context, param: Any, incomplete: str
 ) -> list[str]:
-    """Complete environment names for upgrade/status/show."""
+    """Complete environment names for upgrade/converge/status/show."""
     try:
         names = _config_from_ctx(ctx).list_envs()
     except Exception:

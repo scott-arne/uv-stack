@@ -162,7 +162,11 @@ def _print_summary(
     help="Upgrade all discovered environments (cannot be combined with NAMES).",
 )
 @click.option("-y", "--yes", is_flag=True, help="Confirm bulk upgrade of all envs.")
-@click.option("--dry-run", is_flag=True, help="Print the command plan; change nothing.")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print the command plan and refresh generated files; run no commands.",
+)
 @click.option(
     "--stop-on-error",
     is_flag=True,
@@ -200,7 +204,8 @@ def upgrade(
     confirmation unless -y is given. By default the batch continues past a
     failing environment and reports a ✓/✗ summary; '--stop-on-error'
     aborts at the first failure. To create a missing environment, use
-    'stack create env'.
+    'stack create env'. To bring every environment in a config root up at once —
+    creating the missing ones, without a prompt — use 'stack converge'.
     """
     if all_envs and names:
         raise click.UsageError("--all cannot be combined with explicit environment NAMES.")

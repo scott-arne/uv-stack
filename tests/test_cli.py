@@ -4005,12 +4005,12 @@ def test_command_panels_separate_create_env_and_project_work():
     Asserts structurally against COMMAND_GROUPS: 'refresh' only ever operates
     on projects and gets its own panel; 'create' is cross-cutting (it makes
     environments, projects, profiles, and bundles) and gets its own panel;
-    'upgrade' is the only genuinely environment-only command.
+    'upgrade' and 'converge' are the genuinely environment-only commands.
     """
     command_groups = rich_click.rich_click.COMMAND_GROUPS.get("stack", [])
     panels = {group["name"]: group["commands"] for group in command_groups}
     assert panels.get("Create") == ["create"], panels
-    assert panels.get("Environments") == ["upgrade"], panels
+    assert panels.get("Environments") == ["upgrade", "converge"], panels
     assert panels.get("Projects") == ["refresh"], panels
 
     # Completeness: the per-panel assertions above pin what each panel holds,
@@ -5031,3 +5031,150 @@ def test_dedup_preserves_request_order(tmp_path: Path):
     summary = result.output.split("Summary", 1)[1]
     assert summary.index("beta") < summary.index("alpha")
     assert "2 of 2 environment(s) failed." in summary
+
+
+def test_converge_runs_every_declared_environment_without_prompting(
+    tmp_path: Path, monkeypatch
+):
+    root = _two_failing_envs_root(tmp_path)
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.converge._run_upgrade",
+        lambda config, names, options, **kw: calls.append((list(names), options)),
+    )
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    assert result.exit_code == 0, result.output
+    names, options = calls[0]
+    assert names == ["alpha", "beta"]
+    assert options.create is True
+    assert options.no_upgrade is True
+    assert options.dry_run is False
+    assert "Upgrade all of these?" not in result.output
+
+
+def test_converge_accepts_explicit_names(tmp_path: Path, monkeypatch):
+    root = _two_failing_envs_root(tmp_path)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.converge._run_upgrade",
+        lambda config, names, options, **kw: calls.append(list(names)),
+    )
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge", "beta"])
+    assert result.exit_code == 0, result.output
+    assert calls == [["beta"]]
+
+
+def test_converge_upgrade_flag_turns_off_no_upgrade(tmp_path: Path, monkeypatch):
+    root = _two_failing_envs_root(tmp_path)
+    captured: list[object] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.converge._run_upgrade",
+        lambda config, names, options, **kw: captured.append(options),
+    )
+    CliRunner().invoke(cli, ["--root", str(root), "converge", "--upgrade"])
+    assert captured[0].no_upgrade is False
+
+
+def test_converge_passes_its_own_wording(tmp_path: Path, monkeypatch):
+    root = _two_failing_envs_root(tmp_path)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "uv_stack.cli.converge._run_upgrade",
+        lambda config, names, options, **kw: captured.update(kw),
+    )
+    CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    assert captured["rule_verb"] == "Converging"
+    assert captured["all_succeeded"] == "All requested environments converged."
+
+
+def test_converge_passes_its_flags_through(tmp_path: Path, monkeypatch):
+    # --strict and --stop-on-error are pure pass-throughs, and a pass-through
+    # that is silently dropped looks exactly like one that works.
+    root = _two_failing_envs_root(tmp_path)
+    captured: dict[str, object] = {}
+
+    def _record(config, names, options, **kw):
+        captured["options"] = options
+        captured.update(kw)
+
+    monkeypatch.setattr("uv_stack.cli.converge._run_upgrade", _record)
+    CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--strict", "--stop-on-error"]
+    )
+    assert captured["stop_on_error"] is True
+    assert captured["options"].strict is True
+
+
+def test_converge_on_a_root_with_no_environments_says_so(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    assert result.exit_code == 0
+    assert "No environments" in result.output
+
+
+def test_converge_help_states_it_does_not_prompt():
+    result = CliRunner().invoke(cli, ["converge", "--help"])
+    assert "never prompts" in result.output
+    # A dry run refreshes two generated files, so the old claim was false. The
+    # assertion is negative because rich wraps help text at the terminal width
+    # and a positive phrase can be split across lines; its absence cannot.
+    assert "change nothing" not in result.output
+
+
+def test_upgrade_help_points_at_converge():
+    result = CliRunner().invoke(cli, ["upgrade", "--help"])
+    assert "converge" in result.output
+    assert "change nothing" not in result.output
+
+
+def test_converge_dry_run_probes_and_mutates_nothing(tmp_path: Path, monkeypatch):
+    """Pin the dry-run boundary: one read-only probe, two files, no mutation."""
+    from uv_stack.commands import micromamba_python_info
+    from uv_stack.config import ConfigRoot
+    from uv_stack.runner import CommandResult, RecordingRunner
+
+    def _probe_responder(cmd):
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.12.7\n")
+        return CommandResult(returncode=0, stdout="")
+
+    root = _env_root(tmp_path)
+    config = ConfigRoot(root)
+    runner = RecordingRunner(responder=_probe_responder)
+    # _run_upgrade builds its own runner; patch the name in the module whose
+    # globals that call resolves against, which is cli.upgrade even though the
+    # command lives in cli.converge.
+    monkeypatch.setattr("uv_stack.cli.upgrade.SubprocessRunner", lambda: runner)
+
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert [c.args for c in runner.commands] == [micromamba_python_info("main").args]
+    # The section rule is the only place converge's own verb reaches the screen
+    # on this path: --dry-run returns before the summary.
+    assert "Converging main" in result.output
+    # The two generated files are refreshed; nothing else is written.
+    assert config.env_requirements_in("main").is_file()
+    assert config.env_environment_yml("main").is_file()
+    assert not config.env_requirements_lock("main").exists()
+
+
+def test_converge_success_summary_uses_its_own_line(tmp_path: Path, monkeypatch):
+    """The success line is converge's, not upgrade's.
+
+    Stubbing ``upgrade_env`` is what makes a successful batch reachable without
+    micromamba or uv, exactly as
+    ``test_upgrade_success_summary_preserves_bracketed_env_name`` does for the
+    ``stack upgrade`` side. It is patched at ``uv_stack.cli.upgrade`` because
+    that is the module whose globals ``_run_upgrade``'s call resolves against.
+    """
+    from uv_stack.operations.upgrade import UpgradeResult
+
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env",
+        lambda config, runner, name, options: UpgradeResult(env_name=name),
+    )
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    assert result.exit_code == 0, result.output
+    assert "All requested environments converged." in result.output
+    assert "All requested environments upgraded." not in result.output
