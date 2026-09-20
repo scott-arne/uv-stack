@@ -1193,6 +1193,75 @@ def test_init_resume_drops_a_named_entry_that_left_the_dependencies(
     assert "chemprop" not in tracking.applied
 
 
+def test_init_resume_does_not_duplicate_a_named_entry_the_stack_provides(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """The carry must not re-add a named entry that arrives via the stack.
+
+    The nameless branch has its own duplicate guard, pinned above by counting
+    occurrences of the spelling. This is the named branch's equivalent, and it
+    was pinned by nothing: with the stack_names check removed the ledger takes
+    a second 'numpy' row and every other test still passes. Counting rather
+    than asserting membership is again the point -- a durable record with a
+    duplicate row reads as correct to 'in'.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_carry_named_dup"
+    project_dir.mkdir()
+    # numpy is in applied AND in the stack the resume re-resolves to.
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pandas"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["numpy"]\n'
+        'pending = ["pandas"]\n'
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert list(tracking.applied).count("numpy") == 1
+
+
+def test_init_force_reset_without_pending_does_not_carry_the_old_stack(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A --force reset with nothing pending starts the ledger from the new stack.
+
+    The carry is resume-only: it exists to rescue entries a crashed retry would
+    strand, and a project with no pending run stranded nothing. Without the
+    previous_pending half of the guard a --force onto a different stack keeps
+    the old stack's packages as stack-owned, which is the opposite of what a
+    reset means. Nothing pinned that half, so the guard could have been halved
+    silently -- including by the rewrite this test now sits beside.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_force_reset"
+    project_dir.mkdir()
+    # Tracked by the 'ds' stack, no pending run, re-initialized onto 'utils'.
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pandas"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["numpy", "pandas"]\n'
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["utils"],
+        ProjectOptions(force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert list(tracking.applied) == ["rich"]
+
+
 def test_init_add_failure_leaves_pending_intent(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):
