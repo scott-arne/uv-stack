@@ -5319,3 +5319,96 @@ def test_broken_pipe_error_is_not_recorded_as_an_environment_failure(
     assert result.exit_code == 128 + int(signal.SIGPIPE)
     assert attempted == ["beta"]
     assert "Summary" not in result.output
+
+
+def _upgrade_env_spy(attempted: list[str]):
+    """A stand-in for upgrade_env that records names without side effects.
+
+    :param attempted: Appended to with every name the fake is called with.
+    :returns: A callable with upgrade_env's signature.
+    """
+    from uv_stack.operations.upgrade import UpgradeResult
+
+    def fake_upgrade(config, runner, name, options):
+        attempted.append(name)
+        return UpgradeResult(env_name=name)
+
+    return fake_upgrade
+
+
+
+def test_converge_rejects_an_absolute_environment_name(tmp_path: Path, monkeypatch):
+    """An absolute NAME must not escape the config root.
+
+    ConfigRoot.env_dir joins the name onto <root>/envs, and an absolute name
+    would discard the left operand and land outside the root, where the
+    pipeline would overwrite generated files.
+    """
+    root = _seeded_root(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "stack.txt").write_text("@standard\n")
+    (victim / "python.txt").write_text("3.12\n")
+    (victim / "requirements.in").write_text("DO NOT TOUCH\n")
+
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_spy(attempted)
+    )
+
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge", str(victim)])
+
+    assert result.exit_code == 1
+    assert "Invalid environment name" in result.output
+    assert (victim / "requirements.in").read_text() == "DO NOT TOUCH\n"
+    assert not (victim / "environment.yml").exists()
+    assert attempted == []
+
+
+def test_upgrade_rejects_an_absolute_environment_name(tmp_path: Path, monkeypatch):
+    """An absolute NAME must not escape the config root.
+
+    This is the upgrade command's side of the same guard.
+    """
+    root = _seeded_root(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "stack.txt").write_text("@standard\n")
+    (victim / "python.txt").write_text("3.12\n")
+    (victim / "requirements.in").write_text("DO NOT TOUCH\n")
+
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_spy(attempted)
+    )
+
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", str(victim)])
+
+    assert result.exit_code == 1
+    assert "Invalid environment name" in result.output
+    assert (victim / "requirements.in").read_text() == "DO NOT TOUCH\n"
+    assert not (victim / "environment.yml").exists()
+    assert attempted == []
+
+
+def test_converge_rejects_a_dotdot_bearing_environment_name(tmp_path: Path, monkeypatch):
+    """A ../-bearing NAME must not escape the config root."""
+    root = _seeded_root(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "stack.txt").write_text("@standard\n")
+    (victim / "python.txt").write_text("3.12\n")
+    (victim / "requirements.in").write_text("DO NOT TOUCH\n")
+
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_spy(attempted)
+    )
+
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge", "../victim"])
+
+    assert result.exit_code == 1
+    assert "Invalid environment name" in result.output
+    assert (victim / "requirements.in").read_text() == "DO NOT TOUCH\n"
+    assert not (victim / "environment.yml").exists()
+    assert attempted == []

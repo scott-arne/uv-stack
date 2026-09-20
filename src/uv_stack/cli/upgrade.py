@@ -11,8 +11,27 @@ from uv_stack.cli._complete import complete_env_names
 from uv_stack.cli._render import console, echo, render_error, render_os_error, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ToolError, UvStackError
+from uv_stack.operations.scaffold import validate_name
 from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
 from uv_stack.runner import SubprocessRunner
+
+
+def _checked_names(names: tuple[str, ...]) -> list[str]:
+    """Reject a NAME that is not a plain environment name.
+
+    ``ConfigRoot.env_dir`` joins the name onto ``<root>/envs``, and a join
+    with an absolute or ``..``-bearing name lands outside the root — where
+    this pipeline would go on to read that directory's sources and overwrite
+    its generated files. Discovered names need no such check: ``list_envs``
+    yields single directory components, which cannot escape the join.
+
+    :param names: The NAMEs as given on the command line.
+    :returns: The same names, as a list.
+    :raises ConfigError: On the first name that is not a safe file stem.
+    """
+    for name in names:
+        validate_name("environment", name)
+    return list(names)
 
 
 def _run_upgrade(
@@ -230,7 +249,7 @@ def upgrade(
         upgrade_packages=list(upgrade_packages),
         strict=strict,
     )
-    targets = list(names)
+    targets = _checked_names(names)
     if not targets:
         targets = config.list_envs()
         if not targets:

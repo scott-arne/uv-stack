@@ -13,7 +13,7 @@ import rich_click as click
 
 from uv_stack.cli._complete import complete_env_names
 from uv_stack.cli._render import console
-from uv_stack.cli.upgrade import _run_upgrade
+from uv_stack.cli.upgrade import _checked_names, _run_upgrade
 from uv_stack.config import ConfigRoot
 from uv_stack.operations.upgrade import UpgradeOptions
 
@@ -61,7 +61,7 @@ def converge(
     converge never prompts — acting on every environment is the whole point of
     the command, so a confirmation would ask about the thing you just asked for.
     """
-    targets = list(names) or config.list_envs()
+    targets = _checked_names(names) or config.list_envs()
     if not targets:
         console.print("[yellow]No environments declared in this config root.[/yellow]")
         return
