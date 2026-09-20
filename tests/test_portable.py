@@ -53,7 +53,7 @@ def test_patterns_are_derived_from_the_path_accessors(config_tree: ConfigRoot):
 
 
 def test_every_uv_stack_pattern_comes_from_an_accessor(config_tree: ConfigRoot):
-    # The literal list above is the readable assertion; this one is the
+    # GOLDEN_PATTERNS is the readable assertion; this one is the
     # regression guard. Rename a generated file and the pattern must move with
     # it, so only '.DS_Store' — which names no uv-stack path — may be a literal.
     derived = {
