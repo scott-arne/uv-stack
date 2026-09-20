@@ -128,10 +128,15 @@ def _explain_candidate_lock(error: BaseException, lock: Path) -> None:
         error from a command other than the compile, is left alone.
     :param lock: The published lock the candidate was seeded from.
     """
+    # The argv PREFIX, not membership: micromamba_remove and
+    # micromamba_python_path both place the env name in argv as a bare element,
+    # so an environment called "compile" would otherwise claim this hint for
+    # every failure on the recreate path. _compile_args emits this exact prefix
+    # for both compile builders and nothing else emits it.
     if (
         isinstance(error, ToolError)
         and error.hint is None
-        and "compile" in error.command
+        and error.command[:3] == ["uv", "pip", "compile"]
     ):
         error.hint = (
             f"uv compiles into a copy of {lock}, so a '.tmp' path above names "

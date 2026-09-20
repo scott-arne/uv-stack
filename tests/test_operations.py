@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -3023,3 +3024,30 @@ def test_a_failed_rebuild_gets_no_compile_hint(config_tree: ConfigRoot):
         upgrade_env(config_tree, runner, "main", UpgradeOptions(recreate=True))
     assert caught.value.hint is None
     assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
+def test_an_env_named_compile_does_not_claim_the_compile_hint(config_tree: ConfigRoot):
+    # The env name reaches argv as a bare element in 'micromamba remove -n
+    # <env>', so a membership test for "compile" would hand this hint to every
+    # recreate-path failure for one pathological name.
+    shutil.copytree(
+        config_tree.root / "envs" / "main", config_tree.root / "envs" / "compile"
+    )
+    lock = config_tree.env_requirements_lock("compile")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "remove" in cmd.args:
+            raise ToolError(
+                "Command failed (1): micromamba remove",
+                command=cmd.args,
+                returncode=1,
+            )
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(config_tree, runner, "compile", UpgradeOptions(recreate=True))
+    assert caught.value.command[1] == "remove"
+    assert caught.value.hint is None
