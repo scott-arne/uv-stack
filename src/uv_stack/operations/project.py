@@ -334,15 +334,16 @@ def init_project(
         # never produces. Hand them to the error instead: a failure past the
         # pending write leaves the spec on disk, so the caveat outlives the
         # run that raised.
-        travel = _travel_notice(config, travel_spec, recorded=recorded)
-        error.resolution_warnings = [*warnings, *([travel] if travel is not None else [])]
+        error.resolution_warnings = [
+            *warnings,
+            *_travel_notices(config, travel_spec, recorded=recorded),
+        ]
         raise
     finally:
         if tmp_req.exists():
             tmp_req.unlink()
 
-    travel = _travel_notice(config, travel_spec, recorded=recorded)
-    return [*warnings, *([travel] if travel is not None else [])]
+    return [*warnings, *_travel_notices(config, travel_spec, recorded=recorded)]
 
 
 def select_project_python(config: ConfigRoot, flag: str | None) -> str:
@@ -431,8 +432,12 @@ def python_travel_problem(config: ConfigRoot, spec: str) -> str | None:
     return None
 
 
-def _travel_notice(config: ConfigRoot, spec: str | None, *, recorded: bool) -> str | None:
-    """Return the advisory for ``spec``, or ``None`` when there is nothing to say.
+def _travel_notices(config: ConfigRoot, spec: str | None, *, recorded: bool) -> list[str]:
+    """The travel advisory for ``spec``, or an empty list when there is none.
+
+    At most one advisory is ever produced. A list rather than an optional
+    string because every caller splices the result into a warning list, and
+    five copies of the same ``None`` check read worse than one empty list.
 
     :param config: Configuration root.
     :param spec: The spec about to be recorded, or ``None`` when unset.
@@ -440,15 +445,15 @@ def _travel_notice(config: ConfigRoot, spec: str | None, *, recorded: bool) -> s
         disk. Callers pass this rather than letting the advisory assume,
         because the same problem reads as a false claim when the record it
         describes does not exist yet.
-    :returns: The warning text, or ``None``.
+    :returns: The warning text in a one-element list, or an empty list.
     """
     if spec is None:
-        return None
+        return []
     problem = python_travel_problem(config, spec)
     if problem is None:
-        return None
+        return []
     opening = PYTHON_TRAVEL_RECORDED if recorded else PYTHON_TRAVEL_PROSPECTIVE
-    return opening.format(spec=spec) + PYTHON_TRAVEL_REASON[problem]
+    return [opening.format(spec=spec) + PYTHON_TRAVEL_REASON[problem]]
 
 
 def resolve_project_python(
@@ -694,9 +699,8 @@ def refresh_project(
         planned.append(uv_add(Path("<stack-requirements>")))
         if not options.no_sync:
             planned.append(uv_sync(shown))
-        travel = _travel_notice(config, spec_flag, recorded=False)
         return RefreshResult(
-            warnings=[*warnings, *([travel] if travel is not None else [])],
+            warnings=[*warnings, *_travel_notices(config, spec_flag, recorded=False)],
             added=added,
             removed=removed,
             skipped_removals=skipped,
@@ -729,16 +733,14 @@ def refresh_project(
         # These advisories ride on the RefreshResult, which a raised error never
         # produces. Hand them to the error instead: past the pending write some
         # are gone for good, and this handler cannot tell which (see docstring).
-        travel = _travel_notice(config, spec_flag, recorded=recorded)
         error.resolution_warnings = [
             *warnings,
-            *([travel] if travel is not None else []),
+            *_travel_notices(config, spec_flag, recorded=recorded),
             *(SKIPPED_REMOVAL_NOTICE.format(entry=entry) for entry in skipped),
         ]
         raise
-    travel = _travel_notice(config, spec_flag, recorded=True)
     return RefreshResult(
-        warnings=[*warnings, *([travel] if travel is not None else [])],
+        warnings=[*warnings, *_travel_notices(config, spec_flag, recorded=True)],
         added=added,
         removed=removed,
         skipped_removals=skipped,
