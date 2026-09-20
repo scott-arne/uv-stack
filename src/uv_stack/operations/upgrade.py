@@ -177,9 +177,10 @@ def _explain_candidate_lock(error: BaseException, lock: Path, *, seeded: bool) -
                 f"uv compiles into a copy of {lock}, so a '.tmp' path above "
                 f"names that copy, not a file you are missing. If {lock.name} "
                 "itself cannot be parsed, re-run as a full upgrade, which "
-                "ignores the existing pins and rewrites it: 'stack upgrade' "
-                "without --no-upgrade/--upgrade-package, or "
-                "'stack converge --upgrade'."
+                "ignores the existing pins and rewrites it: repeat the "
+                "command you ran, keeping the same environment names, and "
+                "either drop --no-upgrade/--upgrade-package from "
+                "'stack upgrade' or add --upgrade to 'stack converge'."
             )
         else:
             error.hint = (
