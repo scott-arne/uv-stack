@@ -17,6 +17,21 @@ from uv_stack.operations.portable import (
     write_portable_ignore,
 )
 
+# The managed block's patterns, spelled out. Every other expectation in this
+# module is built by calling ignore_patterns() or render_block(), so the suite
+# agrees with whatever the renderer currently emits; only a literal notices a
+# pattern quietly dropping out of the block and its file getting committed.
+GOLDEN_PATTERNS = [
+    ".locks/",
+    "editor.txt",
+    "variables.local.txt",
+    "envs/*/requirements.in",
+    "envs/*/environment.yml",
+    "envs/*/requirements.lock.txt",
+    "envs/*/requirements.local.in",
+    ".DS_Store",
+]
+
 
 def _record_writes(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     """Swap the module's atomic_write for a recorder of the paths it is given.
@@ -34,16 +49,7 @@ def _record_writes(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
 
 
 def test_patterns_are_derived_from_the_path_accessors(config_tree: ConfigRoot):
-    assert ignore_patterns(config_tree) == [
-        ".locks/",
-        "editor.txt",
-        "variables.local.txt",
-        "envs/*/requirements.in",
-        "envs/*/environment.yml",
-        "envs/*/requirements.lock.txt",
-        "envs/*/requirements.local.in",
-        ".DS_Store",
-    ]
+    assert ignore_patterns(config_tree) == GOLDEN_PATTERNS
 
 
 def test_every_uv_stack_pattern_comes_from_an_accessor(config_tree: ConfigRoot):
@@ -74,22 +80,6 @@ def test_render_block_joins_with_the_requested_newline(config_tree: ConfigRoot):
     assert crlf.startswith(BEGIN_MARKER + "\r\n")
     assert crlf.endswith("\r\n" + END_MARKER)
     assert "\n" not in crlf.replace("\r\n", "")
-
-
-# The managed block's patterns, spelled out. Every other expectation in this
-# module is built by calling ignore_patterns() or render_block(), so the suite
-# agrees with whatever the renderer currently emits; only a literal notices a
-# pattern quietly dropping out of the block and its file getting committed.
-GOLDEN_PATTERNS = [
-    ".locks/",
-    "editor.txt",
-    "variables.local.txt",
-    "envs/*/requirements.in",
-    "envs/*/environment.yml",
-    "envs/*/requirements.lock.txt",
-    "envs/*/requirements.local.in",
-    ".DS_Store",
-]
 
 
 def test_the_rendered_block_matches_its_golden_text(config_tree: ConfigRoot):
