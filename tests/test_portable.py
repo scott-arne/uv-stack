@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import pytest
@@ -73,6 +74,35 @@ def test_render_block_joins_with_the_requested_newline(config_tree: ConfigRoot):
     assert crlf.startswith(BEGIN_MARKER + "\r\n")
     assert crlf.endswith("\r\n" + END_MARKER)
     assert "\n" not in crlf.replace("\r\n", "")
+
+
+# The managed block's patterns, spelled out. Every other expectation in this
+# module is built by calling ignore_patterns() or render_block(), so the suite
+# agrees with whatever the renderer currently emits; only a literal notices a
+# pattern quietly dropping out of the block and its file getting committed.
+GOLDEN_PATTERNS = [
+    ".locks/",
+    "editor.txt",
+    "variables.local.txt",
+    "envs/*/requirements.in",
+    "envs/*/environment.yml",
+    "envs/*/requirements.lock.txt",
+    "envs/*/requirements.local.in",
+    ".DS_Store",
+]
+
+
+def test_the_rendered_block_matches_its_golden_text(config_tree: ConfigRoot):
+    # The marker lines are spelled out rather than imported for the same
+    # reason: a renamed marker would move every constant-derived expectation
+    # with it and orphan the blocks already written to users' files.
+    lines = [
+        "# BEGIN uv-stack — managed block, do not edit by hand.",
+        *GOLDEN_PATTERNS,
+        "# END uv-stack",
+    ]
+    assert render_block(config_tree) == "\n".join(lines)
+    assert render_block(config_tree, "\r\n") == "\r\n".join(lines)
 
 
 def test_writing_into_a_root_without_a_gitignore_creates_it(config_tree: ConfigRoot):
@@ -193,7 +223,11 @@ def test_next_steps_for_an_existing_repository_untrack_first(config_tree: Config
     assert untrack < add
     assert not any(" init" in step for step in steps)
     assert sum("push" in step for step in steps) == 1
-    assert "variables.local.txt" in steps[untrack]
+    # The pathspec is compared whole and in order: a truncated one still
+    # names a pattern or two while leaving every environment artifact tracked,
+    # which is precisely the state this step exists to get the root out of.
+    tokens = shlex.split(steps[untrack])
+    assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
 
 
 def test_the_repository_branch_does_not_depend_on_the_write_outcome(
@@ -308,13 +342,21 @@ def test_a_block_at_the_end_without_a_terminator_stays_unterminated(
     assert not text.endswith(END_MARKER + "\n")
 
 
-def test_a_non_utf8_ignore_file_is_refused(config_tree: ConfigRoot):
+def test_a_non_utf8_ignore_file_is_refused(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
     path = config_tree.root / ".gitignore"
-    path.write_bytes(b"\xff\xfe not utf-8\n")
+    before_bytes = b"\xff\xfe not utf-8\n"
+    path.write_bytes(before_bytes)
+    written = _record_writes(monkeypatch)
     with pytest.raises(ConfigError) as excinfo:
         write_portable_ignore(config_tree)
     assert "UTF-8" in excinfo.value.message
-    assert path.read_bytes() == b"\xff\xfe not utf-8\n"
+    # Unchanged bytes are weaker than the contract: republishing identical
+    # content satisfies them while still replacing the inode. A refusal must
+    # not reach the writer at all.
+    assert path.read_bytes() == before_bytes
+    assert written == []
 
 
 # The eight separators str.splitlines() breaks on that _terminator cannot
@@ -334,7 +376,7 @@ UNRESTORABLE_SEPARATORS = [
 
 @pytest.mark.parametrize("separator", UNRESTORABLE_SEPARATORS)
 def test_an_end_marker_ended_by_an_unrestorable_separator_is_refused(
-    config_tree: ConfigRoot, separator
+    config_tree: ConfigRoot, separator, monkeypatch: pytest.MonkeyPatch
 ):
     # splitlines() breaks on eleven separators and _terminator can put back
     # only three, so matching an END marker ended by one of the other eight
@@ -343,16 +385,20 @@ def test_an_end_marker_ended_by_an_unrestorable_separator_is_refused(
         config_tree, f"{BEGIN_MARKER}\nstale-entry\n{END_MARKER}{separator}after\n"
     )
     before = path.read_bytes()
+    written = _record_writes(monkeypatch)
     with pytest.raises(ConfigError) as excinfo:
         write_portable_ignore(config_tree)
     assert str(path) in excinfo.value.message
     assert "END on line(s) none" in excinfo.value.message
     assert path.read_bytes() == before
+    # Identical bytes would also survive a rewrite that republished them, so
+    # the refusal is only pinned once the writer is shown to be unreached.
+    assert written == []
 
 
 @pytest.mark.parametrize("separator", UNRESTORABLE_SEPARATORS)
 def test_a_begin_marker_ended_by_an_unrestorable_separator_is_refused(
-    config_tree: ConfigRoot, separator
+    config_tree: ConfigRoot, separator, monkeypatch: pytest.MonkeyPatch
 ):
     # The END-side sibling cannot pin this half. The splice replaces the whole
     # span, so whatever follows the BEGIN marker on its line is discarded
@@ -363,11 +409,13 @@ def test_a_begin_marker_ended_by_an_unrestorable_separator_is_refused(
         config_tree, f"{BEGIN_MARKER}{separator}stale-entry\n{END_MARKER}\n"
     )
     before = path.read_bytes()
+    written = _record_writes(monkeypatch)
     with pytest.raises(ConfigError) as excinfo:
         write_portable_ignore(config_tree)
     assert str(path) in excinfo.value.message
     assert "BEGIN on line(s) none" in excinfo.value.message
     assert path.read_bytes() == before
+    assert written == []
 
 
 def test_a_marker_line_with_trailing_blanks_is_still_matched(config_tree: ConfigRoot):
@@ -381,3 +429,38 @@ def test_a_marker_line_with_trailing_blanks_is_still_matched(config_tree: Config
     assert text.endswith("after\n")
     assert "stale-entry" not in text
     assert BEGIN_MARKER in text
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda config: None, id="absent"),
+        pytest.param(lambda config: "lib/\n*.swp\n", id="no-markers"),
+        pytest.param(
+            lambda config: f"keep\n{BEGIN_MARKER}\nstale\n{END_MARKER}\ntail\n",
+            id="stale-block",
+        ),
+        pytest.param(lambda config: render_block(config) + "\n", id="current-lf"),
+        pytest.param(
+            lambda config: render_block(config, CRLF) + CRLF, id="current-crlf"
+        ),
+    ],
+)
+def test_dry_run_writes_nothing_whatever_the_file_already_holds(
+    config_tree: ConfigRoot, build, monkeypatch: pytest.MonkeyPatch
+):
+    # An already-current file is spared by the 'updated == original' test, so
+    # it cannot show the dry-run half of the guard working. Only the states a
+    # real run would rewrite do that, and a guard keyed on whether the file
+    # exists rather than on dry_run passes the absent case regardless.
+    path = config_tree.root / ".gitignore"
+    content = build(config_tree)
+    before = None if content is None else _write_bytes(config_tree, content).read_bytes()
+    written = _record_writes(monkeypatch)
+    write_portable_ignore(config_tree, dry_run=True)
+    assert written == []
+    # Bytes, not text: the CRLF row is only compared honestly untranslated.
+    if before is None:
+        assert not path.exists()
+    else:
+        assert path.read_bytes() == before
