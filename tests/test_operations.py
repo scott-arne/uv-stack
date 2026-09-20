@@ -25,6 +25,7 @@ from uv_stack.operations.project import (
     ProjectOptions,
     _is_python_passthrough,
     init_project,
+    python_travel_problem,
     resolve_project_python,
     select_project_python,
 )
@@ -3388,3 +3389,99 @@ def test_two_roots_refresh_to_identical_ledgers(tmp_path: Path):
         observed.append(_refresh_ledger_tables(config, tmp_path, f"proj-{name}"))
     assert observed[0] == observed[1]
     assert observed[0] == (["rich", "-e ${DEV}/widget"], ["rich", "-e ${DEV}/widget"])
+
+
+def test_python_travel_problem_classifies_every_selector_shape(config_tree: ConfigRoot):
+    # 'cpython@3.12' and 'pypy-3.10' are the regression guard: both are uv
+    # implementation forms, and neither may be reclassified as an env name.
+    assert python_travel_problem(config_tree, "/opt/envs/x/bin/python") == "path"
+    assert python_travel_problem(config_tree, "scratch") == "undeclared-env"
+    assert python_travel_problem(config_tree, "main") is None
+    assert python_travel_problem(config_tree, "3.12") is None
+    assert python_travel_problem(config_tree, "cpython@3.12") is None
+    assert python_travel_problem(config_tree, "pypy-3.10") is None
+
+
+#: (spec, the phrase its advisory must carry, or None for "stay silent").
+#: 'main' is the environment 'config_tree' declares; 'scratch' is not.
+_TRAVEL_MATRIX = [
+    ("/opt/envs/x/bin/python", "does not travel"),
+    ("scratch", "declares no environment"),
+    ("main", None),
+    ("3.12", None),
+    ("cpython@3.12", None),
+    ("pypy-3.10", None),
+]
+
+
+def _travel_warnings(warnings: list[str]) -> list[str]:
+    """The travel advisories in a warning list.
+
+    Both advisories say 'in pyproject.toml:' and no other warning either
+    operation emits mentions the file, so that phrase is the discriminator.
+
+    :param warnings: Warnings returned by init or refresh.
+    :returns: Only the travel advisories, in order.
+    """
+    return [w for w in warnings if "pyproject.toml" in w]
+
+
+@pytest.mark.parametrize(("spec", "expected"), _TRAVEL_MATRIX)
+def test_init_warns_only_for_an_interpreter_that_will_not_travel(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch, spec: str, expected: str | None
+):
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    warnings = init_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder), ["ds"],
+        ProjectOptions(python=spec), cwd=project_dir,
+    )
+    travel = _travel_warnings(warnings)
+    if expected is None:
+        assert travel == []
+    else:
+        assert len(travel) == 1 and expected in travel[0]
+
+
+@pytest.mark.parametrize(("spec", "expected"), _TRAVEL_MATRIX)
+def test_refresh_warns_only_for_an_interpreter_that_will_not_travel(
+    config_tree: ConfigRoot, tmp_path, monkeypatch, spec: str, expected: str | None
+):
+    # refresh judges 'spec_flag', not options.python: the value actually
+    # written to the table is the value that has to travel.
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    result = refresh_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder),
+        RefreshOptions(python=spec), cwd=project_dir,
+    )
+    travel = _travel_warnings(result.warnings)
+    if expected is None:
+        assert travel == []
+    else:
+        assert len(travel) == 1 and expected in travel[0]
+
+
+def test_refresh_warns_for_the_recorded_spec_when_no_flag_is_given(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    # No --python, so spec_flag falls back to tracking.python, which is the
+    # stale path a clone inherited. That is exactly the case worth naming.
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["standard"]\n'
+        'python = "/opt/envs/x/bin/python"\n'
+        'applied = ["numpy", "pandas", "rdkit", "rich"]\n'
+    )
+    project_dir = _tracked_project(tmp_path, tracking_text)
+    result = refresh_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder),
+        RefreshOptions(), cwd=project_dir,
+    )
+    assert len(_travel_warnings(result.warnings)) == 1

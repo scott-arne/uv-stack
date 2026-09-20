@@ -238,6 +238,10 @@ def init_project(
     # makes that split safe (spec "Projects and the ledger split").
     expanded_adds = expand_all(stack_adds, config.load_variables())
 
+    notice = _travel_notice(config, options.python)
+    if notice is not None:
+        warnings.append(notice)
+
     # Adopt orphans left by a crashed tracked init/refresh (spec §2.3):
     # durable from the FIRST write below. Skipped entirely with --no-track:
     # the table is deleted below, so there is no ledger to adopt into and the
@@ -362,6 +366,61 @@ def _is_python_passthrough(spec: str) -> bool:
     if PLAIN_VERSION_RE.match(spec):
         return True
     return bool(_IMPLEMENTATION_RE.match(spec))
+
+
+#: Advisory wording for an interpreter spec that works here but will not
+#: travel. Keyed by :func:`python_travel_problem`'s return value.
+PYTHON_TRAVEL_NOTICE = {
+    "path": (
+        "Recording interpreter '{spec}' in pyproject.toml: a filesystem path "
+        "does not travel to another machine. A version, a uv implementation "
+        "form, or an environment name this root declares does."
+    ),
+    "undeclared-env": (
+        "Recording interpreter '{spec}' in pyproject.toml: this config root "
+        "declares no environment by that name, so the value will not resolve "
+        "on a machine that clones it."
+    ),
+}
+
+
+def python_travel_problem(config: ConfigRoot, spec: str) -> str | None:
+    """Classify why a recorded interpreter spec will not travel, if it will not.
+
+    ``ProjectTracking.python`` records the caller's ``--python`` verbatim, so a
+    path or an environment name only this machine has becomes part of a
+    committed ``pyproject.toml``. Rewriting or refusing the value is out of
+    scope — the tracking contract is settled — but saying so is not.
+
+    The path case is tested independently of :func:`_is_python_passthrough`
+    rather than through it, because a path IS passthrough: it reaches uv
+    unchanged and works perfectly here. It simply does not travel. Reusing the
+    predicate for the environment case (rather than restating it) is what keeps
+    uv implementation forms such as ``cpython@3.12`` from being mistaken for
+    environment names.
+
+    :param config: Configuration root, for the declared environment names.
+    :param spec: The interpreter spec as it would be recorded.
+    :returns: ``"path"``, ``"undeclared-env"``, or ``None`` when it travels.
+    """
+    if "/" in spec or "\\" in spec:
+        return "path"
+    if not _is_python_passthrough(spec) and spec not in config.list_envs():
+        return "undeclared-env"
+    return None
+
+
+def _travel_notice(config: ConfigRoot, spec: str | None) -> str | None:
+    """Return the advisory for ``spec``, or ``None`` when there is nothing to say.
+
+    :param config: Configuration root.
+    :param spec: The spec about to be recorded, or ``None`` when unset.
+    :returns: The warning text, or ``None``.
+    """
+    if spec is None:
+        return None
+    problem = python_travel_problem(config, spec)
+    return None if problem is None else PYTHON_TRAVEL_NOTICE[problem].format(spec=spec)
 
 
 def resolve_project_python(
@@ -578,6 +637,10 @@ def refresh_project(
     # An explicit --python overrides the recorded spec; both written tables and
     # the interpreter resolution below must agree on the value.
     spec_flag = options.python if options.python is not None else tracking.python
+
+    notice = _travel_notice(config, spec_flag)
+    if notice is not None:
+        warnings.append(notice)
 
     # Build both tables once, pre-flight the PENDING one (it is the first write
     # attempted), and keep the dry-run path write-free.
