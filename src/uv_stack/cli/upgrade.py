@@ -46,13 +46,10 @@ def _run_upgrade(
     failures: list[tuple[str, UvStackError]] = []
     attempted: list[str] = []
 
-    # Order-preserving dedup. Every outcome below is keyed by name, so a
-    # repeated name would render two rows for one attempt -- and under
-    # stop_on_error a name the loop never reached would render as a success.
-    # Upgrading the same environment twice in one batch is pointless work
-    # besides. Owned here rather than at each call site: two commands take
-    # NAMES as nargs=-1, and a precondition is weaker than a guarantee.
-    # dict.fromkeys, not set, so request order survives.
+    # Uniqueness is this function's invariant rather than a caller
+    # precondition: every outcome below is keyed by name, so a repeat renders
+    # two rows for one attempt — and under stop_on_error a name the loop
+    # never reached renders as a success.
     targets = list(dict.fromkeys(names))
 
     for name in targets:
@@ -112,7 +109,7 @@ def _print_summary(
     Each ``✗`` row is annotated with a one-line reason so the summary explains
     *why* an environment failed without reprinting the full error panel.
 
-    :param names: Every requested environment, in request order.
+    :param names: Every distinct environment requested, in request order.
     :param failures: The environments that failed, with their errors.
     :param attempted: The environments the batch actually reached.
     :param all_succeeded: The line printed when nothing failed.
