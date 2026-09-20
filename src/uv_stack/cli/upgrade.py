@@ -21,23 +21,32 @@ def _run_upgrade(
     options: UpgradeOptions,
     *,
     stop_on_error: bool = False,
+    rule_verb: str = "Upgrading",
+    all_succeeded: str = "All requested environments upgraded.",
 ) -> None:
     """Upgrade each environment, continuing past failures by default.
 
     Each environment's outcome is recorded and printed in a final summary.
-    With ``stop_on_error`` the batch aborts at the first failing environment.
-    A non-empty failure set exits the process with status 1.
+    With ``stop_on_error`` the batch aborts at the first failing environment,
+    and the names it never reached are reported as skipped rather than as
+    successes. A non-empty failure set exits the process with status 1.
 
     :param config: Configuration root.
     :param names: Environment names to upgrade.
     :param options: Upgrade options.
     :param stop_on_error: Abort the batch on the first failure.
+    :param rule_verb: The verb in each environment's section rule. Supplied by
+        ``stack converge``, which runs the same pipeline under another name.
+    :param all_succeeded: The line printed when nothing failed. Author-supplied
+        from a call site in this package, never user input.
     """
     runner = SubprocessRunner()
     failures: list[tuple[str, UvStackError]] = []
+    attempted: list[str] = []
 
     for name in names:
-        console.rule(Text(f"Upgrading {name}"))
+        attempted.append(name)
+        console.rule(Text(f"{rule_verb} {name}"))
         try:
             result = upgrade_env(config, runner, name, options)
         except UvStackError as error:
@@ -58,7 +67,7 @@ def _run_upgrade(
             sys.exit(1)
         return
 
-    _print_summary(names, failures)
+    _print_summary(names, failures, attempted, all_succeeded=all_succeeded)
     if failures:
         sys.exit(1)
 
@@ -76,13 +85,30 @@ def _failure_reason(error: UvStackError) -> str:
     return error.message
 
 
-def _print_summary(names: list[str], failures: list[tuple[str, UvStackError]]) -> None:
-    """Print a per-environment ✓/✗ summary of an upgrade batch.
+def _print_summary(
+    names: list[str],
+    failures: list[tuple[str, UvStackError]],
+    attempted: list[str],
+    *,
+    all_succeeded: str = "All requested environments upgraded.",
+) -> None:
+    """Print a per-environment summary of an upgrade batch.
+
+    Three outcomes, not two: ``✓`` succeeded, ``✗`` failed, ``–`` never
+    attempted. Without ``--stop-on-error`` the skipped set is always empty and
+    the output is byte-identical to the two-outcome summary this replaced.
 
     Each ``✗`` row is annotated with a one-line reason so the summary explains
     *why* an environment failed without reprinting the full error panel.
+
+    :param names: Every requested environment, in request order.
+    :param failures: The environments that failed, with their errors.
+    :param attempted: The environments the batch actually reached.
+    :param all_succeeded: The line printed when nothing failed.
     """
     reasons = {name: _failure_reason(error) for name, error in failures}
+    reached = set(attempted)
+    skipped = [name for name in names if name not in reached]
     width = max((len(name) for name in names), default=0)
     console.rule("Summary")
     for name in names:
@@ -93,14 +119,30 @@ def _print_summary(names: list[str], failures: list[tuple[str, UvStackError]]) -
                     (reasons[name], "dim"),
                 )
             )
+        elif name not in reached:
+            console.print(
+                Text.assemble(
+                    "  ", ("–", "yellow"), f" {name.ljust(width)}  ",
+                    ("skipped after an earlier failure", "dim"),
+                )
+            )
         else:
             console.print(Text.assemble("  ", ("✓", "green"), f" {name}"))
-    if failures:
+    if failures and skipped:
+        succeeded = len(names) - len(failures) - len(skipped)
         console.print(
-            f"[red]{len(failures)} of {len(names)} environment(s) failed.[/red]"
+            Text(
+                f"{succeeded} succeeded, {len(failures)} failed, "
+                f"{len(skipped)} skipped.",
+                style="red",
+            )
+        )
+    elif failures:
+        console.print(
+            Text(f"{len(failures)} of {len(names)} environment(s) failed.", style="red")
         )
     else:
-        console.print("[green]All requested environments upgraded.[/green]")
+        console.print(Text(all_succeeded, style="green"))
 
 
 @click.command("upgrade")

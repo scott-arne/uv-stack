@@ -215,6 +215,25 @@ def test_upgrade_stop_on_error_aborts_after_first(tmp_path: Path):
     assert "Upgrading alpha" in result.output
     assert "Upgrading beta" not in result.output
 
+def test_stop_on_error_marks_unattempted_environments_skipped(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "upgrade", "--stop-on-error", "alpha", "beta"]
+    )
+    assert result.exit_code == 1
+    summary = result.output.split("Summary", 1)[1]
+    assert "skipped after an earlier failure" in summary
+    assert "0 succeeded, 1 failed, 1 skipped." in summary
+
+
+def test_the_count_line_is_unchanged_without_stop_on_error(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "alpha", "beta"])
+    summary = result.output.split("Summary", 1)[1]
+    assert "2 of 2 environment(s) failed." in summary
+    assert "skipped" not in summary
+
+
 
 def test_upgrade_dry_run_strict_exits_nonzero_on_failure(tmp_path: Path):
     from uv_stack.config import ConfigRoot
