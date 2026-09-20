@@ -707,28 +707,29 @@ def refresh_project(
             planned=planned,
         )
 
+    # The temp file is created and filled before the durable write so that
+    # every filesystem failure this run can produce falls above it: past that
+    # point the only thing left to raise is a UvStackError, which is the one
+    # shape that can carry the advisories out. init_project is built the same
+    # way for the same reason.
     recorded = False
+    fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-refresh.", suffix=".txt")
+    tmp_req = Path(tmp_name)
     try:
+        # Render only stack-owned dependencies to the temp requirements file.
+        with open(fd, "w", encoding="utf-8") as handle:
+            for entry in expanded_adds:
+                handle.write(entry)
+                handle.write("\n")
         python = resolve_project_python(config, runner, spec_flag)
         write_tracking(pyproject, pending_tracking)
         recorded = True
-        fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-refresh.", suffix=".txt")
-        tmp_req = Path(tmp_name)
-        try:
-            # Render only stack-owned dependencies to the temp requirements file.
-            with open(fd, "w", encoding="utf-8") as handle:
-                for entry in expanded_adds:
-                    handle.write(entry)
-                    handle.write("\n")
-            if names:
-                runner.run(_with_cwd(uv_remove(names), cwd))
-            runner.run(_with_cwd(uv_add(tmp_req), cwd))
-            write_tracking(pyproject, final_tracking)
-            if not options.no_sync:
-                runner.run(_with_cwd(uv_sync(python), cwd))
-        finally:
-            if tmp_req.exists():
-                tmp_req.unlink()
+        if names:
+            runner.run(_with_cwd(uv_remove(names), cwd))
+        runner.run(_with_cwd(uv_add(tmp_req), cwd))
+        write_tracking(pyproject, final_tracking)
+        if not options.no_sync:
+            runner.run(_with_cwd(uv_sync(python), cwd))
     except UvStackError as error:
         # These advisories ride on the RefreshResult, which a raised error never
         # produces. Hand them to the error instead: past the pending write some
@@ -739,6 +740,9 @@ def refresh_project(
             *(SKIPPED_REMOVAL_NOTICE.format(entry=entry) for entry in skipped),
         ]
         raise
+    finally:
+        if tmp_req.exists():
+            tmp_req.unlink()
     return RefreshResult(
         warnings=[*warnings, *_travel_notices(config, spec_flag, recorded=True)],
         added=added,

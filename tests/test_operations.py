@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 from pathlib import Path
@@ -3729,6 +3730,53 @@ def test_refresh_success_says_it_recorded_the_spec(
     assert travel[0].startswith("Recording interpreter '/opt/envs/x/bin/python'")
     tracking = read_tracking(project_dir / "pyproject.toml")
     assert tracking is not None and tracking.python == "/opt/envs/x/bin/python"
+
+
+def test_refresh_temp_file_failure_leaves_the_ledger_untouched(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A refusal to build the temp requirements file must land above the write.
+
+    An OSError is not a UvStackError, so it carries no resolution_warnings and
+    the travel advisory has no way out on it. Building and filling the temp
+    file ahead of the durable write is what keeps that from mattering: the
+    only filesystem failure the run can still produce happens before anything
+    is recorded. Asserting the ledger rather than the exception type is the
+    stronger pin, and it survives any further file work this region grows.
+
+    The patch is narrowed to refresh's own prefix because atomic_write calls
+    mkstemp too; a global patch would abort the run above the write for an
+    unrelated reason and hide the defect rather than expose it.
+    """
+    import tempfile as tempfile_module
+
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_bytes()
+    real_mkstemp = tempfile_module.mkstemp
+
+    def _no_space(*args, **kwargs):
+        if str(kwargs.get("prefix", "")).startswith("uv-stack-refresh"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile_module, "mkstemp", _no_space)
+    with pytest.raises(OSError) as excinfo:
+        refresh_project(
+            config_tree, RecordingRunner(responder=_existing_env_responder),
+            RefreshOptions(python="/opt/envs/x/bin/python"), cwd=project_dir,
+        )
+    # The injected failure, not an incidental one, and not a silent success.
+    assert excinfo.value.errno == errno.ENOSPC
+    assert pyproject.read_bytes() == before
+    tracking = read_tracking(pyproject)
+    assert tracking is not None
+    assert tracking.python is None
+    assert tracking.pending is None
 
 
 def test_refresh_dry_run_still_runs_the_placement_check(tmp_path: Path):
