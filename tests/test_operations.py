@@ -2964,6 +2964,16 @@ def test_candidate_lock_survives_concurrent_lock_removal(
         candidate.unlink(missing_ok=True)
 
 
+def _assert_seeded_hint(hint: str) -> None:
+    """Pin the wording a seeded candidate earns.
+
+    :param hint: The hint attached to the failed compile.
+    """
+    assert "copy of" in hint
+    assert "re-run without --no-upgrade/--upgrade-package" in hint
+    assert "new empty file" not in hint
+
+
 def test_a_failed_compile_hint_names_the_published_lock(config_tree: ConfigRoot):
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -2977,8 +2987,10 @@ def test_a_failed_compile_hint_names_the_published_lock(config_tree: ConfigRoot)
     runner = RecordingRunner(responder=responder)
     with pytest.raises(ToolError) as caught:
         upgrade_env(config_tree, runner, "main", UpgradeOptions(no_upgrade=True))
-    assert caught.value.hint is not None
-    assert str(lock) in caught.value.hint
+    hint = caught.value.hint
+    assert hint is not None
+    assert str(lock) in hint
+    _assert_seeded_hint(hint)
     assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
 
 
@@ -2999,8 +3011,42 @@ def test_a_failed_compile_hint_names_the_published_lock_recreate_branch(
         upgrade_env(
             config_tree, runner, "main", UpgradeOptions(recreate=True, no_upgrade=True)
         )
-    assert caught.value.hint is not None
-    assert str(lock) in caught.value.hint
+    hint = caught.value.hint
+    assert hint is not None
+    assert str(lock) in hint
+    _assert_seeded_hint(hint)
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_a_failed_compile_hint_describes_an_unseeded_candidate(
+    config_tree: ConfigRoot, recreate: bool
+):
+    # A full upgrade compiles into an empty candidate, so neither half of the
+    # seeded wording is true of it: nothing was copied, and telling the user to
+    # re-run without --no-upgrade/--upgrade-package names the mode they are
+    # already in. Both branches are covered because upgrade_env attaches the
+    # hint from two separate unwinds, either of which could be left behind.
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(config_tree, runner, "main", UpgradeOptions(recreate=recreate))
+    hint = caught.value.hint
+    assert hint is not None
+    assert str(lock) in hint
+    assert "new empty file" in hint
+    # Multi-word phrases: the lock path is interpolated into the hint, and a
+    # bare "copy" could match a tmp_path component rather than the wording.
+    assert "copy of" not in hint
+    assert "re-run without" not in hint
     assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
 
 

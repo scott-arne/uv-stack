@@ -137,18 +137,23 @@ def _new_candidate_lock(lock: Path, *, seed: bool) -> Path:
     return candidate
 
 
-def _explain_candidate_lock(error: BaseException, lock: Path) -> None:
+def _explain_candidate_lock(error: BaseException, lock: Path, *, seeded: bool) -> None:
     """Point a failed compile at the published lock behind the temp file.
 
-    uv compiles into a seeded copy of the lock, so its diagnostics name a
-    ``.tmp`` path that the unwind deletes on the way out. Without this the
-    user is left with an error about a file that no longer exists and no
-    mention of the lock it was copied from.
+    uv compiles into a ``.tmp`` sibling of the lock that the unwind deletes on
+    the way out, so its diagnostics name a path that no longer exists and never
+    mention the lock. What that path *was* depends on the mode: a seeded copy
+    of the lock, or a new empty file that a full upgrade resolves into from
+    scratch. Calling the latter a copy would describe a read that never
+    happened, and the recovery advice only helps when a full upgrade is still
+    an escape route rather than the mode that just failed.
 
     :param error: The exception about to be re-raised. Anything that is not a
         :class:`ToolError`, any error that already carries a hint, and any
         error from a command other than the compile, is left alone.
-    :param lock: The published lock the candidate was seeded from.
+    :param lock: The published lock the candidate stands in for.
+    :param seeded: Whether the candidate was seeded from that lock, i.e. the
+        value the caller passed as ``seed`` to :func:`_new_candidate_lock`.
     """
     # The argv PREFIX, not membership: micromamba_remove and
     # micromamba_python_path both place the env name in argv as a bare element,
@@ -160,12 +165,21 @@ def _explain_candidate_lock(error: BaseException, lock: Path) -> None:
         and error.hint is None
         and error.command[:3] == ["uv", "pip", "compile"]
     ):
-        error.hint = (
-            f"uv compiles into a copy of {lock}, so a '.tmp' path above names "
-            f"that copy, not a file you are missing. If {lock.name} itself "
-            "cannot be parsed, re-run without --no-upgrade/--upgrade-package: "
-            "a full upgrade ignores the existing pins and rewrites it."
-        )
+        if seeded:
+            error.hint = (
+                f"uv compiles into a copy of {lock}, so a '.tmp' path above "
+                f"names that copy, not a file you are missing. If {lock.name} "
+                "itself cannot be parsed, re-run without "
+                "--no-upgrade/--upgrade-package: a full upgrade ignores the "
+                "existing pins and rewrites it."
+            )
+        else:
+            error.hint = (
+                f"uv compiles into a new empty file beside {lock}, so a '.tmp' "
+                "path above names that file, not one you are missing. "
+                f"{lock.name} itself was not read: a full upgrade ignores the "
+                "existing pins."
+            )
 
 
 def _env_python(runner: Runner, env_name: str, *, probed: str | None = None) -> str:
@@ -293,6 +307,11 @@ def upgrade_env(
     )
 
     upgrade_all = _should_upgrade_all(options)
+    # Decided once for all four uses below. Seeding is what gives --no-upgrade
+    # and --upgrade-package their meaning, and it is equally what makes the
+    # failure hint true; a second spelling of this predicate would let the
+    # candidate's contents and the explanation of them drift apart.
+    seeded = not upgrade_all
     requirements_in = config.env_requirements_in(env_name)
     lock = config.env_requirements_lock(env_name)
 
@@ -339,7 +358,7 @@ def upgrade_env(
             # still standing. This narrows the window; it does not close it —
             # micromamba create or uv pip sync can still fail once the old
             # environment is gone.
-            tmp_lock = _new_candidate_lock(lock, seed=not upgrade_all)
+            tmp_lock = _new_candidate_lock(lock, seed=seeded)
             try:
                 runner.run(
                     uv_pip_compile_for_version(
@@ -364,7 +383,7 @@ def upgrade_env(
             except BaseException as error:
                 if tmp_lock.exists():
                     tmp_lock.unlink()
-                _explain_candidate_lock(error, lock)
+                _explain_candidate_lock(error, lock, seeded=seeded)
                 raise
         else:
             ensure_env(
@@ -376,7 +395,7 @@ def upgrade_env(
 
             # Compile to a temp lock, then atomically replace, so a failed compile never
             # corrupts an existing lockfile.
-            tmp_lock = _new_candidate_lock(lock, seed=not upgrade_all)
+            tmp_lock = _new_candidate_lock(lock, seed=seeded)
             try:
                 runner.run(
                     uv_pip_compile(
@@ -391,7 +410,7 @@ def upgrade_env(
             except BaseException as error:
                 if tmp_lock.exists():
                     tmp_lock.unlink()
-                _explain_candidate_lock(error, lock)
+                _explain_candidate_lock(error, lock, seeded=seeded)
                 raise
 
         runner.run(uv_pip_sync(python, lock))
