@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import signal
@@ -5179,6 +5180,47 @@ def test_converge_success_summary_uses_its_own_line(tmp_path: Path, monkeypatch)
     assert "All requested environments converged." in result.output
     assert "All requested environments upgraded." not in result.output
 
+def _three_envs_root(tmp_path: Path) -> Path:
+    """A config root declaring three environments, for batch-behavior tests.
+
+    ``_env_root`` supplies ``main``; the other two need only a ``stack.txt``,
+    since that is the file ``list_envs`` keys on and every test below patches
+    ``upgrade_env`` out before it could read anything else.
+    """
+    root = _env_root(tmp_path)
+    for name in ("beta", "gamma"):
+        env_dir = root / "envs" / name
+        env_dir.mkdir()
+        (env_dir / "stack.txt").write_text("@standard\n")
+    return root
+
+
+def _upgrade_env_raising(attempted: list[str], error: BaseException):
+    """A stand-in for ``upgrade_env`` that fails one environment of three.
+
+    The batch-behavior tests below differ only in which exception the failing
+    environment raises and in the flags the command is given, so the stand-in
+    is shared rather than restated four times.
+
+    :param attempted: Appended to with every name the batch reaches, in order.
+    :param error: Raised for ``beta``, which sorts first of the three.
+    :returns: A callable with ``upgrade_env``'s signature.
+    """
+    from uv_stack.operations.upgrade import UpgradeResult
+
+    def fake_upgrade(config, runner, name, options):
+        attempted.append(name)
+        if name == "beta":
+            raise error
+        return UpgradeResult(env_name=name)
+
+    return fake_upgrade
+
+
+def _eisdir() -> OSError:
+    """The filesystem failure the tests below inject, with a plausible path."""
+    return OSError(errno.EISDIR, "Is a directory", "envs/beta/requirements.in")
+
 
 def test_converge_continues_past_an_os_error_and_accounts_for_it(
     tmp_path: Path, monkeypatch
@@ -5189,37 +5231,22 @@ def test_converge_continues_past_an_os_error_and_accounts_for_it(
     error or ENOSPC from one environment is recorded as that environment's
     failure rather than aborting the whole batch.
     """
-    import errno
-
-    from uv_stack.operations.upgrade import UpgradeResult
-
-    root = _env_root(tmp_path)
-    # Declare three environments
-    (root / "envs" / "beta").mkdir()
-    (root / "envs" / "beta" / "stack.txt").write_text("@standard\n")
-    (root / "envs" / "gamma").mkdir()
-    (root / "envs" / "gamma" / "stack.txt").write_text("@standard\n")
-
+    root = _three_envs_root(tmp_path)
     attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_raising(attempted, _eisdir())
+    )
 
-    def fake_upgrade(config, runner, name, options):
-        attempted.append(name)
-        if name == "beta":
-            raise OSError(errno.EISDIR, "Is a directory", str(config.env_requirements_in(name)))
-        return UpgradeResult(env_name=name)
-
-    monkeypatch.setattr("uv_stack.cli.upgrade.upgrade_env", fake_upgrade)
     result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+
     assert result.exit_code == 1, result.output
     assert attempted == ["beta", "gamma", "main"]
     assert "Summary" in result.output
-    assert "Is a directory" in result.output
     summary = result.output.split("Summary", 1)[1]
     assert "✗ beta" in summary
-    assert "✓ main" in summary
     assert "Is a directory" in summary
     assert "✓ gamma" in summary
-    summary = result.output.split("Summary", 1)[1]
+    assert "✓ main" in summary
     assert "1 of 3 environment(s) failed." in summary
 
 
@@ -5227,29 +5254,18 @@ def test_upgrade_continues_past_an_os_error_and_accounts_for_it(
     tmp_path: Path, monkeypatch
 ):
     """The fix is in the shared loop, so pin it from both entry points."""
-    import errno
-
-    from uv_stack.operations.upgrade import UpgradeResult
-
-    root = _env_root(tmp_path)
-    (root / "envs" / "beta").mkdir()
-    (root / "envs" / "beta" / "stack.txt").write_text("@standard\n")
-    (root / "envs" / "gamma").mkdir()
-    (root / "envs" / "gamma" / "stack.txt").write_text("@standard\n")
-
+    root = _three_envs_root(tmp_path)
     attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_raising(attempted, _eisdir())
+    )
 
-    def fake_upgrade(config, runner, name, options):
-        attempted.append(name)
-        if name == "beta":
-            raise OSError(errno.EISDIR, "Is a directory", str(config.env_requirements_in(name)))
-        return UpgradeResult(env_name=name)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "upgrade", "beta", "gamma", "main"]
+    )
 
-    monkeypatch.setattr("uv_stack.cli.upgrade.upgrade_env", fake_upgrade)
-    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "beta", "gamma", "main"])
     assert result.exit_code == 1, result.output
     assert attempted == ["beta", "gamma", "main"]
-    assert "Summary" in result.output
     summary = result.output.split("Summary", 1)[1]
     assert "1 of 3 environment(s) failed." in summary
 
@@ -5257,62 +5273,49 @@ def test_upgrade_continues_past_an_os_error_and_accounts_for_it(
 def test_os_error_with_stop_on_error_skips_remaining_environments(
     tmp_path: Path, monkeypatch
 ):
-    """--stop-on-error still stops, and the unreached env reads as skipped."""
-    import errno
+    """--stop-on-error still stops, and the unreached envs read as skipped.
 
-    from uv_stack.operations.upgrade import UpgradeResult
-
-    root = _env_root(tmp_path)
-    (root / "envs" / "beta").mkdir()
-    (root / "envs" / "beta" / "stack.txt").write_text("@standard\n")
-    (root / "envs" / "gamma").mkdir()
-    (root / "envs" / "gamma" / "stack.txt").write_text("@standard\n")
-
+    An OSError must not become the one failure kind that lets a name the batch
+    never reached render as a success.
+    """
+    root = _three_envs_root(tmp_path)
     attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_raising(attempted, _eisdir())
+    )
 
-    def fake_upgrade(config, runner, name, options):
-        attempted.append(name)
-        if name == "beta":
-            raise OSError(errno.EISDIR, "Is a directory", str(config.env_requirements_in(name)))
-        return UpgradeResult(env_name=name)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--stop-on-error"]
+    )
 
-    monkeypatch.setattr("uv_stack.cli.upgrade.upgrade_env", fake_upgrade)
-    result = CliRunner().invoke(cli, ["--root", str(root), "converge", "--stop-on-error"])
     assert result.exit_code == 1, result.output
     assert attempted == ["beta"]
     summary = result.output.split("Summary", 1)[1]
     assert "✗ beta" in summary
-    assert "– main" in summary
     assert "– gamma" in summary
+    assert "– main" in summary
     assert "skipped after an earlier failure" in summary
 
 
 def test_broken_pipe_error_is_not_recorded_as_an_environment_failure(
     tmp_path: Path, monkeypatch
 ):
-    """A BrokenPipeError must not be caught as a batch-level OSError.
+    """A BrokenPipeError must not be caught as one environment's OSError.
 
-    The batch must not continue past a broken pipe — the summary and every
-    remaining panel would be sent to the same dead pipe. The BrokenPipeError
-    arm re-raises instead.
+    BrokenPipeError subclasses OSError, so the loop's new arm would swallow it
+    without the re-raising arm above: the summary and every remaining panel
+    would go to the same dead pipe, and the conventional signal status would
+    become a plain exit 1.
     """
-    from uv_stack.operations.upgrade import UpgradeResult
-
-    root = _env_root(tmp_path)
-    (root / "envs" / "beta").mkdir()
-    (root / "envs" / "beta" / "stack.txt").write_text("@standard\n")
-    (root / "envs" / "gamma").mkdir()
-    (root / "envs" / "gamma" / "stack.txt").write_text("@standard\n")
-
+    root = _three_envs_root(tmp_path)
     attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env",
+        _upgrade_env_raising(attempted, BrokenPipeError()),
+    )
 
-    def fake_upgrade(config, runner, name, options):
-        attempted.append(name)
-        if name == "beta":
-            raise BrokenPipeError()
-        return UpgradeResult(env_name=name)
-
-    monkeypatch.setattr("uv_stack.cli.upgrade.upgrade_env", fake_upgrade)
     result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+
+    assert result.exit_code == 128 + int(signal.SIGPIPE)
     assert attempted == ["beta"]
     assert "Summary" not in result.output
