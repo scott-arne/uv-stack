@@ -35,6 +35,13 @@ from uv_stack.runner import Command, Runner
 
 _DRY_RUN_PYTHON = "<env-python>"
 
+#: Kept local rather than imported from fsutil, whose flags are bundled with
+#: O_NOFOLLOW; seeding deliberately follows a symlinked lock. Where the
+#: platform lacks the flag getattr yields 0, which removes the FIFO guard
+#: rather than weakening it — the fstat afterwards can still refuse a FIFO,
+#: but only once the open it would have hung on has already returned.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
 
 @dataclass
 class UpgradeOptions:
@@ -73,9 +80,6 @@ class UpgradeResult:
 def _should_upgrade_all(options: UpgradeOptions) -> bool:
     return not options.no_upgrade and not options.upgrade_packages
 
-_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
-
-
 
 def _new_candidate_lock(lock: Path, *, seed: bool) -> Path:
     """Create a sibling file to compile a candidate lock into.
@@ -92,9 +96,9 @@ def _new_candidate_lock(lock: Path, *, seed: bool) -> Path:
     published lock intact when the compile fails; the caller's unwind path
     deletes the candidate and leaves the original untouched.
 
+    :param lock: The lock the candidate will replace once it is complete.
     :param seed: Whether to seed the candidate from the published lock. Pass
         False for a full upgrade, where uv ignores the output file.
-    :param lock: The lock the candidate will replace once it is complete.
     :returns: Path to the newly created temp file.
     """
     tmp_fd, tmp_name = tempfile.mkstemp(
@@ -105,29 +109,31 @@ def _new_candidate_lock(lock: Path, *, seed: bool) -> Path:
     if not seed:
         return candidate
     try:
-        # O_NONBLOCK without O_NOFOLLOW: a symlinked lock must still work, and
-        # the descriptor check sees a FIFO through a link just as it would
-        # directly. Opening with O_NOFOLLOW would break symlinked locks, which
-        # this project tolerates (see fsutil.require_regular_file).
+        # One lookup, not two. Checking the pathname and then opening it lets a
+        # FIFO swapped in between park the open with no timeout and no unwind,
+        # so what gets interrogated is the descriptor actually obtained.
+        # O_NONBLOCK without O_NOFOLLOW: a symlinked lock is a topology this
+        # project tolerates -- require_regular_file accepts one resolving to a
+        # regular file -- and the flag still applies once the link has been
+        # followed, so a FIFO is refused through a symlink just as directly.
         try:
             fd = os.open(lock, os.O_RDONLY | _O_NONBLOCK)
         except FileNotFoundError:
-            # No lock published yet; return an empty candidate.
+            # Covers both a lock never published and one removed between the
+            # caller's decision to seed and this open.
             return candidate
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                # A non-regular file (FIFO, directory, etc.) cannot seed.
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                with os.fdopen(fd, "rb") as handle:
+                    fd = -1  # ownership transferred to the file object
+                    pins = handle.read()
+                candidate.write_bytes(pins)
+        finally:
+            if fd != -1:
                 os.close(fd)
-                return candidate
-            with os.fdopen(fd, "rb") as handle:
-                candidate.write_bytes(handle.read())
-        except BaseException:
-            os.close(fd)
-            raise
     except BaseException:
         candidate.unlink(missing_ok=True)
         raise
-    return candidate
     return candidate
 
 

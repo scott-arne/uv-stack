@@ -2949,7 +2949,7 @@ def test_candidate_lock_survives_concurrent_lock_removal(
     original_open = os.open
 
     def open_losing_the_race(path, flags, *args, **kwargs):
-        # The lock exists when seed checks, gone when os.open runs.
+        # Removed between the caller deciding to seed and the open landing.
         if path == lock:
             raise FileNotFoundError(f"{path}")
         return original_open(path, flags, *args, **kwargs)
@@ -2961,6 +2961,7 @@ def test_candidate_lock_survives_concurrent_lock_removal(
         assert candidate.read_text() == ""
     finally:
         candidate.unlink(missing_ok=True)
+
 
 def test_a_failed_compile_hint_names_the_published_lock(config_tree: ConfigRoot):
     lock = config_tree.env_requirements_lock("main")
@@ -3064,8 +3065,9 @@ def test_full_upgrade_recovers_unreadable_lock(config_tree: ConfigRoot):
     try:
         runner = RecordingRunner(responder=_existing_env_responder)
         upgrade_env(config_tree, runner, "main", UpgradeOptions())
-        # The lock was replaced despite being unreadable.
-        assert lock.exists()
+        # The unseeded candidate replaced the lock: the old pins are gone,
+        # which exists() alone would not have shown.
+        assert lock.read_text() == ""
     finally:
         lock.chmod(0o644)
 
@@ -3091,22 +3093,22 @@ def test_full_upgrade_does_not_read_the_lock(config_tree: ConfigRoot):
 def test_candidate_lock_is_empty_when_lock_path_is_a_fifo(config_tree: ConfigRoot):
     # A FIFO at the lock path must not hang; it should yield an empty candidate.
     import signal
-    
+
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
-    
+
     if not hasattr(os, "mkfifo"):
         pytest.skip("os.mkfifo not available on this platform")
-    
+
     os.mkfifo(lock)
     try:
         # Guard with a timeout in case of regression (a hang would fail the test).
         def timeout_handler(signum, frame):
             raise TimeoutError("FIFO test timed out - likely hung on open")
-        
+
         old_handler = signal.signal(signal.SIGALRM, timeout_handler)
         signal.alarm(2)  # 2 second timeout
-        
+
         try:
             candidate = _new_candidate_lock(lock, seed=True)
             try:
@@ -3119,3 +3121,29 @@ def test_candidate_lock_is_empty_when_lock_path_is_a_fifo(config_tree: ConfigRoo
     finally:
         if lock.exists():
             os.unlink(lock)
+
+
+def test_seed_failure_surfaces_its_own_error(config_tree: ConfigRoot, monkeypatch):
+    # The read hands the descriptor to a file object, so the unwind must not
+    # close it a second time: a stray EBADF would replace the real reason the
+    # seed failed, and in a threaded process could close an unrelated file.
+    import errno
+
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    original_write_bytes = Path.write_bytes
+
+    def full_disk(self: Path, data: bytes) -> int:
+        if self.name.endswith(".tmp"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return original_write_bytes(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", full_disk)
+
+    with pytest.raises(OSError) as caught:
+        _new_candidate_lock(lock, seed=True)
+    assert caught.value.errno == errno.ENOSPC
+    # The unwind removed the candidate it could not fill.
+    assert list(lock.parent.glob("*.tmp")) == []
