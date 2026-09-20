@@ -160,17 +160,19 @@ def _newline(text: str) -> str:
     Only the first terminator is consulted. A file with mixed endings has no
     single right answer, and matching its first line is the least surprising
     choice — the alternative, imposing LF, is exactly the whole-file rewrite
-    this function exists to avoid.
+    this function exists to avoid. A CRLF counts as one terminator, not as
+    a CR followed by an LF.
 
     :param text: The file's contents, read without newline translation.
     :returns: CRLF, LF, or a bare CR.
     """
-    index = text.find("\n")
-    if index > 0 and text[index - 1] == "\r":
-        return "\r\n"
-    if index != -1:
+    # The earliest of the two positions decides. Searching for the LF alone
+    # would let a bare CR earlier in the file go unnoticed.
+    carriage_return = text.find("\r")
+    line_feed = text.find("\n")
+    if carriage_return == -1 or (line_feed != -1 and line_feed < carriage_return):
         return "\n"
-    return "\r" if "\r" in text else "\n"
+    return "\r\n" if line_feed == carriage_return + 1 else "\r"
 
 
 def _append_block(original: str, block: str, newline: str) -> str:

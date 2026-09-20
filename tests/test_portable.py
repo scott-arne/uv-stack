@@ -9,6 +9,7 @@ from uv_stack.errors import ConfigError
 from uv_stack.operations.portable import (
     BEGIN_MARKER,
     END_MARKER,
+    _newline,
     ignore_patterns,
     next_steps,
     render_block,
@@ -244,6 +245,28 @@ def test_a_bare_cr_file_keeps_bare_cr(config_tree: ConfigRoot):
     text = path.read_bytes().decode("utf-8")
     assert "\n" not in text
     assert text.startswith("lib/\r" + BEGIN_MARKER)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("plain\n", "\n"),
+        ("crlf\r\n", "\r\n"),
+        ("cronly\r", "\r"),
+        ("", "\n"),
+        ("no terminator", "\n"),
+        # A file whose endings are mixed is decided by its first terminator,
+        # so an earlier bare CR wins over the LF that follows it later on.
+        ("a\rb\n", "\r"),
+        ("\rx\n", "\r"),
+        ("a\rb\r\n", "\r"),
+        # A CRLF counts as one terminator rather than as a CR plus an LF.
+        ("a\r\nb\n", "\r\n"),
+        ("a\nb\r", "\n"),
+    ],
+)
+def test_the_first_terminator_decides_the_newline(text, expected):
+    assert _newline(text) == expected
 
 
 def test_a_block_at_the_end_without_a_terminator_stays_unterminated(
