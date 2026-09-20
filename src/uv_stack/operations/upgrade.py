@@ -74,7 +74,19 @@ def _should_upgrade_all(options: UpgradeOptions) -> bool:
 
 
 def _new_candidate_lock(lock: Path) -> Path:
-    """Create an empty sibling file to compile a candidate lock into.
+    """Create a sibling file to compile a candidate lock into.
+
+    The candidate is seeded from the published lock when one exists. ``uv pip
+    compile`` reads prior pins out of its *output* file, so compiling into an
+    empty file re-resolves everything: ``--no-upgrade`` would have nothing to
+    preserve and ``--upgrade-package X`` would upgrade far more than ``X``.
+    Seeding is what gives both flags their documented meaning. A full
+    ``--upgrade`` is unaffected — uv ignores the output file's pins when it is
+    passed.
+
+    Compiling into a copy rather than into the lock itself is what keeps the
+    published lock intact when the compile fails; the caller's unwind path
+    deletes the candidate and leaves the original untouched.
 
     :param lock: The lock the candidate will replace once it is complete.
     :returns: Path to the newly created temp file.
@@ -83,7 +95,14 @@ def _new_candidate_lock(lock: Path) -> Path:
         dir=lock.parent, prefix=lock.name + ".", suffix=".tmp"
     )
     os.close(tmp_fd)
-    return Path(tmp_name)
+    candidate = Path(tmp_name)
+    try:
+        if lock.is_file():
+            candidate.write_bytes(lock.read_bytes())
+    except BaseException:
+        candidate.unlink(missing_ok=True)
+        raise
+    return candidate
 
 
 def _env_python(runner: Runner, env_name: str, *, probed: str | None = None) -> str:

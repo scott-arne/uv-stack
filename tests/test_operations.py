@@ -14,7 +14,7 @@ from uv_stack.commands import (
     uv_pip_sync,
 )
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError, EnvError
+from uv_stack.errors import ConfigError, EnvError, ToolError
 from uv_stack.models import ProjectTracking
 from uv_stack.operations.create import ensure_env, env_micromamba_exists
 from uv_stack.operations.project import (
@@ -25,7 +25,7 @@ from uv_stack.operations.project import (
     resolve_project_python,
     select_project_python,
 )
-from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
+from uv_stack.operations.upgrade import UpgradeOptions, _new_candidate_lock, upgrade_env
 from uv_stack.runner import Command, CommandResult, RecordingRunner
 
 
@@ -2840,3 +2840,87 @@ def test_upgrade_writes_an_expanded_requirements_in(config_tree: ConfigRoot):
     text = config_tree.env_requirements_in("main").read_text()
     assert "-e /home/me/code/mypkg" in text
     assert "${DEV}" not in text
+
+
+def test_candidate_lock_is_seeded_from_the_published_lock(config_tree: ConfigRoot):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+    candidate = _new_candidate_lock(lock)
+    try:
+        assert candidate.read_text() == "numpy==1.26.0\n"
+        assert candidate != lock
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def test_candidate_lock_is_empty_when_no_lock_is_published(config_tree: ConfigRoot):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    assert not lock.exists()
+    candidate = _new_candidate_lock(lock)
+    try:
+        assert candidate.read_text() == ""
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def test_compile_sees_the_existing_pins(config_tree: ConfigRoot):
+    """uv reads prior pins from its output file, so --no-upgrade needs them there."""
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+    seen: list[str] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            seen.append(_compile_output(cmd).read_text())
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    upgrade_env(config_tree, runner, "main", UpgradeOptions(no_upgrade=True))
+    assert seen == ["numpy==1.26.0\n"]
+
+
+def test_the_recreate_branch_also_sees_the_existing_pins(config_tree: ConfigRoot):
+    # The spec requires both branches covered. upgrade_env calls
+    # _new_candidate_lock from two places -- the recreate branch compiles with
+    # uv_pip_compile_for_version before the environment is torn down -- and a
+    # regression could reach one without the other.
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+    seen: list[str] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            _assert_compiles_to_candidate(cmd, lock)
+            seen.append(_compile_output(cmd).read_text())
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    upgrade_env(
+        config_tree, runner, "main", UpgradeOptions(recreate=True, no_upgrade=True)
+    )
+    assert seen == ["numpy==1.26.0\n"]
+    assert lock.read_text() == "numpy==1.26.0\n"
+
+
+
+
+def test_a_failed_compile_leaves_the_published_lock_untouched(config_tree: ConfigRoot):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd):
+        if "compile" in cmd.args:
+            raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError):
+        upgrade_env(config_tree, runner, "main", UpgradeOptions())
+    assert lock.read_text() == "numpy==1.26.0\n"
+    leftovers = list(lock.parent.glob(lock.name + ".*.tmp"))
+    assert leftovers == []
