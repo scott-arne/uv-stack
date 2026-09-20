@@ -32,7 +32,9 @@ def _run_upgrade(
     successes. A non-empty failure set exits the process with status 1.
 
     :param config: Configuration root.
-    :param names: Environment names to upgrade.
+    :param names: Environment names to upgrade. Repeats are collapsed, keeping
+        first-request order: every outcome below is keyed by name, so the batch
+        runs each distinct environment once.
     :param options: Upgrade options.
     :param stop_on_error: Abort the batch on the first failure.
     :param rule_verb: The verb in each environment's section rule. Supplied by
@@ -44,7 +46,16 @@ def _run_upgrade(
     failures: list[tuple[str, UvStackError]] = []
     attempted: list[str] = []
 
-    for name in names:
+    # Order-preserving dedup. Every outcome below is keyed by name, so a
+    # repeated name would render two rows for one attempt -- and under
+    # stop_on_error a name the loop never reached would render as a success.
+    # Upgrading the same environment twice in one batch is pointless work
+    # besides. Owned here rather than at each call site: two commands take
+    # NAMES as nargs=-1, and a precondition is weaker than a guarantee.
+    # dict.fromkeys, not set, so request order survives.
+    targets = list(dict.fromkeys(names))
+
+    for name in targets:
         attempted.append(name)
         console.rule(Text(f"{rule_verb} {name}"))
         try:
@@ -67,7 +78,7 @@ def _run_upgrade(
             sys.exit(1)
         return
 
-    _print_summary(names, failures, attempted, all_succeeded=all_succeeded)
+    _print_summary(targets, failures, attempted, all_succeeded=all_succeeded)
     if failures:
         sys.exit(1)
 

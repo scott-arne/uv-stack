@@ -4994,3 +4994,40 @@ def test_config_portable_reports_a_malformed_block(config_tree: ConfigRoot):
     )
     assert result.exit_code != 0
     assert "Malformed" in result.output
+
+
+def test_repeated_environment_names_are_upgraded_once(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "alpha", "alpha"])
+    assert result.exit_code == 1
+    summary = result.output.split("Summary", 1)[1]
+    assert summary.count("alpha") == 1
+    assert "1 of 1 environment(s) failed." in summary
+
+
+def test_stop_on_error_accounting_survives_repeated_names(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(root), "upgrade", "--stop-on-error", "alpha", "beta", "alpha"],
+    )
+    assert result.exit_code == 1
+    summary = result.output.split("Summary", 1)[1]
+    # Two distinct targets after dedup: alpha fails, beta is never reached.
+    assert summary.count("alpha") == 1
+    assert "0 succeeded, 1 failed, 1 skipped." in summary
+    assert "skipped after an earlier failure" in summary
+    # The phantom this fix exists to kill: before dedup the count line read
+    # "1 succeeded" with no success row anywhere in the summary.
+    assert "1 succeeded" not in summary
+
+
+def test_dedup_preserves_request_order(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "upgrade", "beta", "alpha", "beta"]
+    )
+    assert result.exit_code == 1
+    summary = result.output.split("Summary", 1)[1]
+    assert summary.index("beta") < summary.index("alpha")
+    assert "2 of 2 environment(s) failed." in summary
