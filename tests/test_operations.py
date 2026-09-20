@@ -3545,8 +3545,8 @@ def test_init_no_track_stays_silent_about_an_interpreter_it_never_records(
 ):
     """--no-track stores no spec, so there is no trip for one to survive.
 
-    The advisory's own wording ("Recording interpreter ... in pyproject.toml")
-    is false on this path. Asserting the table is absent as well as the
+    Neither wording is true on this path: nothing is being recorded, and
+    nothing would be either. Asserting the table is absent as well as the
     advisory keeps the test from passing on a run that merely warned about
     something else.
     """
