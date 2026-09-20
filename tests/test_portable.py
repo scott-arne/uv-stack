@@ -17,6 +17,21 @@ from uv_stack.operations.portable import (
 )
 
 
+def _record_writes(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Swap the module's atomic_write for a recorder of the paths it is given.
+
+    A write that must not happen leaves nothing on disk to assert on:
+    atomic_write skips an identical rewrite by itself, so the only proof that
+    this module's own guard held is that the writer was never reached.
+    """
+    written: list[Path] = []
+    monkeypatch.setattr(
+        "uv_stack.operations.portable.atomic_write",
+        lambda path, text: written.append(path),
+    )
+    return written
+
+
 def test_patterns_are_derived_from_the_path_accessors(config_tree: ConfigRoot):
     assert ignore_patterns(config_tree) == [
         ".locks/",
@@ -67,11 +82,15 @@ def test_writing_into_a_root_without_a_gitignore_creates_it(config_tree: ConfigR
     assert result.path.read_text() == render_block(config_tree) + "\n"
 
 
-def test_writing_twice_is_unchanged(config_tree: ConfigRoot):
+def test_writing_twice_is_unchanged(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
     write_portable_ignore(config_tree)
     before = (config_tree.root / ".gitignore").read_text()
+    written = _record_writes(monkeypatch)
     result = write_portable_ignore(config_tree)
     assert result.outcome == "unchanged"
+    assert written == []
     assert (config_tree.root / ".gitignore").read_text() == before
 
 
@@ -101,11 +120,10 @@ def test_a_stale_block_is_replaced_in_place(config_tree: ConfigRoot):
     path.write_text(f"before\n{BEGIN_MARKER}\nstale-entry\n{END_MARKER}\nafter\n")
     result = write_portable_ignore(config_tree)
     assert result.outcome == "updated"
-    text = path.read_text()
-    assert text.startswith("before\n")
-    assert text.endswith("after\n")
-    assert "stale-entry" not in text
-    assert "variables.local.txt" in text
+    # The whole file is compared rather than its prefix and its suffix: a
+    # splice that duplicated everything after the block would satisfy both.
+    expected = f"before\n{render_block(config_tree)}\nafter\n"
+    assert path.read_bytes() == expected.encode("utf-8")
 
 
 @pytest.mark.parametrize(
@@ -122,28 +140,38 @@ def test_a_stale_block_is_replaced_in_place(config_tree: ConfigRoot):
     ],
 )
 def test_a_malformed_topology_is_refused_and_writes_nothing(
-    config_tree: ConfigRoot, content
+    config_tree: ConfigRoot, content, monkeypatch: pytest.MonkeyPatch
 ):
     path = config_tree.root / ".gitignore"
     path.write_text(content)
+    written = _record_writes(monkeypatch)
     with pytest.raises(ConfigError) as excinfo:
         write_portable_ignore(config_tree)
     assert str(path) in excinfo.value.message
     assert path.read_text() == content
+    assert written == []
 
 
-def test_a_malformed_topology_is_refused_under_dry_run_too(config_tree: ConfigRoot):
+def test_a_malformed_topology_is_refused_under_dry_run_too(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
     path = config_tree.root / ".gitignore"
     path.write_text(f"{BEGIN_MARKER}\na\n")
+    written = _record_writes(monkeypatch)
     with pytest.raises(ConfigError):
         write_portable_ignore(config_tree, dry_run=True)
     assert path.read_text() == f"{BEGIN_MARKER}\na\n"
+    assert written == []
 
 
-def test_dry_run_writes_nothing(config_tree: ConfigRoot):
+def test_dry_run_writes_nothing(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    written = _record_writes(monkeypatch)
     result = write_portable_ignore(config_tree, dry_run=True)
     assert result.outcome == "created"
     assert not (config_tree.root / ".gitignore").exists()
+    assert written == []
 
 
 def test_next_steps_for_a_root_that_is_not_a_repository(config_tree: ConfigRoot):
@@ -223,11 +251,10 @@ def test_a_crlf_file_with_a_stale_block_keeps_the_bytes_around_it(
         f"before\r\n{BEGIN_MARKER}\r\nstale-entry\r\n{END_MARKER}\r\nafter\r\n",
     )
     assert write_portable_ignore(config_tree).outcome == "updated"
-    text = path.read_bytes().decode("utf-8")
-    assert text.startswith("before\r\n")
-    assert text.endswith("after\r\n")
-    assert "stale-entry" not in text
-    assert "\n" not in text.replace("\r\n", "")
+    # Bytes, not decoded text: a translated read would hide a terminator the
+    # splice failed to restore, and a tail is only pinned when compared whole.
+    expected = f"before\r\n{render_block(config_tree, CRLF)}\r\nafter\r\n"
+    assert path.read_bytes() == expected.encode("utf-8")
 
 
 def test_a_crlf_file_already_current_is_byte_identical(config_tree: ConfigRoot):
@@ -290,7 +317,22 @@ def test_a_non_utf8_ignore_file_is_refused(config_tree: ConfigRoot):
     assert path.read_bytes() == b"\xff\xfe not utf-8\n"
 
 
-@pytest.mark.parametrize("separator", ["\x0c", "\x85", "\u2028", "\x1c"])
+# The eight separators str.splitlines() breaks on that _terminator cannot
+# put back. The three it can — LF, CR, and CRLF — are the only ones the
+# marker comprehensions in _find_span are allowed to strip.
+UNRESTORABLE_SEPARATORS = [
+    "\v",  # line tabulation
+    "\x0c",  # form feed
+    "\x1c",  # file separator
+    "\x1d",  # group separator
+    "\x1e",  # record separator
+    "\x85",  # next line
+    "\u2028",  # line separator
+    "\u2029",  # paragraph separator
+]
+
+
+@pytest.mark.parametrize("separator", UNRESTORABLE_SEPARATORS)
 def test_an_end_marker_ended_by_an_unrestorable_separator_is_refused(
     config_tree: ConfigRoot, separator
 ):
@@ -308,7 +350,7 @@ def test_an_end_marker_ended_by_an_unrestorable_separator_is_refused(
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("separator", ["\x0c", "\x85", "\u2028", "\x1c"])
+@pytest.mark.parametrize("separator", UNRESTORABLE_SEPARATORS)
 def test_a_begin_marker_ended_by_an_unrestorable_separator_is_refused(
     config_tree: ConfigRoot, separator
 ):
