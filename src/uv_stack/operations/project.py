@@ -35,6 +35,7 @@ from uv_stack.pyversion import (
 )
 from uv_stack.resolver import Resolver
 from uv_stack.runner import Command, Runner
+from uv_stack.variables import expand_all
 
 #: Environment variable consulted between the ``--python`` flag and the
 #: config-root default when selecting the project interpreter.
@@ -227,6 +228,16 @@ def init_project(
                 f"Skipping stack requirement '{entry}': '{name}' is user-owned in this project."
             )
 
+    # Expansion is computed here — after the ownership filter, before the
+    # first write and before any subprocess — so an undefined variable aborts
+    # a run that has changed nothing. This follows the rule already in this
+    # function that resolution errors precede external command execution.
+    # Only the temp requirements file below gets the expanded strings; the
+    # ledger keeps the unexpanded ones, so it never records this machine's
+    # filesystem. expand_all also enforces the placement rule, which is what
+    # makes that split safe (spec "Projects and the ledger split").
+    expanded_adds = expand_all(stack_adds, config.load_variables())
+
     # Adopt orphans left by a crashed tracked init/refresh (spec §2.3):
     # durable from the FIRST write below. Skipped entirely with --no-track:
     # the table is deleted below, so there is no ledger to adopt into and the
@@ -296,7 +307,7 @@ def init_project(
     tmp_req = Path(tmp_name)
     try:
         with open(fd, "w", encoding="utf-8") as handle:
-            for entry in stack_adds:
+            for entry in expanded_adds:
                 handle.write(entry)
                 handle.write("\n")
 
@@ -531,6 +542,14 @@ def refresh_project(
                 f"Skipping stack requirement '{entry}': '{name}' is user-owned in this project."
             )
 
+    # As in init_project, expansion precedes every write. It matters more
+    # here: the pending table is written before the temp file is opened, so
+    # computing expansion first means an undefined variable cannot leave a
+    # pending record behind for a run that never started. It also sits outside
+    # the dry-run guard below, so a dry run reports the refusal rather than
+    # planning a run that cannot succeed.
+    expanded_adds = expand_all(stack_adds, config.load_variables())
+
     adopted = (
         _adopt_orphans(tracking.pending, tracking.applied, stack_adds, dep_names, warnings)
         if tracking.pending
@@ -604,7 +623,7 @@ def refresh_project(
         try:
             # Render only stack-owned dependencies to the temp requirements file.
             with open(fd, "w", encoding="utf-8") as handle:
-                for entry in stack_adds:
+                for entry in expanded_adds:
                     handle.write(entry)
                     handle.write("\n")
             if names:

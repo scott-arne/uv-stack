@@ -3198,3 +3198,193 @@ def test_seed_failure_surfaces_its_own_error(config_tree: ConfigRoot, monkeypatc
     assert caught.value.errno == errno.ENOSPC
     # The unwind removed the candidate it could not fill.
     assert list(lock.parent.glob("*.tmp")) == []
+
+
+def _portable_root(tmp_path: Path, name: str, dev: str) -> ConfigRoot:
+    """A config root whose 'dev' profile installs an editable under ``dev``."""
+    root = tmp_path / name
+    (root / "profiles").mkdir(parents=True)
+    (root / "bundles").mkdir(parents=True)
+    (root / "envs").mkdir(parents=True)
+    (root / "profiles" / "dev.yaml").write_text(
+        "includes:\n  - rich\n  - -e ${DEV}/widget\n"
+    )
+    (root / "variables.txt").write_text("DEV\n")
+    (root / "variables.local.txt").write_text(f"DEV={dev}\n")
+    return ConfigRoot(root)
+
+
+def test_the_ledger_keeps_the_unexpanded_entry(tmp_path: Path):
+    from uv_stack.operations.pyproject import read_tracking
+
+    config = _portable_root(tmp_path, "root-a", "/checkouts/a")
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    captured: list[str] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        if "add" in cmd.args and "-r" in cmd.args:
+            captured.append(Path(cmd.args[cmd.args.index("-r") + 1]).read_text())
+        return CommandResult(returncode=0, stdout="")
+
+    init_project(
+        config, RecordingRunner(responder=responder), ["dev"],
+        ProjectOptions(python="3.12"), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "-e ${DEV}/widget" in tracking.applied
+    assert "-e /checkouts/a/widget" not in tracking.applied
+    assert "-e /checkouts/a/widget\n" in captured[0]
+
+
+def test_two_roots_with_different_values_write_identical_ledgers(tmp_path: Path):
+    """The surface uv-stack controls is portable; assert it directly."""
+    from uv_stack.operations.pyproject import read_tracking
+
+    ledgers = []
+    for name, dev in (("root-a", "/checkouts/a"), ("root-b", "/elsewhere/b")):
+        config = _portable_root(tmp_path, name, dev)
+        project_dir = tmp_path / f"proj-{name}"
+        project_dir.mkdir()
+        init_project(
+            config, RecordingRunner(responder=_existing_env_responder), ["dev"],
+            ProjectOptions(python="3.12"), cwd=project_dir,
+        )
+        tracking = read_tracking(project_dir / "pyproject.toml")
+        assert tracking is not None
+        ledgers.append((list(tracking.applied), tracking.pending))
+    assert ledgers[0] == ledgers[1]
+
+
+def test_an_undefined_variable_aborts_before_anything_is_created(tmp_path: Path):
+    config = _portable_root(tmp_path, "root-c", "/checkouts/c")
+    config.variables_local_path().unlink()
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ConfigError) as excinfo:
+        init_project(
+            config, runner, ["dev"], ProjectOptions(python="3.12"), cwd=project_dir
+        )
+    assert "DEV" in str(excinfo.value)
+    assert runner.commands == []
+    assert not (project_dir / "pyproject.toml").exists()
+
+
+def _portable_tracked_project(tmp_path: Path, name: str) -> Path:
+    """A tracked project whose stack is the portable root's 'dev' profile.
+
+    The ledger already holds the unexpanded editable, which is the steady
+    state a second refresh must reproduce: nothing is added, nothing is
+    dropped, and both tables come back byte-identical.
+
+    :param tmp_path: Parent directory.
+    :param name: Project directory name, unique within ``tmp_path``.
+    :returns: The project directory.
+    """
+    project_dir = tmp_path / name
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["rich"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["dev"]\n'
+        'applied = ["rich", "-e ${DEV}/widget"]\n'
+    )
+    return project_dir
+
+
+def _refresh_ledger_tables(
+    config: ConfigRoot, tmp_path: Path, name: str
+) -> tuple[list[str] | None, list[str]]:
+    """Refresh a tracked project and return both ledger tables it wrote.
+
+    ``pending`` only exists between the first write and the clearing write, so
+    it has to be read from inside a command. A helper rather than a loop body
+    because the responder closes over ``pyproject`` (B023).
+
+    :param config: The root to refresh against.
+    :param tmp_path: Parent for the project directory.
+    :param name: Project directory name, unique within ``tmp_path``.
+    :returns: ``(pending mid-run, applied after the run)``.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    project_dir = _portable_tracked_project(tmp_path, name)
+    pyproject = project_dir / "pyproject.toml"
+    mid_run: list[ProjectTracking | None] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        mid_run.append(read_tracking(pyproject))
+        return CommandResult(returncode=0, stdout="")
+
+    refresh_project(
+        config, RecordingRunner(responder=responder),
+        RefreshOptions(python="3.12"), cwd=project_dir,
+    )
+    first = mid_run[0]
+    final = read_tracking(pyproject)
+    assert first is not None and final is not None
+    return first.pending, list(final.applied)
+
+
+def test_refresh_keeps_the_ledger_unexpanded_and_expands_the_temp_file(tmp_path: Path):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    config = _portable_root(tmp_path, "root-r", "/checkouts/r")
+    project_dir = _portable_tracked_project(tmp_path, "proj-r")
+    pyproject = project_dir / "pyproject.toml"
+    captured: list[str] = []
+    mid_run: list[ProjectTracking | None] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        mid_run.append(read_tracking(pyproject))
+        if "add" in cmd.args and "-r" in cmd.args:
+            captured.append(Path(cmd.args[cmd.args.index("-r") + 1]).read_text())
+        return CommandResult(returncode=0, stdout="")
+
+    refresh_project(
+        config, RecordingRunner(responder=responder),
+        RefreshOptions(python="3.12"), cwd=project_dir,
+    )
+    assert "-e /checkouts/r/widget\n" in captured[0]
+    # 'uv add' is the first command this run issues, so snapshot 0 is taken
+    # with the pending table already on disk.
+    first = mid_run[0]
+    assert first is not None
+    assert first.pending == ["rich", "-e ${DEV}/widget"]
+    final = read_tracking(pyproject)
+    assert final is not None
+    assert list(final.applied) == ["rich", "-e ${DEV}/widget"]
+
+
+def test_refresh_with_an_undefined_variable_writes_no_pending_table(tmp_path: Path):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    config = _portable_root(tmp_path, "root-u", "/checkouts/u")
+    config.variables_local_path().unlink()
+    project_dir = _portable_tracked_project(tmp_path, "proj-u")
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_text()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ConfigError) as excinfo:
+        refresh_project(config, runner, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert "DEV" in str(excinfo.value)
+    assert runner.commands == []
+    tracking = read_tracking(pyproject)
+    assert tracking is not None and tracking.pending is None
+    assert pyproject.read_text() == before
+
+
+def test_two_roots_refresh_to_identical_ledgers(tmp_path: Path):
+    """Both tables refresh writes must match across roots with different values."""
+    observed = []
+    for name, dev in (("root-x", "/checkouts/x"), ("root-y", "/elsewhere/y")):
+        config = _portable_root(tmp_path, name, dev)
+        observed.append(_refresh_ledger_tables(config, tmp_path, f"proj-{name}"))
+    assert observed[0] == observed[1]
+    assert observed[0] == (["rich", "-e ${DEV}/widget"], ["rich", "-e ${DEV}/widget"])
