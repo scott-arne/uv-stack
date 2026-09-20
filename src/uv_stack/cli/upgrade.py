@@ -8,7 +8,7 @@ import rich_click as click
 from rich.text import Text
 
 from uv_stack.cli._complete import complete_env_names
-from uv_stack.cli._render import console, echo, render_error, render_warnings
+from uv_stack.cli._render import console, echo, render_error, render_os_error, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ToolError, UvStackError
 from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
@@ -43,7 +43,7 @@ def _run_upgrade(
         from a call site in this package, never user input.
     """
     runner = SubprocessRunner()
-    failures: list[tuple[str, UvStackError]] = []
+    failures: list[tuple[str, UvStackError | OSError]] = []
     attempted: list[str] = []
 
     # Uniqueness is this function's invariant rather than a caller
@@ -64,6 +64,18 @@ def _run_upgrade(
             if stop_on_error:
                 break
             continue
+        except BrokenPipeError:
+            # A dead stdout is not one environment's failure. Recording it as
+            # a row would send the summary and every remaining panel to the
+            # same broken pipe; the CLI edge turns it into the conventional
+            # signal status instead.
+            raise
+        except OSError as error:
+            render_os_error(error)
+            failures.append((name, error))
+            if stop_on_error:
+                break
+            continue
         render_warnings(result.warnings)
         if options.dry_run:
             echo("Planned commands:")
@@ -80,22 +92,25 @@ def _run_upgrade(
         sys.exit(1)
 
 
-def _failure_reason(error: UvStackError) -> str:
+def _failure_reason(error: UvStackError | OSError) -> str:
     """Condense an error into a single summary line.
 
     Prefers a :class:`ToolError`'s captured ``detail`` (the failing command's
     stderr tail) collapsed to its last line — typically the actual diagnostic,
     e.g. ``numba requires numpy>=1.22,<2.5, but 2.5.0 is installed`` — and falls
     back to the error message for non-tool failures (bad config, resolution).
+    For an :class:`OSError`, the strerror is used if available.
     """
     if isinstance(error, ToolError) and error.detail:
         return error.detail.splitlines()[-1].strip()
+    if isinstance(error, OSError):
+        return error.strerror or str(error)
     return error.message
 
 
 def _print_summary(
     names: list[str],
-    failures: list[tuple[str, UvStackError]],
+    failures: list[tuple[str, UvStackError | OSError]],
     attempted: list[str],
     *,
     all_succeeded: str = "All requested environments upgraded.",
