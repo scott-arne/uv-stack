@@ -5321,7 +5321,6 @@ def test_broken_pipe_error_is_not_recorded_as_an_environment_failure(
     assert "Summary" not in result.output
 
 
-
 def _escape_victim(tmp_path: Path) -> Path:
     """A directory outside the config root that a traversal would overwrite.
 
@@ -5353,7 +5352,7 @@ def _assert_untouched(victim: Path) -> None:
     assert not (victim / "environment.yml").exists()
 
 
-def test_converge_rejects_an_absolute_environment_name(tmp_path: Path) -> None:
+def test_converge_rejects_an_absolute_environment_name(tmp_path: Path):
     """An absolute NAME must not escape the config root.
 
     ``ConfigRoot.env_dir`` joins the name onto ``<root>/envs``, and an
@@ -5374,7 +5373,7 @@ def test_converge_rejects_an_absolute_environment_name(tmp_path: Path) -> None:
     assert "Invalid environment name" in result.output
 
 
-def test_upgrade_rejects_an_absolute_environment_name(tmp_path: Path) -> None:
+def test_upgrade_rejects_an_absolute_environment_name(tmp_path: Path):
     """The upgrade command's side of the same guard."""
     root = _seeded_root(tmp_path)
     victim = _escape_victim(tmp_path)
@@ -5388,7 +5387,7 @@ def test_upgrade_rejects_an_absolute_environment_name(tmp_path: Path) -> None:
     assert "Invalid environment name" in result.output
 
 
-def test_converge_rejects_a_dotdot_bearing_environment_name(tmp_path: Path) -> None:
+def test_converge_rejects_a_dotdot_bearing_environment_name(tmp_path: Path):
     """A '../'-bearing NAME must not escape the config root either."""
     root = _seeded_root(tmp_path)
     victim = _escape_victim(tmp_path)
@@ -5400,3 +5399,27 @@ def test_converge_rejects_a_dotdot_bearing_environment_name(tmp_path: Path) -> N
     _assert_untouched(victim)
     assert result.exit_code == 1
     assert "Invalid environment name" in result.output
+
+
+def test_converge_refuses_the_whole_batch_before_any_environment_runs(tmp_path: Path):
+    """One bad NAME stops the batch; the good ones must not have run first.
+
+    Validating inside the per-environment loop would pass every test above,
+    since each passes a single name — but it would converge 'main' and only
+    then refuse, leaving half a batch applied for a request that was refused.
+    """
+    root = _env_root(tmp_path)
+    victim = _escape_victim(tmp_path)
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--dry-run", "main", str(victim)]
+    )
+
+    # The section rule is the batch's first visible act, and it precedes any
+    # per-environment failure, so it is the signal that survives whatever
+    # 'main' would have gone on to do.
+    assert "Converging main" not in result.output
+    assert not (root / "envs" / "main" / "requirements.in").exists()
+    assert not (root / "envs" / "main" / "environment.yml").exists()
+    _assert_untouched(victim)
+    assert result.exit_code == 1
