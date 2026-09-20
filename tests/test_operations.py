@@ -1089,6 +1089,110 @@ def test_init_project_force_tracked_over_pending_still_adopts(
     assert any("interrupted run" in w for w in warnings), warnings
 
 
+def test_init_resume_carries_a_nameless_applied_entry(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A reference-bearing applied entry must survive a resumed init.
+
+    ownership_name returns None for an editable, and the carry's name guard
+    read that as "do not carry", so the entry left the ledger while 'oldpkg'
+    stayed in [project.dependencies]. A dependency that has left the ledger is
+    user-owned from then on, so no later refresh reports or removes it: the
+    record is wrong, stays wrong, and nothing is printed. The assertion is on
+    the exact unexpanded spelling because that form is the entry's only
+    identity, and storing it unexpanded is what the ledger is for.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_carry_nameless"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "oldpkg"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["-e ${DEV}/oldpkg"]\n'
+        'pending = ["numpy"]\n'
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "-e ${DEV}/oldpkg" in tracking.applied
+
+
+def test_init_resume_does_not_duplicate_a_nameless_entry_the_stack_provides(
+    tmp_path: Path, monkeypatch
+):
+    """The carry must not re-add a nameless entry that arrives via the stack.
+
+    With no name to compare, the carry falls back to the exact spelling. When
+    the stack still supplies that spelling the entry is already in the new
+    applied list, and carrying it as well would write a duplicate row into a
+    durable record. Counting occurrences rather than asserting membership is
+    the whole point: 'in' passes either way.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    config = _portable_root(tmp_path, "root-carry", "/checkouts/a")
+    project_dir = tmp_path / "proj_carry_dup"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["rich", "widget"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["dev"]\n'
+        'applied = ["-e ${DEV}/widget"]\n'
+        'pending = ["rich"]\n'
+    )
+    init_project(
+        config, RecordingRunner(), ["dev"],
+        ProjectOptions(python="3.12", force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert list(tracking.applied).count("-e ${DEV}/widget") == 1
+
+
+def test_init_resume_drops_a_named_entry_that_left_the_dependencies(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A named applied entry no longer in [project.dependencies] must not carry.
+
+    The carry exists to keep a claim on something still installed. Once the
+    dependency is gone from the project, keeping its ledger row resurrects a
+    claim on a package that is not there and hands the next refresh a removal
+    to attempt. test_init_force_triple_crash_carries_owned_orphan pins the
+    positive case; this pins the condition that separates the two, which
+    nothing else did -- deleting it left the suite green.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_carry_gone"
+    project_dir.mkdir()
+    # 'chemprop' is in the ledger but deliberately absent from dependencies.
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["chemprop"]\n'
+        'pending = ["numpy"]\n'
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "chemprop" not in tracking.applied
+
+
 def test_init_add_failure_leaves_pending_intent(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):

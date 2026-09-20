@@ -261,18 +261,27 @@ def init_project(
     # PREVIOUS retry that then crashed, so it is skipped by _adopt_orphans
     # above and not in stack_adds either). The carried entries ride to the next
     # refresh, whose dropped-diff removes or reports them loudly.
-    carried = []
+    # A reference-bearing entry (editable, VCS, path) has no name, so
+    # [project.dependencies] cannot be consulted to confirm it is still
+    # installed and its exact unexpanded spelling is the only identity it has.
+    # It is therefore carried unless the stack still supplies that same
+    # spelling. That is the recoverable side of the guess: a carried entry the
+    # user no longer wants is reported by the next refresh, whereas one
+    # dropped from the ledger becomes user-owned and is never mentioned again.
+    carried: list[str] = []
     if options.track and previous_pending:
         stack_names = {
             canonical_name(n) for n in (ownership_name(e) for e in stack_adds) if n
         }
-        carried = [
-            e
-            for e in previous_applied
-            if (n := ownership_name(e))
-            and canonical_name(n) in dep_names
-            and canonical_name(n) not in stack_names
-        ]
+        for entry in previous_applied:
+            owned = ownership_name(entry)
+            if owned is None:
+                if entry not in stack_adds:
+                    carried.append(entry)
+                continue
+            canon = canonical_name(owned)
+            if canon in dep_names and canon not in stack_names:
+                carried.append(entry)
 
     # One target, two table shapes derived from it (spec §2.2).
     pending_tracking = ProjectTracking(
