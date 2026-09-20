@@ -716,11 +716,13 @@ def refresh_project(
             planned=planned,
         )
 
-    # The temp file is created and filled before the durable write so that
-    # every filesystem failure this run can produce falls above it: past that
-    # point the only thing left to raise is a UvStackError, which is the one
-    # shape that can carry the advisories out. init_project is built the same
-    # way for the same reason.
+    # The temp file is created and filled before the durable write so that the
+    # filesystem failures this run can produce fall above it, where they cost
+    # nothing: only a UvStackError can carry the advisories out, so an OSError
+    # raised past the write loses them. The two write_tracking calls below are
+    # the residual -- atomic_write can still raise, and validate_tracking_write
+    # pre-flights only the first of them. init_project is built the same way
+    # for the same reason.
     recorded = False
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-refresh.", suffix=".txt")
     tmp_req = Path(tmp_name)
