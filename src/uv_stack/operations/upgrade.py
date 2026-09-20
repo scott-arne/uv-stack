@@ -8,6 +8,7 @@ the command plan, and returns without touching the env or the lock.
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,6 +73,9 @@ class UpgradeResult:
 def _should_upgrade_all(options: UpgradeOptions) -> bool:
     return not options.no_upgrade and not options.upgrade_packages
 
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+
+
 
 def _new_candidate_lock(lock: Path, *, seed: bool) -> Path:
     """Create a sibling file to compile a candidate lock into.
@@ -101,21 +105,29 @@ def _new_candidate_lock(lock: Path, *, seed: bool) -> Path:
     if not seed:
         return candidate
     try:
-        # is_file() rather than exists(): a non-regular file at the lock path
-        # must never be opened. A FIFO there reads as existing, and the copy
-        # below would block on it forever -- the same hazard fsutil guards
-        # against with O_NONBLOCK. This guard short-circuits both an absent
-        # lock and a non-regular file; the arm below catches only the race
-        # where the lock disappears between is_file() and read_bytes().
-        if lock.is_file():
-            candidate.write_bytes(lock.read_bytes())
-    except FileNotFoundError:
-        # Lost a race with a concurrent removal. An absent lock is already the
-        # empty-candidate case, so this is not a failure.
-        pass
+        # O_NONBLOCK without O_NOFOLLOW: a symlinked lock must still work, and
+        # the descriptor check sees a FIFO through a link just as it would
+        # directly. Opening with O_NOFOLLOW would break symlinked locks, which
+        # this project tolerates (see fsutil.require_regular_file).
+        try:
+            fd = os.open(lock, os.O_RDONLY | _O_NONBLOCK)
+        except FileNotFoundError:
+            # No lock published yet; return an empty candidate.
+            return candidate
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                # A non-regular file (FIFO, directory, etc.) cannot seed.
+                os.close(fd)
+                return candidate
+            with os.fdopen(fd, "rb") as handle:
+                candidate.write_bytes(handle.read())
+        except BaseException:
+            os.close(fd)
+            raise
     except BaseException:
         candidate.unlink(missing_ok=True)
         raise
+    return candidate
     return candidate
 
 

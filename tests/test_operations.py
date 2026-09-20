@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -2945,22 +2946,21 @@ def test_candidate_lock_survives_concurrent_lock_removal(
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("numpy==1.26.0\n")
 
-    original_read_bytes = Path.read_bytes
+    original_open = os.open
 
-    def read_bytes_losing_the_race(self):
-        # The lock passes is_file() and is gone by the time it is read.
-        if self == lock:
-            raise FileNotFoundError(f"{self}")
-        return original_read_bytes(self)
+    def open_losing_the_race(path, flags, *args, **kwargs):
+        # The lock exists when seed checks, gone when os.open runs.
+        if path == lock:
+            raise FileNotFoundError(f"{path}")
+        return original_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", read_bytes_losing_the_race)
+    monkeypatch.setattr(os, "open", open_losing_the_race)
 
     candidate = _new_candidate_lock(lock, seed=True)
     try:
         assert candidate.read_text() == ""
     finally:
         candidate.unlink(missing_ok=True)
-
 
 def test_a_failed_compile_hint_names_the_published_lock(config_tree: ConfigRoot):
     lock = config_tree.env_requirements_lock("main")
@@ -3086,3 +3086,36 @@ def test_full_upgrade_does_not_read_the_lock(config_tree: ConfigRoot):
     runner = RecordingRunner(responder=responder)
     upgrade_env(config_tree, runner, "main", UpgradeOptions())
     assert seen == [""]
+
+
+def test_candidate_lock_is_empty_when_lock_path_is_a_fifo(config_tree: ConfigRoot):
+    # A FIFO at the lock path must not hang; it should yield an empty candidate.
+    import signal
+    
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("os.mkfifo not available on this platform")
+    
+    os.mkfifo(lock)
+    try:
+        # Guard with a timeout in case of regression (a hang would fail the test).
+        def timeout_handler(signum, frame):
+            raise TimeoutError("FIFO test timed out - likely hung on open")
+        
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(2)  # 2 second timeout
+        
+        try:
+            candidate = _new_candidate_lock(lock, seed=True)
+            try:
+                assert candidate.read_text() == ""
+            finally:
+                candidate.unlink(missing_ok=True)
+        finally:
+            signal.alarm(0)  # Cancel the alarm
+            signal.signal(signal.SIGALRM, old_handler)
+    finally:
+        if lock.exists():
+            os.unlink(lock)
