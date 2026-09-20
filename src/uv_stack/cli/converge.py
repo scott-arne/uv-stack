@@ -23,7 +23,7 @@ from uv_stack.operations.upgrade import UpgradeOptions
 @click.option(
     "--dry-run",
     is_flag=True,
-    help="Print the command plan and refresh generated files; run no commands.",
+    help="Print the command plan and refresh generated files; run none of the planned commands.",
 )
 @click.option(
     "--stop-on-error",
