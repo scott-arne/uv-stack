@@ -3402,6 +3402,34 @@ def test_two_roots_refresh_to_identical_ledgers(tmp_path: Path):
     assert observed[0] == (["rich", "-e ${DEV}/widget"], ["rich", "-e ${DEV}/widget"])
 
 
+def test_refreshing_an_unchanged_reference_bearing_project_is_a_no_op(tmp_path: Path):
+    """Both diffs must compare the ledger against the same spelling it holds.
+
+    'dropped' and 'added' run against the unexpanded 'stack_adds'. Diffing
+    the unexpanded ledger against the expanded list instead compares two
+    spellings of one requirement and concludes the project changed: every
+    refresh of a stable project would report a spurious addition, and -- since
+    an editable is never auto-removed -- a spurious 'Not auto-removed'
+    instruction to hand-edit a file that is already correct.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    config = _portable_root(tmp_path, "root-noop", "/checkouts/noop")
+    project_dir = tmp_path / "proj-noop"
+    project_dir.mkdir()
+    init_project(
+        config, RecordingRunner(responder=_existing_env_responder), ["dev"],
+        ProjectOptions(python="3.12"), cwd=project_dir,
+    )
+    result = refresh_project(
+        config, RecordingRunner(responder=_existing_env_responder),
+        RefreshOptions(python="3.12"), cwd=project_dir,
+    )
+    assert result.added == []
+    assert result.removed == []
+    assert result.skipped_removals == []
+
+
 def test_python_travel_problem_classifies_every_selector_shape(config_tree: ConfigRoot):
     # 'cpython@3.12' and 'pypy-3.10' are the regression guard: both are uv
     # implementation forms, and neither may be reclassified as an env name.
