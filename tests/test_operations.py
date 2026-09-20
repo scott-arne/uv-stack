@@ -2999,3 +2999,27 @@ def test_a_failed_compile_hint_names_the_published_lock_recreate_branch(
     assert caught.value.hint is not None
     assert str(lock) in caught.value.hint
     assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
+def test_a_failed_rebuild_gets_no_compile_hint(config_tree: ConfigRoot):
+    # The recreate branch's try also covers ensure_env and the interpreter
+    # probe. A micromamba failure there must not be explained as a compile
+    # writing into a temp copy.
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "create" in cmd.args and "micromamba" in cmd.args[0]:
+            raise ToolError(
+                "Command failed (1): micromamba create",
+                command=cmd.args,
+                returncode=1,
+            )
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(config_tree, runner, "main", UpgradeOptions(recreate=True))
+    assert caught.value.hint is None
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []

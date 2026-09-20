@@ -100,8 +100,9 @@ def _new_candidate_lock(lock: Path) -> Path:
         # is_file() rather than exists(): a non-regular file at the lock path
         # must never be opened. A FIFO there reads as existing, and the copy
         # below would block on it forever -- the same hazard fsutil guards
-        # against with O_NONBLOCK. An absent lock is handled by the arm below,
-        # not by this guard.
+        # against with O_NONBLOCK. This guard short-circuits both an absent
+        # lock and a non-regular file; the arm below catches only the race
+        # where the lock disappears between is_file() and read_bytes().
         if lock.is_file():
             candidate.write_bytes(lock.read_bytes())
     except FileNotFoundError:
@@ -123,11 +124,15 @@ def _explain_candidate_lock(error: BaseException, lock: Path) -> None:
     mention of the lock it was copied from.
 
     :param error: The exception about to be re-raised. Anything that is not a
-        :class:`ToolError`, and any error that already carries a hint, is left
-        alone.
+        :class:`ToolError`, any error that already carries a hint, and any
+        error from a command other than the compile, is left alone.
     :param lock: The published lock the candidate was seeded from.
     """
-    if isinstance(error, ToolError) and error.hint is None:
+    if (
+        isinstance(error, ToolError)
+        and error.hint is None
+        and "compile" in error.command
+    ):
         error.hint = (
             f"uv compiles into a copy of {lock}, so a '.tmp' path above names "
             f"that copy, not a file you are missing. If {lock.name} itself "
