@@ -8,6 +8,12 @@ flags missing directories, legacy names (``*.in``, ``*.bundle``,
 ``profiles.txt``), env-like directories left at the root, envs missing their
 source files, and a config root whose filesystem cannot serve the advisory locks
 that serialize concurrent creates.
+
+It also reports portability problems: declared variables with no value here,
+references that are undeclared, malformed, or in an entry that may not hold
+one, editable checkouts that are absent, a ``project-python.txt`` value that
+will not travel, and a missing or stale managed ``.gitignore`` block in a
+config root that is a git repository.
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ from pathlib import Path
 import yaml
 
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError
+from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.fsutil import (
     _LINK_FALLBACK_ERRNOS,
     Published,
@@ -32,7 +38,10 @@ from uv_stack.fsutil import (
     nofollow_read_flags,
     probe_locking,
 )
+from uv_stack.operations.portable import write_portable_ignore
+from uv_stack.operations.project import python_travel_problem
 from uv_stack.parse import read_clean_lines
+from uv_stack.variables import Variables, expand_all, placement_problem, referenced_names
 
 _KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib", ".locks"}
 
@@ -42,6 +51,27 @@ _KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib", ".locks"}
 # Treating it as link-less turns a denial into copy-then-unlink. A caller
 # publishing its own temp file wants the full set.
 _PUBLIC_LINK_FALLBACK = _LINK_FALLBACK_ERRNOS - {errno.EPERM}
+
+#: What to do about each placement refusal. The explanation returned by
+#: :func:`~uv_stack.variables.placement_problem` names the condition that
+#: failed; this names the form to use instead. Indexed rather than queried:
+#: a refusal kind with no row here is a bug that must surface, not a finding
+#: shipped with an empty fix.
+_PLACEMENT_FIX = {
+    "multiline-entry": "Split it into one requirement per line.",
+    "continuation-entry": (
+        "Remove the trailing backslash. A requirement entry is one line; "
+        "there is nothing to continue onto."
+    ),
+    "malformed-reference": (
+        "Write references as ${NAME}. There is no escape sequence, so a "
+        "literal '${' cannot appear in a requirement entry."
+    ),
+    "misplaced-reference": (
+        "Put the reference in an editable ('-e ${NAME}/pkg'), an option value, "
+        "or a path operand ('${NAME}/pkg') instead."
+    ),
+}
 
 
 @dataclass
@@ -62,6 +92,44 @@ class Finding:
     kind: str = ""
     path: Path | None = None
     dest: Path | None = None
+
+
+def _unparseable(path: Path, detail: str) -> Finding:
+    """Report a source doctor could not read, rather than failing on it.
+
+    :param path: The file that could not be read.
+    :param detail: ``str(error)`` from whichever read failed. Both families the
+        callers catch render the same way: ``UvStackError.__init__`` passes its
+        ``message`` to ``Exception.__init__``, so ``str()`` is that message, and
+        an ``OSError`` has nothing else to offer. A normalizing helper would add
+        a branch no test could distinguish.
+    :returns: A ``warn`` finding.
+    """
+    return Finding(
+        "warn",
+        f"Cannot read {path}: {detail}",
+        fix="Fix or remove the file; the checks that read it were skipped.",
+        kind="unparseable-source",
+        path=path,
+    )
+
+
+def _children(directory: Path) -> tuple[list[Path], list[Finding]]:
+    """List a directory's contents, or report why the walk failed.
+
+    ``iterdir`` raises rather than yielding nothing when a directory cannot be
+    read, and it is lazy — the error surfaces on the first iteration, not at
+    the call. Materializing inside the guard is what makes the ``except``
+    cover it.
+
+    :param directory: The directory to walk.
+    :returns: ``(children, findings)``. ``findings`` holds exactly one entry
+        when the walk failed, and ``children`` is then empty.
+    """
+    try:
+        return list(directory.iterdir()), []
+    except OSError as error:
+        return [], [_unparseable(directory, str(error))]
 
 
 def diagnose(config: ConfigRoot) -> list[Finding]:
@@ -127,7 +195,9 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
             )
 
     # Env-like directories left directly under root.
-    for child in config.root.iterdir():
+    root_children, walk_findings = _children(config.root)
+    findings += walk_findings
+    for child in root_children:
         if not child.is_dir() or child.name in _KNOWN_TOP_LEVEL:
             continue
         if (child / "requirements.in").exists() or (child / "environment.yml").exists():
@@ -144,7 +214,9 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
 
     # Per-env source-file checks.
     if config.envs_dir.is_dir():
-        for env_dir in config.envs_dir.iterdir():
+        env_children, walk_findings = _children(config.envs_dir)
+        findings += walk_findings
+        for env_dir in env_children:
             if not env_dir.is_dir():
                 continue
             if (env_dir / "profiles.txt").exists():
@@ -185,6 +257,8 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                 path=config.locks_dir,
             )
         )
+
+    findings.extend(_portability_findings(config))
 
     return findings
 
@@ -788,3 +862,370 @@ def repair(config: ConfigRoot, findings: list[Finding]) -> list[RepairAction]:
                 )
             )
     return actions
+
+
+def _scan_sources(config: ConfigRoot) -> tuple[list[tuple[Path, str]], list[Finding]]:
+    """Collect every requirement entry the root declares, without resolving.
+
+    A reference can appear in three kinds of file, not one: a profile's
+    ``includes``, a bundle's ``includes`` entry that is a literal rather than a
+    profile or bundle name, and a literal line in an env's ``stack.txt``. The
+    resolver funnels the last two into the same inline-requirement path as the
+    first, so scanning only profiles would leave two silent routes.
+
+    Nothing is resolved. A root with a dangling ``profile:`` token must still
+    get a useful variable diagnosis, and doctor must not fail because the thing
+    it is diagnosing is broken. A source that cannot be loaded becomes its own
+    finding and is then skipped — its absence from the reference results is not
+    a clean bill of health.
+
+    Enumeration is guarded as well as reading. ``list_envs`` walks the
+    directory with ``iterdir``, which raises rather than yielding nothing when
+    the directory cannot be read; the profile and bundle listings go through
+    ``glob``, which swallows a permission error today but is not contracted to.
+    One guard per listing costs nothing and removes the question.
+
+    :param config: The configuration root to scan.
+    :returns: ``(entries, findings)``, where each entry pairs its holding file
+        with one unexpanded requirement string.
+    """
+    entries: list[tuple[Path, str]] = []
+    findings: list[Finding] = []
+
+    try:
+        profiles = config.list_profiles()
+    except OSError as error:
+        profiles = []
+        findings.append(_unparseable(config.profiles_dir, str(error)))
+    for name in profiles:
+        path = config.profile_path(name)
+        try:
+            includes = config.load_profile(name).includes
+        except (UvStackError, OSError) as error:
+            findings.append(_unparseable(path, str(error)))
+            continue
+        entries.extend((path, entry) for entry in includes)
+
+    try:
+        bundles = config.list_bundles()
+    except OSError as error:
+        bundles = []
+        findings.append(_unparseable(config.bundles_dir, str(error)))
+    for name in bundles:
+        path = config.bundle_path(name)
+        try:
+            includes = config.load_bundle(name).includes
+        except (UvStackError, OSError) as error:
+            findings.append(_unparseable(path, str(error)))
+            continue
+        entries.extend((path, entry) for entry in includes)
+
+    try:
+        envs = config.list_envs()
+    except OSError as error:
+        envs = []
+        findings.append(_unparseable(config.envs_dir, str(error)))
+    for name in envs:
+        path = config.env_stack_path(name)
+        try:
+            stack = config.load_env(name).stack
+        except (UvStackError, OSError) as error:
+            findings.append(_unparseable(path, str(error)))
+            continue
+        entries.extend((path, entry) for entry in stack)
+
+    return entries, findings
+
+
+def _placement_findings(entries: list[tuple[Path, str]]) -> list[Finding]:
+    """Report entries the placement rule refuses, one finding per refusal kind.
+
+    :param entries: Scanned ``(source, entry)`` pairs.
+    :returns: ``error`` findings, empty when every entry is admitted.
+    """
+    findings: list[Finding] = []
+    for source, entry in entries:
+        problem = placement_problem(entry)
+        if problem is None:
+            continue
+        kind, explanation = problem
+        findings.append(
+            Finding(
+                "error",
+                f"{source}: entry '{entry}' — {explanation}",
+                fix=_PLACEMENT_FIX[kind],
+                kind=kind,
+                path=source,
+            )
+        )
+    return findings
+
+
+def _reference_findings(
+    config: ConfigRoot, entries: list[tuple[Path, str]], variables: Variables
+) -> list[Finding]:
+    """Report undeclared references and declared names with no value here.
+
+    Declaration is what makes a reference part of the root's portable
+    contract, so a name the environment happens to define is still undeclared.
+
+    :param config: The configuration root, for the two file paths named in fixes.
+    :param entries: Scanned ``(source, entry)`` pairs.
+    :param variables: The root's declared names and this machine's values.
+    :returns: ``error`` findings, empty when the root is fully configured.
+    """
+    findings = [
+        Finding(
+            "error",
+            f"Variable '{name}' is declared in {config.variables_path()} but "
+            "has no value on this machine.",
+            fix=(
+                f"Add '{name}=<value>' to {config.variables_local_path()}, "
+                f"or export {name}."
+            ),
+            kind="undefined-variable",
+            path=config.variables_local_path(),
+        )
+        for name in variables.undefined()
+    ]
+    declared = set(variables.declared)
+    for source, entry in entries:
+        for name in referenced_names(entry):
+            if name in declared:
+                continue
+            findings.append(
+                Finding(
+                    "error",
+                    f"{source}: entry '{entry}' references '{name}', which "
+                    f"{config.variables_path()} does not declare.",
+                    fix=(
+                        f"Add '{name}' to {config.variables_path()}, or remove "
+                        "the reference."
+                    ),
+                    kind="undeclared-variable",
+                    path=source,
+                )
+            )
+    return findings
+
+
+def _editable_target(entry: str) -> str | None:
+    """The local path an editable entry installs from, if it has one.
+
+    An entry counts as a local editable when its first whitespace-separated
+    token is ``-e`` or ``--editable`` and the following value carries no URL
+    scheme. Anything else is a remote install with no path to check.
+
+    :param entry: One expanded requirement entry.
+    :returns: The path operand, or ``None``.
+    """
+    parts = entry.split()
+    if len(parts) < 2 or parts[0] not in ("-e", "--editable"):
+        return None
+    target = parts[1]
+    if "://" in target or target.startswith("git+"):
+        return None
+    return target
+
+
+def _expanded_entry_findings(
+    config: ConfigRoot, entries: list[tuple[Path, str]], variables: Variables
+) -> list[Finding]:
+    """Report what expanding each scanned entry reveals.
+
+    Two findings come out of the one substitution. An expansion the safety
+    check refuses is an ``error``, and this is the only place doctor can say
+    so: placement is judged before substitution and the reference checks are
+    already satisfied, so nothing above sees it. An expanded editable whose
+    checkout is absent is a ``warn``.
+
+    The refusal quotes ``expand_all``'s own message with its whitespace
+    collapsed. That function formats a multi-line block because it reports
+    every refused entry at once, and a finding is one line; quoting converge's
+    words rather than paraphrasing them keeps the two diagnoses from drifting.
+
+    Missing checkouts are derived, not declared: there is no checkout registry
+    and no cloning. This reports which checkouts are missing, not where to
+    fetch them.
+
+    The whole entry is expanded rather than the bare target, because a bare
+    ``${DEV}`` is not an admitted entry on its own — only the entry it sits in
+    is. A relative path resolves against the config root, matching how uv reads
+    the generated ``requirements.in``.
+
+    :param config: The configuration root, for resolving relative paths.
+    :param entries: Scanned ``(source, entry)`` pairs.
+    :param variables: The values to expand with.
+    :returns: An ``error`` finding per refused expansion and a ``warn`` finding
+        per missing checkout, in scan order.
+    """
+    findings: list[Finding] = []
+    for source, entry in entries:
+        try:
+            expanded = expand_all([entry], variables)[0]
+        except UvStackError as error:
+            # Reachable despite the caller's guard, and by exactly one route: a
+            # declared name with a value here whose substitution would rewrite
+            # the entry. Dropping it would leave a root that 'stack converge'
+            # hard-fails on looking clean to 'stack doctor' — the one command
+            # whose job is to say otherwise before converge does.
+            findings.append(
+                Finding(
+                    "error",
+                    f"{source}: {' '.join(str(error).split())}",
+                    fix=(
+                        "Change the value so it fills a path or an option "
+                        "value rather than introducing requirements-file "
+                        "syntax of its own."
+                    ),
+                    kind="unsafe-expansion",
+                    path=source,
+                )
+            )
+            continue
+        target = _editable_target(expanded)
+        if target is None:
+            continue
+        # os.path.expanduser, not Path.expanduser: the pathlib spelling raises
+        # RuntimeError on a '~user' it cannot resolve, and RuntimeError is
+        # neither UvStackError nor OSError, so it would leave 'stack doctor' as
+        # a traceback on a profile it is supposed to diagnose. The os.path
+        # spelling returns the text unchanged, which then resolves against the
+        # root and reports as a checkout that does not exist — which is the
+        # true answer, not a consolation prize.
+        path = Path(os.path.expanduser(target))
+        if not path.is_absolute():
+            path = config.root / path
+        if path.exists():
+            continue
+        findings.append(
+            Finding(
+                "warn",
+                f"{source}: editable checkout does not exist: {path}",
+                fix=f"Clone or create {path}, or point the variable elsewhere.",
+                kind="missing-checkout",
+                path=path,
+            )
+        )
+    return findings
+
+
+def _project_python_findings(config: ConfigRoot) -> list[Finding]:
+    """Report a ``project-python.txt`` value that works here but will not travel.
+
+    Both findings are ``warn``, not ``error``: either selector is valid and
+    works perfectly on the machine that wrote it.
+
+    The guard wraps the whole body, not just the file read.
+    :func:`~uv_stack.operations.project.python_travel_problem` decides
+    ``undeclared-env`` by testing the spec against ``config.list_envs()``, and
+    the fix line joins the same listing — two directory walks that read at the
+    call site like pure computation. An unreadable ``envs/`` escapes from
+    either one.
+
+    :param config: The configuration root.
+    :returns: At most one finding.
+    """
+    path = config.project_python_path()
+    try:
+        spec = config.default_project_python()
+        if spec is None:
+            return []
+        problem = python_travel_problem(config, spec)
+        if problem == "path":
+            return [
+                Finding(
+                    "warn",
+                    f"{path} holds an interpreter path: {spec}",
+                    fix=(
+                        "Use a Python version ('3.12'), a uv implementation form "
+                        "('cpython@3.12'), or an environment name this root "
+                        "declares."
+                    ),
+                    kind="project-python-path",
+                    path=path,
+                )
+            ]
+        if problem == "undeclared-env":
+            declared = ", ".join(config.list_envs()) or "none"
+            return [
+                Finding(
+                    "warn",
+                    f"{path} names environment '{spec}', which this root does "
+                    "not declare.",
+                    fix=(
+                        f"Declared environments: {declared}. Create it with "
+                        f"'stack create env {spec} ...', or use a Python version."
+                    ),
+                    kind="project-python-undeclared-env",
+                    path=path,
+                )
+            ]
+    except (UvStackError, OSError) as error:
+        return [_unparseable(path, str(error))]
+    return []
+
+
+def _ignore_block_findings(config: ConfigRoot) -> list[Finding]:
+    """Report a missing or stale managed ignore block in a repository root.
+
+    Staleness is decided by the writer itself, under ``dry_run``, so doctor's
+    notion of stale can never drift from what ``stack config portable`` would
+    actually write.
+
+    :param config: The configuration root.
+    :returns: At most one finding; empty when the root is not a repository.
+    """
+    if not (config.root / ".git").exists():
+        return []
+    try:
+        result = write_portable_ignore(config, dry_run=True)
+    except (UvStackError, OSError) as error:
+        # The writer raises ConfigError for a non-UTF-8 or non-regular
+        # .gitignore, and OSError for one it cannot open at all. Both mean the
+        # same thing here: the block's state is unknown, so say so.
+        return [_unparseable(config.root / ".gitignore", str(error))]
+    if result.outcome == "unchanged":
+        return []
+    state = "missing" if result.outcome == "created" else "out of date"
+    return [
+        Finding(
+            "warn",
+            f"The managed .gitignore block in {config.root} is {state}.",
+            fix=(
+                "Run 'stack config portable' to write it; it prints the "
+                "untracking and commit steps to follow."
+            ),
+            kind="stale-ignore-block",
+            path=result.path,
+        )
+    ]
+
+
+def _portability_findings(config: ConfigRoot) -> list[Finding]:
+    """Every portability check, ordered so a broken root still reports usefully.
+
+    :param config: The configuration root to inspect.
+    :returns: The findings, in reporting order.
+    """
+    findings = _ignore_block_findings(config)
+    findings.extend(_project_python_findings(config))
+
+    entries, scan_findings = _scan_sources(config)
+    findings.extend(scan_findings)
+    placement = _placement_findings(entries)
+    findings.extend(placement)
+
+    try:
+        variables = config.load_variables()
+    except (UvStackError, OSError) as error:
+        findings.append(_unparseable(config.variables_path(), str(error)))
+        return findings
+
+    references = _reference_findings(config, entries, variables)
+    findings.extend(references)
+    if not placement and not references:
+        # Expanding on top of a known-bad reference set produces noise, not
+        # information: the findings above already name every cause.
+        findings.extend(_expanded_entry_findings(config, entries, variables))
+    return findings

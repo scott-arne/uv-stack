@@ -8,7 +8,8 @@ import pytest
 from tests.conftest import _deadline, _lock_held_by_another_process
 from uv_stack.config import ConfigRoot
 from uv_stack.fsutil import _LOCK_AVAILABLE
-from uv_stack.operations.doctor import diagnose, repair
+from uv_stack.operations.doctor import Finding, diagnose, repair
+from uv_stack.operations.portable import BEGIN_MARKER, END_MARKER, write_portable_ignore
 
 _IS_ROOT = getattr(os, "geteuid", lambda: -1)() == 0
 
@@ -1144,3 +1145,412 @@ def test_repair_leaves_degraded_locks_alone(config_tree: ConfigRoot, monkeypatch
     findings = diagnose(config_tree)
     actions = repair(config_tree, findings)
     assert [a for a in actions if a.finding.kind == "degraded-locks"] == []
+
+
+def _kinds(findings: list[Finding]) -> list[str]:
+    return [f.kind for f in findings]
+
+
+def test_a_declared_variable_with_no_value_is_an_error(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\n")
+    findings = diagnose(config_tree)
+    finding = next(f for f in findings if f.kind == "undefined-variable")
+    assert finding.level == "error"
+    assert "DEV" in finding.message
+    assert finding.fix is not None
+    assert "variables.local.txt" in finding.fix
+
+
+def test_an_undeclared_reference_is_an_error(config_tree: ConfigRoot):
+    config_tree.profile_path("dev").write_text("includes:\n  - -e ${NOPE}/pkg\n")
+    findings = diagnose(config_tree)
+    finding = next(f for f in findings if f.kind == "undeclared-variable")
+    assert finding.level == "error"
+    assert "NOPE" in finding.message
+    assert finding.path == config_tree.profile_path("dev")
+
+
+def test_an_undeclared_reference_in_a_bundle_is_found(config_tree: ConfigRoot):
+    # The scan set is three kinds of file, not one. Each gets its own test so
+    # it cannot silently narrow back to profiles.
+    config_tree.bundle_path("qsar").write_text("includes:\n  - -e ${NOPE}/pkg\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "undeclared-variable")
+    assert finding.path == config_tree.bundle_path("qsar")
+
+
+def test_an_undeclared_reference_in_a_stack_txt_is_found(config_tree: ConfigRoot):
+    config_tree.env_stack_path("main").write_text("@standard\n-e ${NOPE}/pkg\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "undeclared-variable")
+    assert finding.path == config_tree.env_stack_path("main")
+
+
+@pytest.mark.parametrize("entry", ["-e ${UV-ROOT}/pkg", "-e ${1ROOT}/pkg", "-e ${ROOT"])
+def test_a_malformed_reference_is_an_error(config_tree: ConfigRoot, entry):
+    # A hyphen, a leading digit, and an unterminated opener: three ways to
+    # write something that looks like a reference and is not one.
+    config_tree.profile_path("dev").write_text(f"includes:\n  - {entry}\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "malformed-reference")
+    assert finding.level == "error"
+    assert "${" in finding.message
+
+
+def test_a_misplaced_reference_is_an_error(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("PKG\n")
+    config_tree.variables_local_path().write_text("PKG=widget\n")
+    config_tree.profile_path("dev").write_text("includes:\n  - ${PKG}>=2\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "misplaced-reference")
+    assert finding.level == "error"
+    assert "condition" in finding.message
+
+
+def test_a_multiline_entry_is_an_error(config_tree: ConfigRoot):
+    config_tree.profile_path("dev").write_text('includes:\n  - "numpy\\nrich"\n')
+    finding = next(f for f in diagnose(config_tree) if f.kind == "multiline-entry")
+    assert finding.level == "error"
+
+
+def test_a_continuation_entry_is_an_error(config_tree: ConfigRoot):
+    # placement_problem returns a fourth refusal kind that the other placement
+    # tests never produce. The fix table is indexed, not queried, so a missing
+    # row would take 'stack doctor' down with a KeyError on the one root it
+    # exists to diagnose.
+    config_tree.profile_path("dev").write_text("includes:\n  - -e lib/widget\\\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "continuation-entry")
+    assert finding.level == "error"
+    assert finding.fix is not None
+
+
+def test_references_in_bundles_and_stack_txt_are_scanned(config_tree: ConfigRoot):
+    config_tree.bundle_path("b").write_text("includes:\n  - -e ${B}/pkg\n")
+    config_tree.env_stack_path("main").write_text("@standard\n-e ${E}/pkg\n")
+    kinds = diagnose(config_tree)
+    sources = {f.path for f in kinds if f.kind == "undeclared-variable"}
+    assert config_tree.bundle_path("b") in sources
+    assert config_tree.env_stack_path("main") in sources
+
+
+def test_an_unparseable_source_is_reported_not_raised(config_tree: ConfigRoot):
+    config_tree.profile_path("broken").write_text("includes: [unclosed\n")
+    findings = diagnose(config_tree)
+    finding = next(f for f in findings if f.kind == "unparseable-source")
+    assert finding.level == "warn"
+    assert finding.path == config_tree.profile_path("broken")
+
+
+def test_an_unparseable_variables_file_is_reported_not_raised(
+    config_tree: ConfigRoot,
+):
+    config_tree.variables_path().write_bytes(b"\xff\xfe not utf-8\n")
+    findings = diagnose(config_tree)
+    assert any(
+        f.kind == "unparseable-source" and f.path == config_tree.variables_path()
+        for f in findings
+    )
+
+
+def test_a_missing_editable_checkout_is_a_warning(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text(f"DEV={tmp_path / 'gone'}\n")
+    config_tree.profile_path("dev").write_text("includes:\n  - -e ${DEV}/widget\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
+    assert finding.level == "warn"
+    assert str(tmp_path / "gone" / "widget") in finding.message
+
+
+def test_a_present_checkout_and_a_remote_editable_are_not_flagged(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    (tmp_path / "co" / "widget").mkdir(parents=True)
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text(f"DEV={tmp_path / 'co'}\n")
+    config_tree.profile_path("dev").write_text(
+        "includes:\n  - -e ${DEV}/widget\n  - -e git+https://example.invalid/x#egg=x\n"
+    )
+    assert not [f for f in diagnose(config_tree) if f.kind == "missing-checkout"]
+
+
+def test_the_long_editable_spelling_is_recognized(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text(f"DEV={tmp_path / 'gone'}\n")
+    config_tree.profile_path("dev").write_text(
+        "includes:\n  - --editable ${DEV}/widget\n"
+    )
+    assert "missing-checkout" in _kinds(diagnose(config_tree))
+
+
+def test_a_plain_url_editable_is_not_a_checkout(config_tree: ConfigRoot):
+    config_tree.profile_path("dev").write_text(
+        "includes:\n  - -e https://example.invalid/x.tar.gz\n"
+    )
+    assert "missing-checkout" not in _kinds(diagnose(config_tree))
+
+
+def test_a_relative_editable_resolves_against_the_config_root(
+    config_tree: ConfigRoot,
+):
+    # uv reads the generated requirements.in from the config root, so doctor
+    # must resolve a relative path the same way rather than against the cwd.
+    config_tree.profile_path("dev").write_text("includes:\n  - -e lib/widget\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
+    assert str(config_tree.root / "lib" / "widget") in finding.message
+    (config_tree.root / "lib" / "widget").mkdir(parents=True)
+    assert "missing-checkout" not in _kinds(diagnose(config_tree))
+
+
+def test_the_checkout_check_is_skipped_when_a_variable_is_undefined(
+    config_tree: ConfigRoot,
+):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.profile_path("dev").write_text("includes:\n  - -e ${DEV}/widget\n")
+    kinds = _kinds(diagnose(config_tree))
+    assert "undefined-variable" in kinds
+    assert "missing-checkout" not in kinds
+
+
+def test_the_checkout_check_is_skipped_when_a_reference_is_undeclared(
+    config_tree: ConfigRoot,
+):
+    config_tree.profile_path("dev").write_text("includes:\n  - -e ${NOPE}/widget\n")
+    kinds = _kinds(diagnose(config_tree))
+    assert "undeclared-variable" in kinds
+    assert "missing-checkout" not in kinds
+
+
+def test_a_misplaced_reference_also_suppresses_the_checkout_check(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    # Placement is judged per entry, but the suppression is per root: with any
+    # placement problem outstanding, expansion is not trustworthy enough to
+    # report a *second* diagnosis derived from it.
+    config_tree.variables_path().write_text("DEV\nPKG\n")
+    config_tree.variables_local_path().write_text(
+        f"DEV={tmp_path / 'gone'}\nPKG=widget\n"
+    )
+    config_tree.profile_path("dev").write_text(
+        "includes:\n  - ${PKG}>=2\n  - -e ${DEV}/widget\n"
+    )
+    kinds = _kinds(diagnose(config_tree))
+    assert "misplaced-reference" in kinds
+    assert "missing-checkout" not in kinds
+
+
+def test_an_unsafe_expansion_is_reported_as_an_error(config_tree: ConfigRoot):
+    # The one expansion failure the suppression guard does not cover: DEV is
+    # declared and has a value here, and the entry's placement is admitted,
+    # because the defect only exists after substitution. The expansion check is
+    # therefore the first thing to meet it -- and the last. It must neither
+    # carry the error out of 'stack doctor' nor drop it: no other check can see
+    # that this root is one 'stack converge' will refuse.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=-r\n")
+    config_tree.profile_path("dev").write_text("includes:\n  - -e ${DEV}/widget\n")
+    findings = diagnose(config_tree)
+    assert "missing-checkout" not in _kinds(findings)
+    finding = next(f for f in findings if f.kind == "unsafe-expansion")
+    assert finding.level == "error"
+    assert finding.path == config_tree.profile_path("dev")
+    # The source, the entry, and the explanation -- converge's own words.
+    assert "-e ${DEV}/widget" in finding.message
+    assert "-r/widget" in finding.message
+    assert finding.fix is not None
+
+
+def test_an_unresolvable_tilde_user_is_reported_not_raised(config_tree: ConfigRoot):
+    # Path.expanduser raises RuntimeError on a '~user' with no home directory,
+    # and RuntimeError is neither UvStackError nor OSError -- the two families
+    # the CLI turns into messages -- so the pathlib spelling tracebacks here.
+    # No variable is involved: this entry never reaches expand_all's guard, so
+    # only the checkout check's own spelling stands between it and a crash.
+    config_tree.profile_path("dev").write_text(
+        "includes:\n  - -e ~__no_such_user__/widget\n"
+    )
+    finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
+    assert "~__no_such_user__/widget" in finding.message
+
+
+def test_a_project_python_path_is_a_warning(config_tree: ConfigRoot):
+    config_tree.project_python_path().write_text("/opt/envs/x/bin/python\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "project-python-path")
+    assert finding.level == "warn"
+
+
+def test_a_project_python_naming_an_undeclared_env_is_a_warning(
+    config_tree: ConfigRoot,
+):
+    config_tree.project_python_path().write_text("scratch\n")
+    finding = next(
+        f for f in diagnose(config_tree) if f.kind == "project-python-undeclared-env"
+    )
+    assert finding.level == "warn"
+    assert finding.fix is not None
+    assert "main" in finding.fix
+
+
+def test_portable_project_python_values_are_not_flagged(config_tree: ConfigRoot):
+    for value in ("3.12", "cpython@3.12", "pypy-3.10", "main"):
+        config_tree.project_python_path().write_text(value + "\n")
+        assert not [
+            f for f in diagnose(config_tree) if f.kind.startswith("project-python-")
+        ]
+
+
+def test_a_missing_ignore_block_in_a_repository_is_a_warning(
+    config_tree: ConfigRoot,
+):
+    (config_tree.root / ".git").mkdir()
+    finding = next(f for f in diagnose(config_tree) if f.kind == "stale-ignore-block")
+    assert finding.level == "warn"
+    assert "missing" in finding.message
+    assert finding.fix is not None
+    assert "stack config portable" in finding.fix
+
+
+def test_a_stale_ignore_block_says_out_of_date(config_tree: ConfigRoot):
+    # A block that exists but no longer matches what the writer would produce
+    # is a different state from one that is absent, and it is worded
+    # differently. Writing the markers by hand keeps the test independent of
+    # which patterns the block currently holds.
+    (config_tree.root / ".git").mkdir()
+    (config_tree.root / ".gitignore").write_text(
+        f"{BEGIN_MARKER}\nstale-entry\n{END_MARKER}\n"
+    )
+    finding = next(f for f in diagnose(config_tree) if f.kind == "stale-ignore-block")
+    assert "out of date" in finding.message
+
+
+def test_a_current_ignore_block_is_not_flagged(config_tree: ConfigRoot):
+    (config_tree.root / ".git").mkdir()
+    write_portable_ignore(config_tree)
+    assert not [f for f in diagnose(config_tree) if f.kind == "stale-ignore-block"]
+
+
+def test_a_non_repository_root_is_never_flagged(config_tree: ConfigRoot):
+    assert not [f for f in diagnose(config_tree) if f.kind == "stale-ignore-block"]
+
+
+# --- OSError containment -----------------------------------------------------
+# A file that exists but cannot be opened raises OSError, not UvStackError.
+# Each read the portability scan performs gets its own proof that the failure
+# becomes a finding rather than a traceback out of 'stack doctor'.
+
+
+def _denied(*args, **kwargs):
+    """Stand in for any read that fails at the filesystem layer.
+
+    :raises PermissionError: Always.
+    """
+    raise PermissionError(13, "Permission denied")
+
+
+def test_an_unopenable_profile_is_reported_not_raised(
+    config_tree: ConfigRoot, monkeypatch
+):
+    monkeypatch.setattr(ConfigRoot, "load_profile", _denied)
+    findings = diagnose(config_tree)
+    assert any(
+        f.kind == "unparseable-source" and f.path == config_tree.profile_path("ds")
+        for f in findings
+    )
+
+
+@pytest.mark.parametrize(
+    ("listing", "directory"),
+    [
+        ("list_profiles", "profiles_dir"),
+        ("list_bundles", "bundles_dir"),
+        ("list_envs", "envs_dir"),
+    ],
+)
+def test_an_unreadable_source_directory_is_reported_not_raised(
+    config_tree: ConfigRoot, monkeypatch, listing: str, directory: str
+):
+    # list_envs walks the directory with iterdir, which raises outright; the
+    # other two use glob, which swallows a permission error today but is not
+    # contracted to. All three are guarded, so all three are proved.
+    monkeypatch.setattr(ConfigRoot, listing, _denied)
+    findings = diagnose(config_tree)
+    assert any(
+        f.kind == "unparseable-source" and f.path == getattr(config_tree, directory)
+        for f in findings
+    )
+
+
+def test_an_unopenable_variables_file_is_reported_not_raised(
+    config_tree: ConfigRoot, monkeypatch
+):
+    monkeypatch.setattr(ConfigRoot, "load_variables", _denied)
+    findings = diagnose(config_tree)
+    assert any(
+        f.kind == "unparseable-source" and f.path == config_tree.variables_path()
+        for f in findings
+    )
+
+
+def test_an_unopenable_project_python_file_is_reported_not_raised(
+    config_tree: ConfigRoot, monkeypatch
+):
+    monkeypatch.setattr(ConfigRoot, "default_project_python", _denied)
+    findings = diagnose(config_tree)
+    assert any(
+        f.kind == "unparseable-source" and f.path == config_tree.project_python_path()
+        for f in findings
+    )
+
+
+def test_an_unopenable_gitignore_is_reported_not_raised(
+    config_tree: ConfigRoot, monkeypatch
+):
+    (config_tree.root / ".git").mkdir()
+    monkeypatch.setattr("uv_stack.operations.doctor.write_portable_ignore", _denied)
+    findings = diagnose(config_tree)
+    assert any(
+        f.kind == "unparseable-source" and f.path == config_tree.root / ".gitignore"
+        for f in findings
+    )
+
+
+@pytest.mark.parametrize("attribute", ["root", "envs_dir"])
+def test_an_unwalkable_directory_is_reported_not_raised(
+    config_tree: ConfigRoot, monkeypatch, attribute: str
+):
+    # diagnose walks the config root and envs/ with iterdir directly, and both
+    # walks run before the portability scan. Patching ConfigRoot.list_envs
+    # cannot see either one -- neither goes through it -- which is why the two
+    # need their own proof. Path.iterdir is patched selectively so only the
+    # target directory fails; a blanket failure would prove nothing about
+    # which walk is guarded.
+    target = getattr(config_tree, attribute)
+    real_iterdir = Path.iterdir
+
+    def _selective(self: Path):
+        if self == target:
+            raise PermissionError(13, "Permission denied")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", _selective)
+    findings = diagnose(config_tree)
+    # The envs_dir case reports twice -- once from diagnose's own walk and once
+    # from list_envs inside the source scan. Both are correct, so this asserts
+    # that one exists rather than counting them.
+    assert any(f.kind == "unparseable-source" and f.path == target for f in findings)
+
+
+def test_an_unreadable_envs_directory_does_not_escape_the_project_check(
+    config_tree: ConfigRoot, monkeypatch
+):
+    # 'scratch' is not a declared environment, so python_travel_problem has to
+    # consult list_envs to say so, and the fix line joins the same listing.
+    # Both sit past the file read, so a guard around default_project_python()
+    # alone lets a PermissionError out of 'stack doctor'.
+    config_tree.project_python_path().write_text("scratch\n")
+    monkeypatch.setattr(ConfigRoot, "list_envs", _denied)
+    findings = diagnose(config_tree)
+    assert any(
+        f.kind == "unparseable-source"
+        and f.path == config_tree.project_python_path()
+        for f in findings
+    )
