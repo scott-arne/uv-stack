@@ -3456,13 +3456,15 @@ _TRAVEL_MATRIX = [
 def _travel_warnings(warnings: list[str]) -> list[str]:
     """The travel advisories in a warning list.
 
-    Both advisories say 'in pyproject.toml:' and no other warning either
-    operation emits mentions the file, so that phrase is the discriminator.
+    Both advisories open with 'Recording interpreter ', and nothing else
+    either operation emits does. Naming pyproject.toml would be the obvious
+    discriminator and is the wrong one: SKIPPED_REMOVAL_NOTICE mentions the
+    file too, and refresh puts both kinds in one list on its error path.
 
     :param warnings: Warnings returned by init or refresh.
     :returns: Only the travel advisories, in order.
     """
-    return [w for w in warnings if "pyproject.toml" in w]
+    return [w for w in warnings if w.startswith("Recording interpreter ")]
 
 
 @pytest.mark.parametrize(("spec", "expected"), _TRAVEL_MATRIX)
