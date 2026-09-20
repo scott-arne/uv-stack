@@ -3485,3 +3485,32 @@ def test_refresh_warns_for_the_recorded_spec_when_no_flag_is_given(
         RefreshOptions(), cwd=project_dir,
     )
     assert len(_travel_warnings(result.warnings)) == 1
+
+
+def test_refresh_dry_run_still_runs_the_placement_check(tmp_path: Path):
+    """A dry run exists to find out, so the refusal comes before the plan.
+
+    The check sits outside refresh's ``dry_run`` guard, which is the same
+    placement that keeps it ahead of the pending write on the real path.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    root = tmp_path / "root-dry"
+    (root / "profiles").mkdir(parents=True)
+    (root / "bundles").mkdir(parents=True)
+    (root / "envs").mkdir(parents=True)
+    # A trailing backslash continues onto the next line, so this entry would
+    # swallow whichever requirement the render writes after it.
+    (root / "profiles" / "dev.yaml").write_text(
+        "includes:\n  - rich\n  - -e /checkouts/widget\\\n"
+    )
+    config = ConfigRoot(root)
+    project_dir = _portable_tracked_project(tmp_path, "proj-dry")
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_text()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ConfigError) as excinfo:
+        refresh_project(config, runner, RefreshOptions(dry_run=True), cwd=project_dir)
+    assert "backslash" in str(excinfo.value)
+    assert runner.commands == []
+    assert pyproject.read_text() == before
