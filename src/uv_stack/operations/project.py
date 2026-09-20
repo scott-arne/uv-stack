@@ -464,8 +464,8 @@ class TravelAdvisory:
 def _travel_advisory(config: ConfigRoot, spec: str | None) -> TravelAdvisory | None:
     """Classify ``spec``'s travel problem and render both tenses of it.
 
-    Called ONCE per operation, above every write, every file created and every
-    command run, because :func:`python_travel_problem` consults
+    Called ONCE per operation, above every write and every file created,
+    because :func:`python_travel_problem` consults
     :meth:`~uv_stack.config.ConfigRoot.list_envs` and an unreadable envs
     directory makes that raise. Classifying at each delivery point instead put
     that OSError on the success returns, where it reported a completed run as
@@ -477,7 +477,8 @@ def _travel_advisory(config: ConfigRoot, spec: str | None) -> TravelAdvisory | N
     :returns: The advisory in both tenses, or ``None`` when the spec travels.
     :raises OSError: If the declared environments cannot be listed. Left to
         propagate here, above the scaffolding, where the run has changed
-        nothing yet.
+        nothing yet. ``init_project`` calls this below the interpreter probe,
+        so one read-only micromamba command can precede it.
     """
     if spec is None:
         return None
@@ -742,16 +743,20 @@ def refresh_project(
         pending=None,
     )
 
-    # Above the pre-flight so the dry run and the real run share one
-    # classification, and so no delivery point below can raise: the classifier
-    # reads the config root, and an unreadable envs directory surfacing from
-    # the success return would report a completed refresh as failed, while the
-    # same failure inside the handler would replace the error being reported.
-    # A dry run that fails here is correct — a dry run exists to find out.
-    travel = _travel_advisory(config, spec_flag)
-
     if not options.dry_run:
         validate_tracking_write(pyproject, pending_tracking)
+
+    # Below the pre-flight and above the dry-run return, which is the only
+    # placement that satisfies both constraints. Above the return, so the dry
+    # run and the real run share one classification and no delivery point below
+    # can raise -- an unreadable envs directory surfacing from the success
+    # return would report a completed refresh as failed, and the same failure
+    # inside the handler would replace the error being reported. Below the
+    # pre-flight, so that when the ledger is also unwritable the user hears
+    # about the ledger, which is their actual blocker; init_project orders the
+    # two the same way. A dry run that fails here is correct -- a dry run
+    # exists to find out.
+    travel = _travel_advisory(config, spec_flag)
 
     if options.dry_run:
         selected = select_project_python(config, spec_flag)

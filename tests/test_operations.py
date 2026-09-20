@@ -3999,6 +3999,42 @@ def test_refresh_env_listing_failure_aborts_before_anything_is_mutated(
     assert runner.commands == []
 
 
+def test_refresh_reports_the_unwritable_ledger_ahead_of_the_unreadable_envs(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """When both pre-flights would fail, the ledger's refusal is the useful one.
+
+    The travel classifier reads the config root and the pre-flight reads the
+    project, so a run can be blocked by both at once. The user's actual blocker
+    is the unwritable ledger -- an unreadable envs directory only costs them an
+    advisory -- so the pre-flight has to come first. This pins the ordering that
+    keeps refresh agreeing with init, which has always reported the ConfigError
+    here; nothing else does, and the classification has already drifted above
+    the pre-flight once.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    _break_env_listing(monkeypatch)
+    project_dir = tmp_path / "proj_both_preflights_fail"
+    project_dir.mkdir()
+    # A lone \r mid-table: read_tracking uses universal newlines and accepts
+    # it, while the pre-flight's _read_exact uses newline="" and refuses.
+    pyproject = project_dir / "pyproject.toml"
+    pyproject.write_bytes(
+        b'[project]\nname = "demo"\ndependencies = []\n\n[tool.uv-stack]\n'
+        b'version = 1\nstack = ["ds"]\rapplied = []\n'
+    )
+    before = pyproject.read_bytes()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ConfigError):
+        refresh_project(
+            config_tree, runner, RefreshOptions(python="scratch"), cwd=project_dir,
+        )
+    assert pyproject.read_bytes() == before
+    assert runner.commands == []
+
+
 def test_init_consults_the_declared_envs_once_and_before_it_starts(
     config_tree: ConfigRoot, tmp_path: Path, monkeypatch
 ):
