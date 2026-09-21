@@ -50,5 +50,12 @@ def config_portable(config_root: ConfigRoot, dry_run: bool) -> None:
         echo(f"  {line}")
     echo("")
     echo("Next:")
+    if dry_run:
+        # The steps are printed under --dry-run because seeing the whole
+        # workflow is the point of asking. They are not pasteable yet: the
+        # untracking step would run, the add would fail on an ignore file that
+        # was never written, and the bootstrap sequence's 'add .' would stage
+        # the generated files the unwritten block exists to exclude.
+        echo("  Re-run without --dry-run first; these assume the block is written.")
     for line in next_steps(config_root, result):
         echo(f"  {line}")

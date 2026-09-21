@@ -5026,6 +5026,21 @@ def test_config_portable_dry_run_writes_nothing(config_tree: ConfigRoot):
     assert result.exit_code == 0, result.output
     assert not (config_tree.root / ".gitignore").exists()
     assert "dry run" in result.output
+    # The steps are still shown -- seeing the workflow is why one asks -- but
+    # pasting them would run the untracking step against a block that was
+    # never written, so the caution comes before them.
+    assert "Re-run without --dry-run first" in result.output
+    assert result.output.index("Re-run without") < result.output.index("git -C")
+
+
+def test_config_portable_does_not_caution_when_it_wrote_the_block(
+    config_tree: ConfigRoot,
+):
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Re-run without --dry-run" not in result.output
 
 
 def test_config_portable_reports_a_malformed_block(config_tree: ConfigRoot):
