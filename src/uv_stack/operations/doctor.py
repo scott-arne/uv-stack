@@ -1046,8 +1046,9 @@ def _editable_target(entry: str) -> str | None:
     """The local path an editable entry installs from, if it has one.
 
     An entry counts as a local editable when its first whitespace-separated
-    token is ``-e`` or ``--editable`` and the following value carries no URL
-    scheme. Anything else is a remote install with no path to check.
+    token is ``-e`` or ``--editable``, alone or with the operand attached by
+    ``=``, and the value carries no URL scheme. Anything else is a remote
+    install with no path to check.
 
     A trailing PEP 508 extras suffix is dropped from the operand.
 
@@ -1055,9 +1056,22 @@ def _editable_target(entry: str) -> str | None:
     :returns: The path operand, or ``None``.
     """
     parts = entry.split()
-    if len(parts) < 2 or parts[0] not in ("-e", "--editable"):
+    if not parts:
         return None
-    target = parts[1]
+    # uv is what consumes these entries, so its parser sets the boundary: it
+    # accepts '-e=PATH' and '--editable=PATH' as readily as the separated
+    # forms, but refuses '-ePATH' with "Expected '=' or whitespace". Reading a
+    # path out of the glued form would report a missing checkout for an entry
+    # that cannot install for an entirely different reason.
+    flag, attached, operand = parts[0].partition("=")
+    if flag not in ("-e", "--editable"):
+        return None
+    if attached:
+        target = operand
+    elif len(parts) >= 2:
+        target = parts[1]
+    else:
+        return None
     if "://" in target or target.startswith("git+"):
         return None
     # pip reads '-e ./pkg[dev]' as the path './pkg' carrying extras, so probing

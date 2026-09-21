@@ -1414,6 +1414,46 @@ def test_the_long_editable_spelling_is_recognized(
     assert "missing-checkout" in _kinds(diagnose(config_tree))
 
 
+@pytest.mark.parametrize("flag", ["-e", "--editable", "-e=", "--editable="])
+def test_every_editable_spelling_uv_accepts_names_the_same_target(
+    config_tree: ConfigRoot, tmp_path: Path, flag: str
+):
+    # uv takes the operand attached with '=' as readily as separated, and
+    # these entries go straight to 'uv pip compile'. A spelling doctor does
+    # not recognise is a checkout it quietly stops checking.
+    separator = "" if flag.endswith("=") else " "
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text(f"DEV={tmp_path / 'gone'}\n")
+    config_tree.profile_path("dev").write_text(
+        f"includes:\n  - {flag}{separator}${{DEV}}/widget\n"
+    )
+    finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
+    assert str(tmp_path / "gone" / "widget") in finding.message
+
+
+@pytest.mark.parametrize("flag", ["-e=", "--editable="])
+def test_the_attached_spellings_keep_the_url_and_extras_handling(
+    config_tree: ConfigRoot, tmp_path: Path, flag: str
+):
+    checkout = tmp_path / "widget"
+    checkout.mkdir()
+    config_tree.profile_path("dev").write_text(
+        f"includes:\n  - {flag}git+https://example.invalid/x#egg=x\n"
+        f"  - {flag}{checkout}[dev,test]\n"
+    )
+    assert "missing-checkout" not in _kinds(diagnose(config_tree))
+
+
+def test_an_editable_operand_glued_to_the_flag_is_not_a_checkout(
+    config_tree: ConfigRoot,
+):
+    # uv refuses '-e./widget' at the parser ("Expected '=' or whitespace,
+    # found Some('.')"), so reading a path out of it would report a missing
+    # checkout for an entry that cannot install for an unrelated reason.
+    config_tree.profile_path("dev").write_text("includes:\n  - -e./widget\n")
+    assert "missing-checkout" not in _kinds(diagnose(config_tree))
+
+
 def test_a_plain_url_editable_is_not_a_checkout(config_tree: ConfigRoot):
     config_tree.profile_path("dev").write_text(
         "includes:\n  - -e https://example.invalid/x.tar.gz\n"
