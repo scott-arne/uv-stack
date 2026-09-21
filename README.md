@@ -487,7 +487,7 @@ file formats, environments in the wrong place) and its portability: declared
 variables with no value on this machine, references that are undeclared,
 malformed, or in an entry that may not hold one, editable checkouts that are
 absent, a `project-python.txt` value that will not travel, and a missing or
-stale managed `.gitignore` block in a root that is a git repository.
+stale managed `.gitignore` block in a root that sits inside a git repository.
 
 ### Watching for drift
 
@@ -624,7 +624,10 @@ The command prints the git commands to follow, and for a root that is already
 a repository those begin with an untracking step: files that are now ignored
 stay tracked until `git rm --cached` removes them from the index. That applies
 to any root that is a repository, including one whose `.gitignore` this command
-is creating for the first time.
+is creating for the first time. A root that is a *subdirectory* of a repository
+— `python-envs/` inside a dotfiles repo — counts as one: the commands are
+addressed to the enclosing repository's top level, with each ignored pattern
+written relative to it.
 
 uv-stack never invokes git. It writes the ignore file and prints the commands;
 you run them.
@@ -713,8 +716,13 @@ Closing that gap would mean rewriting uv's output behind its back.
 - **A value in `variables.local.txt` cannot contain `#`.** The file grammar
   strips comments, so everything from the first `#` is discarded. An exported
   environment variable has no such restriction.
-- **A value is substituted literally and never re-expanded.** A `${OTHER}`
-  inside a value stays the literal text `${OTHER}`; it is not a reference.
+- **A value holding `${...}` is refused, not passed through.** Substitution is
+  single-pass, so a `${OTHER}` inside a value is never itself expanded — and an
+  entry that still holds `${` afterwards is rejected rather than written out,
+  because uv expands environment variables in a requirements file and would
+  resolve the leftover reference behind uv-stack's back. `DEV=/a/${OTHER}/b`
+  turns every entry that references `DEV` into an error: `stack doctor` reports
+  it and `stack converge` refuses.
 - **No value may contain whitespace.** That rules out a path containing a
   space, and it is what keeps expansion from splitting an already-validated
   entry into a new token. Use a symlink or move the checkout.
