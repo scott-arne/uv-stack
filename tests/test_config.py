@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -385,6 +386,46 @@ def test_an_environment_variable_for_an_undeclared_name_is_ignored(
 ):
     monkeypatch.setenv("NOPE", "/x")
     assert dict(config_tree.load_variables().values) == {}
+
+
+_NON_REGULAR_SHAPES = [
+    "directory",
+    "dangling-symlink",
+    pytest.param(
+        "fifo",
+        marks=pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo"),
+    ),
+]
+
+
+def _make_non_regular(path: Path, shape: str) -> None:
+    """Create ``path`` as something that is present but not a regular file."""
+    if shape == "directory":
+        path.mkdir()
+    elif shape == "dangling-symlink":
+        path.symlink_to(path.parent / "nowhere")
+    else:
+        os.mkfifo(path)
+
+
+@pytest.mark.parametrize("shape", _NON_REGULAR_SHAPES)
+def test_a_non_regular_variables_file_is_refused(config_tree: ConfigRoot, shape: str):
+    # is_file() cannot tell absent from broken, so without the guard a
+    # directory named variables.txt reads as a root that declares nothing and
+    # every command runs on with no variables at all.
+    _make_non_regular(config_tree.variables_path(), shape)
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "variables.txt" in excinfo.value.message
+
+
+@pytest.mark.parametrize("shape", _NON_REGULAR_SHAPES)
+def test_a_non_regular_local_variables_file_is_refused(config_tree: ConfigRoot, shape: str):
+    config_tree.variables_path().write_text("DEV\n")
+    _make_non_regular(config_tree.variables_local_path(), shape)
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "variables.local.txt" in excinfo.value.message
 
 
 def test_a_malformed_declaration_names_the_file_and_line(config_tree: ConfigRoot):

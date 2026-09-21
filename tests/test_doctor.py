@@ -1348,6 +1348,37 @@ def test_an_unparseable_variables_file_is_reported_not_raised(
     )
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "directory",
+        "dangling-symlink",
+        pytest.param(
+            "fifo",
+            marks=pytest.mark.skipif(
+                not hasattr(os, "mkfifo"), reason="platform lacks mkfifo"
+            ),
+        ),
+    ],
+)
+def test_a_non_regular_variables_file_is_reported_not_raised(
+    config_tree: ConfigRoot, shape: str
+):
+    # The loader used to read every one of these shapes as an empty file, so
+    # doctor reported a clean root for a tree where no variable resolves.
+    path = config_tree.variables_path()
+    if shape == "directory":
+        path.mkdir()
+    elif shape == "dangling-symlink":
+        path.symlink_to(path.parent / "nowhere")
+    else:
+        os.mkfifo(path)
+    findings = diagnose(config_tree)
+    assert [f.kind for f in findings] == ["unparseable-source"]
+    assert findings[0].path == path
+    assert str(path) in findings[0].message
+
+
 def test_a_missing_editable_checkout_is_a_warning(
     config_tree: ConfigRoot, tmp_path: Path
 ):

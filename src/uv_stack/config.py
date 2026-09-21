@@ -36,8 +36,14 @@ def _numbered_clean_lines(path: Path) -> list[tuple[int, str]]:
 
     :param path: File to read; a missing file yields no lines.
     :returns: ``(line number, cleaned text)`` pairs in file order.
-    :raises ConfigError: When the file is not valid UTF-8.
+    :raises ConfigError: When the path is not a regular file, or the file is
+        not valid UTF-8.
     """
+    # Ahead of is_file(), per require_regular_file's own contract: is_file()
+    # answers False for a directory named variables.txt just as it does for an
+    # absent one, and "no variables declared" is not a safe reading of "I
+    # could not read your declarations".
+    require_regular_file(path)
     if not path.is_file():
         return []
     numbered = enumerate(read_text_utf8(path).splitlines(), start=1)
