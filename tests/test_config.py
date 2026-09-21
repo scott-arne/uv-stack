@@ -522,6 +522,21 @@ def test_whitespace_is_refused_after_tilde_expansion(
     assert "whitespace" in excinfo.value.message
 
 
+def test_a_value_whose_expansion_fails_is_refused(config_tree: ConfigRoot):
+    # os.path.expanduser is not total: the '~user' form goes to the password
+    # database, and a NUL in the name raises ValueError. A ValueError is
+    # neither a UvStackError nor an OSError, so unconverted this one leaves
+    # 'stack doctor', 'stack converge', and 'stack status' printing a
+    # traceback for a file the user can fix in one edit.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=~a\x00b/x\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "'DEV'" in excinfo.value.message
+    assert "cannot be expanded" in excinfo.value.message
+    assert "variables.local.txt" in excinfo.value.message
+
+
 def test_an_environment_value_containing_whitespace_is_refused(
     config_tree: ConfigRoot, monkeypatch
 ):

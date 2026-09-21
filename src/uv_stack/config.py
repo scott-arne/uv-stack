@@ -92,7 +92,8 @@ def _normalize_value(name: str, raw: str, where: str) -> str:
     :param raw: The value as written.
     :param where: Human-readable origin, for the message.
     :returns: The normalized value.
-    :raises ConfigError: When the value is empty or contains whitespace.
+    :raises ConfigError: When the value is empty, cannot be expanded, or
+        contains whitespace.
     """
     value = raw.strip()
     if not value:
@@ -100,7 +101,26 @@ def _normalize_value(name: str, raw: str, where: str) -> str:
             f"Variable {name!r} has an empty value ({where}).",
             hint="Give it a value, or delete the assignment.",
         )
-    value = os.path.expanduser(value)
+    try:
+        value = os.path.expanduser(value)
+    except ValueError as error:
+        # expanduser is not total: the '~user' form looks the name up in the
+        # password database, and a NUL in it raises ValueError. That is
+        # neither a UvStackError nor an OSError, so unconverted it reaches the
+        # CLI edge as a traceback — out of doctor, converge, and status alike,
+        # for a file the user can fix in one edit. Converting it here is the
+        # trade read_text_utf8 makes for UnicodeDecodeError, and for its
+        # reason too: this frame is the last one that still knows which
+        # variable the text belongs to and where it was read from.
+        raise ConfigError(
+            f"Variable {name!r} has a value that cannot be expanded "
+            f"({where}): {value!r}",
+            hint=(
+                "A value starting with '~' is expanded before use, and this "
+                "one holds a character that expansion rejects — an embedded "
+                "NUL. Remove it, or write the path out in full."
+            ),
+        ) from error
     if any(character.isspace() for character in value):
         raise ConfigError(
             f"Variable {name!r} has a value containing whitespace ({where}): "
