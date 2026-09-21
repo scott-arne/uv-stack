@@ -1391,6 +1391,20 @@ def test_an_unresolvable_tilde_user_is_reported_not_raised(config_tree: ConfigRo
     assert "~__no_such_user__/widget" in finding.message
 
 
+def test_a_nul_in_a_tilde_user_entry_is_reported_not_raised(config_tree: ConfigRoot):
+    # posixpath resolves the '~user' form through pwd.getpwnam and catches only
+    # KeyError, so an embedded NUL comes back as ValueError -- neither
+    # UvStackError nor OSError, which means nothing between here and the CLI
+    # catches it. Unlike the permission cases around it, this one raises on
+    # every interpreter this project supports, so it is the one test in this
+    # area that cannot quietly stop discriminating.
+    config_tree.env_stack_path("main").write_text("-e ~ab\0cd/widget\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
+    # The text is kept as written and resolved against the root, which is the
+    # same answer the unresolvable-'~user' case gets one test above.
+    assert finding.path == config_tree.root / "~ab\0cd/widget"
+
+
 @pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
 def test_an_unsearchable_checkout_parent_is_reported_not_raised(
     config_tree: ConfigRoot, tmp_path: Path

@@ -1115,11 +1115,19 @@ def _expanded_entry_findings(
         # os.path.expanduser, not Path.expanduser: the pathlib spelling raises
         # RuntimeError on a '~user' it cannot resolve, and RuntimeError is
         # neither UvStackError nor OSError, so it would leave 'stack doctor' as
-        # a traceback on a profile it is supposed to diagnose. The os.path
-        # spelling returns the text unchanged, which then resolves against the
-        # root and reports as a checkout that does not exist — which is the
-        # true answer, not a consolation prize.
-        path = Path(os.path.expanduser(target))
+        # a traceback on a profile it is supposed to diagnose.
+        #
+        # The os.path spelling is not total either. It resolves the '~user'
+        # form through pwd.getpwnam, which rejects an embedded NUL with
+        # ValueError -- again neither family the CLI turns into a message. Both
+        # failures want the same answer, so the except supplies by hand what
+        # expanduser supplies for an unresolvable name: the text unchanged,
+        # resolved against the root and reported as a checkout that does not
+        # exist — which is the true answer, not a consolation prize.
+        try:
+            path = Path(os.path.expanduser(target))
+        except ValueError:
+            path = Path(target)
         if not path.is_absolute():
             path = config.root / path
         # os.path.exists for the same family of reason: the pathlib probe
