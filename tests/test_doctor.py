@@ -97,6 +97,21 @@ def test_an_env_with_an_unusable_stack_txt_is_reported(config_tree: ConfigRoot, 
     assert "stack.txt that is not a regular file" in findings[0].message
 
 
+def test_an_env_directory_without_a_stack_txt_is_not_a_finding(
+    config_tree: ConfigRoot,
+):
+    # The probe above is deliberately 'present but unusable', not 'absent'.
+    # Dropping its lexists conjunct would leave 'not isfile(stack.txt)', which
+    # reads identically on a directory holding nothing but notes -- and an
+    # absent stack.txt is not a state load_env rejects, it is simply not an
+    # env. Without this the simplification passes the whole suite.
+    env = config_tree.env_dir("notes")
+    env.mkdir()
+    (env / "README").write_text("scratch\n")
+
+    assert diagnose(config_tree) == []
+
+
 def test_env_missing_python_txt_flagged(config_tree: ConfigRoot):
     config_tree.env_python_path("main").unlink()
     messages = [f.message for f in diagnose(config_tree)]
@@ -1428,6 +1443,24 @@ def test_every_editable_spelling_uv_accepts_names_the_same_target(
         f"includes:\n  - {flag}{separator}${{DEV}}/widget\n"
     )
     finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
+    assert str(tmp_path / "gone" / "widget") in finding.message
+
+
+@pytest.mark.parametrize("flag", ["-e=", "--editable="])
+def test_an_attached_separator_with_a_detached_operand_names_the_target(
+    config_tree: ConfigRoot, tmp_path: Path, flag: str
+):
+    # '-e= PATH' is a third spelling uv accepts: the '=' separates, and the
+    # operand is the next token. Reading the empty text after the '=' as the
+    # value silently stops checking the checkout.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text(f"DEV={tmp_path / 'gone'}\n")
+    config_tree.profile_path("dev").write_text(
+        f"includes:\n  - {flag} ${{DEV}}/widget\n"
+    )
+
+    finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
+
     assert str(tmp_path / "gone" / "widget") in finding.message
 
 

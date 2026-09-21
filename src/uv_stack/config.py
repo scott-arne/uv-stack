@@ -394,7 +394,10 @@ class ConfigRoot:
             # silently stops being complete, and one unlisted document would
             # be a traceback out of a command that is meant to report it.
             raise ConfigError(
-                f"Invalid YAML in {path}: {exc}",
+                # The type is named because the non-YAMLError families carry
+                # bare operands: '!!bool "nope"' stringifies to just "'nope'",
+                # which tells a reader nothing about what went wrong.
+                f"Invalid YAML in {path}: {type(exc).__name__}: {exc}",
                 hint="Fix the YAML syntax.",
             ) from exc
         if not isinstance(data, dict):

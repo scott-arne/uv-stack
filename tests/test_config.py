@@ -148,6 +148,18 @@ def test_load_bundle_constructor_failure_raises_config_error(
     assert str(config_tree.bundle_path("standard")) in str(caught.value)
 
 
+def test_a_constructor_failure_names_the_exception_type(config_tree: ConfigRoot):
+    # Two of the three families stringify to a bare operand: KeyError('nope')
+    # renders as "'nope'", which on its own tells a reader nothing about what
+    # the loader objected to. The type is what makes the message legible.
+    config_tree.profile_path("ds").write_text('description: !!bool "nope"\nincludes: []\n')
+
+    with pytest.raises(ConfigError) as caught:
+        config_tree.load_profile("ds")
+
+    assert "KeyError" in str(caught.value)
+
+
 def test_load_profile_bad_utf8_is_not_reported_as_invalid_yaml(config_tree: ConfigRoot):
     # The YAML guard is broad, so the read has to stay outside it: a file that
     # is not UTF-8 never reached the parser, and "Invalid YAML" would send the

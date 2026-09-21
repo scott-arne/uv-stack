@@ -1066,7 +1066,10 @@ def _editable_target(entry: str) -> str | None:
     flag, attached, operand = parts[0].partition("=")
     if flag not in ("-e", "--editable"):
         return None
-    if attached:
+    # An attached '=' with nothing after it is still a separator to uv, which
+    # reads '-e= PATH' exactly as '-e PATH'. Treating the empty operand as the
+    # value would drop a checkout doctor is supposed to be watching.
+    if attached and operand:
         target = operand
     elif len(parts) >= 2:
         target = parts[1]
