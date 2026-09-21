@@ -714,7 +714,7 @@ Closing that gap would mean rewriting uv's output behind its back.
   strips comments, so everything from the first `#` is discarded. An exported
   environment variable has no such restriction.
 - **A value is substituted literally and never re-expanded.** A `${OTHER}`
-  inside a value stays the six characters `${OTHER}`; it is not a reference.
+  inside a value stays the literal text `${OTHER}`; it is not a reference.
 - **No value may contain whitespace.** That rules out a path containing a
   space, and it is what keeps expansion from splitting an already-validated
   entry into a new token. Use a symlink or move the checkout.
