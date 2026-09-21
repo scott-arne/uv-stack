@@ -582,7 +582,8 @@ one profile describe paths that differ per machine.
 | `profiles/`, `bundles/`, `envs/*/stack.txt`, `python.txt`, `micromamba.txt`, `channels.txt` | `requirements.in`, `environment.yml`, `requirements.lock.txt` (all generated) |
 | `variables.txt` — the declared names | `variables.local.txt` — this machine's values |
 | `project-python.txt`, when it holds a portable selector | `envs/*/requirements.local.in` — one machine's extra packages |
-| | `.locks/` |
+| | `editor.txt` — this machine's editor |
+| | `.locks/`, `.DS_Store` |
 
 **Compiled locks deliberately do not travel.** A lock is resolved for one
 platform and one interpreter, and uv-stack compiles per machine rather than

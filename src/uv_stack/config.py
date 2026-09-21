@@ -357,12 +357,21 @@ class ConfigRoot:
 
         :returns: The first clean line of ``editor.txt``, or ``None`` when the
             file is absent or holds nothing but blanks and comments.
-        :raises ConfigError: When the file is not valid UTF-8. Raised by
+        :raises ConfigError: When the path is not a regular file, or the file
+            is not valid UTF-8. The decoding failure is raised by
             :func:`~uv_stack.fsutil.read_text_utf8` under the read; this one
             matters enough to document because it happens before the editor
             launches, so the post-edit validators cannot cover it.
         """
-        return first_clean_line(self.editor_path(), default="") or None
+        path = self.editor_path()
+        # Ahead of the read, exactly as default_project_python does it:
+        # first_clean_line reads through an is_file() test, which answers
+        # False for a directory named editor.txt just as it does for an absent
+        # one. Falling through to $VISUAL is the right answer to "no editor is
+        # configured" and the wrong one to "there is something at editor.txt I
+        # could not read".
+        require_regular_file(path)
+        return first_clean_line(path, default="") or None
 
     def load_variables(self) -> Variables:
         """Load the root's declared names and this machine's values.

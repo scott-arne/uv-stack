@@ -451,6 +451,18 @@ def test_a_non_regular_project_python_file_is_refused(config_tree: ConfigRoot, s
     assert "project-python.txt" in excinfo.value.message
 
 
+@pytest.mark.parametrize("shape", _NON_REGULAR_SHAPES)
+def test_a_non_regular_editor_file_is_refused(config_tree: ConfigRoot, shape: str):
+    # The same argument as the method above, and as the five targets
+    # cli/edit.py guards: without this, a directory at editor.txt reads as
+    # "no editor configured" and 'stack edit' quietly opens $VISUAL instead of
+    # the editor the root names.
+    _make_non_regular(config_tree.editor_path(), shape)
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.default_editor()
+    assert "editor.txt" in excinfo.value.message
+
+
 def test_a_malformed_declaration_names_the_file_and_line(config_tree: ConfigRoot):
     config_tree.variables_path().write_text("DEV\n2BAD\n")
     with pytest.raises(ConfigError) as excinfo:
