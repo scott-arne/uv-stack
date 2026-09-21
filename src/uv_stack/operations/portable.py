@@ -139,9 +139,12 @@ class PortableResult:
     :ivar repository_root: The top level of the git working tree the config
         root sits in, or ``None`` when it sits in none. Decided by a filesystem
         walk rather than a git invocation, so the command works on a machine
-        where git is not installed. The advice in :func:`next_steps` needs the
-        top level itself, not merely its existence, because that is the
-        directory the untracking pathspecs are resolved against.
+        where git is not installed. The commands :func:`next_steps` prints
+        name the config root and consult only whether a working tree was found
+        — that is what :attr:`is_repository` derives — but the path is kept
+        rather than collapsed to a flag, because which working tree already
+        tracks this root is the fact to check when the printed advice is not
+        the advice that was expected.
     """
 
     path: Path
@@ -322,11 +325,11 @@ def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:
     rewrites what the index holds, and a root may already have a remote,
     a branch policy, or uncommitted work that only its owner knows about.
 
-    Three states, not two. A root with no repository above it gets the
-    bootstrap sequence. A root that *is* a working tree's top level, and a root
-    nested inside one, both get the untracking sequence — the second addressed
-    to the top level that was found, since that is the repository holding the
-    files. Only the first state may print ``git init``: offering it inside an
+    Two sequences, not three. A root with no repository above it gets the
+    bootstrap sequence. A root that *is* a working tree's top level and a root
+    nested inside one get the same untracking sequence, because every command
+    in it is addressed to the config root and git finds the repository from
+    there. Only the first state may print ``git init``: offering it inside an
     existing working tree would advise nesting one repository in another.
 
     The branch keys on whether the root is in a repository, not on what the
@@ -334,15 +337,15 @@ def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:
     the untracking step, because files committed before they were ignored stay
     tracked no matter how current the ignore file is.
 
-    :param config: The config root.
-    :param result: What the write did, including the working tree it found.
-        Both come from one :func:`write_portable_ignore` call on ``config``,
-        which is what makes the root a descendant of the top level below.
+    :param config: The config root. Every command names it, so the paths the
+        user is asked to paste are the root they asked about.
+    :param result: What the write did; only whether a working tree was found
+        is consulted. It comes from a :func:`write_portable_ignore` call on
+        ``config``, which is what ties the answer to this root.
     :returns: One command (or note) per line, in the order to run them.
     """
     root = shlex.quote(str(config.root))
-    top = result.repository_root
-    if top is None:
+    if not result.is_repository:
         return [
             f"git -C {root} init",
             f"git -C {root} add .",
@@ -350,28 +353,26 @@ def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:
             f"git -C {root} remote add origin <url>",
             f"git -C {root} push -u origin HEAD",
         ]
-    where = shlex.quote(str(top))
-    # Every command is addressed to the top level, so every pathspec in them
-    # resolves against the top level too — git takes a pathspec relative to
-    # the working directory, and -C is what sets that. The block's patterns
-    # are written relative to the config root, so a nested root has to put its
-    # own path in front of each one or 'rm --cached' matches the wrong files,
-    # or none. A root that is itself the top level relativizes to '.', which
-    # prefixes nothing and leaves both commands exactly as they were.
-    # The root is normalised the same way enclosing_repository normalised the
-    # top level it returned, so the two are comparable and relative_to cannot
-    # produce an escaping '../' prefix that git would refuse as outside the
-    # repository.
-    relative = Path(os.path.abspath(config.root)).relative_to(top).as_posix()
-    prefix = "" if relative == "." else f"{relative}/"
-    patterns = " ".join(
-        shlex.quote(prefix + pattern) for pattern in ignore_patterns(config)
-    )
+    # Addressed to the config root even when the working tree's top level is
+    # somewhere above it, so that no part of the root's path ever lands in a
+    # pathspec. git discovers the repository by walking up from its working
+    # directory and resolves pathspecs against that same directory, so -C
+    # <root> reaches the working tree the walk found while leaving the
+    # patterns exactly as ignore_patterns produced them. Addressing the top
+    # level instead would mean prefixing each pattern with the root's path
+    # relative to it, and git reads a pathspec's leading characters as magic:
+    # a root named ':(exclude)python-envs' turns every pattern into an
+    # exclusion, at which point 'rm --cached' untracks the whole repository.
+    # Quoting cannot prevent that — the argument reaches git intact and git is
+    # what interprets it — and '--' separates options from pathspecs without
+    # disabling magic. 'add .' is safe for the same reason: it stages the root
+    # and nothing above it, and names no user-supplied text at all.
+    patterns = " ".join(shlex.quote(pattern) for pattern in ignore_patterns(config))
     return [
         "Some of these patterns may already be tracked from before they were "
         "ignored; untrack them first.",
-        f"git -C {where} rm -r --cached --ignore-unmatch -- {patterns}",
-        f"git -C {where} add {shlex.quote(relative)}",
-        f'git -C {where} commit -m "Stop tracking generated files"',
-        f"git -C {where} push",
+        f"git -C {root} rm -r --cached --ignore-unmatch -- {patterns}",
+        f"git -C {root} add .",
+        f'git -C {root} commit -m "Stop tracking generated files"',
+        f"git -C {root} push",
     ]

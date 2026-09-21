@@ -224,7 +224,7 @@ def test_next_steps_for_an_existing_repository_untrack_first(config_tree: Config
     assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
 
 
-def test_next_steps_for_a_root_nested_in_a_repository_address_the_top_level(
+def test_next_steps_for_a_root_nested_in_a_repository_address_the_root(
     config_tree: ConfigRoot,
 ):
     # The fixture's root is tmp_path/'python-envs', so a .git beside it makes
@@ -241,45 +241,84 @@ def test_next_steps_for_a_root_nested_in_a_repository_address_the_top_level(
     assert not any(" init" in step for step in steps)
     untrack = next(step for step in steps if "rm -r --cached" in step)
     tokens = shlex.split(untrack)
-    assert tokens[:3] == ["git", "-C", str(top)]
-    # Prefixed, and compared whole: -C makes the top level the directory every
-    # pathspec resolves against, so a bare 'editor.txt' names the top level's
-    # own file. Unprefixed, this step would untrack something else or nothing
-    # at all while every generated file under the root stayed committed.
-    assert tokens[tokens.index("--") + 1 :] == [
-        f"{config_tree.root.name}/{pattern}" for pattern in GOLDEN_PATTERNS
-    ]
+    # Addressed to the root, not to the top level the walk found: git
+    # discovers the repository from the directory -C names, so this still
+    # reaches the dotfiles repo, and every pathspec then resolves against the
+    # root — which is what the block's patterns are already relative to. The
+    # list is compared whole because a truncated one still names a pattern or
+    # two while leaving every environment artifact tracked.
+    assert tokens[:3] == ["git", "-C", str(config_tree.root)]
+    assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
 
 
 def test_the_nested_add_step_stages_the_config_root_only(config_tree: ConfigRoot):
-    # 'add .' would stage the whole enclosing repository, which for a dotfiles
-    # root is a pile of unrelated work the user did not ask to commit.
+    # Staging the whole enclosing repository would sweep up a pile of
+    # unrelated dotfiles work the user did not ask to commit. '.' stays
+    # bounded by the -C directory, so the root is all it can reach.
     (config_tree.root.parent / ".git").mkdir()
     result = write_portable_ignore(config_tree, dry_run=True)
     add = next(step for step in next_steps(config_tree, result) if " add " in step)
-    assert shlex.split(add) == [
-        "git",
-        "-C",
-        str(config_tree.root.parent),
-        "add",
-        config_tree.root.name,
-    ]
+    assert shlex.split(add) == ["git", "-C", str(config_tree.root), "add", "."]
 
 
 def test_the_walk_climbs_past_more_than_one_level(tmp_path: Path):
-    # One level up is the easy case to get right by accident; the prefix has
-    # to carry every segment between the top level and the root.
+    # One level up is the easy case to get right by accident. Nothing in the
+    # printed commands depends on the distance any more, but doctor's decision
+    # to judge the ignore block at all still rides on this walk, and so does
+    # the choice between 'git init' and untracking.
     root = tmp_path / "repo" / "config" / "python-envs"
     root.mkdir(parents=True)
     (tmp_path / "repo" / ".git").mkdir()
     config = ConfigRoot(root)
     result = write_portable_ignore(config, dry_run=True)
     assert result.repository_root == tmp_path / "repo"
-    untrack = next(s for s in next_steps(config, result) if "rm -r --cached" in s)
+    steps = next_steps(config, result)
+    assert not any(" init" in step for step in steps)
+    untrack = next(s for s in steps if "rm -r --cached" in s)
     tokens = shlex.split(untrack)
-    assert tokens[tokens.index("--") + 1 :] == [
-        f"config/python-envs/{pattern}" for pattern in GOLDEN_PATTERNS
-    ]
+    assert tokens[:3] == ["git", "-C", str(root)]
+    assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
+
+
+# Directory names git would read as pathspec magic, an option, or a glob if
+# any of them ever reached a pathspec position. All are creatable on APFS and
+# ext4, and '--root' admits every one of them.
+ADVERSARIAL_ROOT_NAMES = [
+    ":(exclude)python-envs",
+    ":!python-envs",
+    ":python-envs",
+    "-envs",
+    "*",
+    "?envs",
+]
+
+
+@pytest.mark.parametrize("name", ADVERSARIAL_ROOT_NAMES)
+def test_no_printed_pathspec_carries_the_roots_own_name(tmp_path: Path, name: str):
+    # The defect this pins: addressing the enclosing repository means
+    # prefixing every pattern with the root's path relative to it, and git
+    # reads ':(exclude)' at the head of a pathspec as magic. Every generated
+    # pathspec became an exclusion, so 'rm -r --cached' matched everything
+    # else instead — it untracked the entire repository, including the two
+    # files that must stay tracked and files outside the root altogether.
+    # shlex.quote cannot help, because git receives the argument intact and
+    # git is what interprets it.
+    top = tmp_path / "dotfiles"
+    (top / ".git").mkdir(parents=True)
+    root = top / name
+    root.mkdir()
+    config = ConfigRoot(root)
+
+    steps = next_steps(config, write_portable_ignore(config, dry_run=True))
+
+    untrack = next(s for s in steps if "rm -r --cached" in s)
+    tokens = shlex.split(untrack)
+    # The root's name appears once, as -C's operand, which git takes as a
+    # directory to chdir to and never parses as a pathspec or an option.
+    assert tokens[:3] == ["git", "-C", str(root)]
+    assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
+    add = next(s for s in steps if " add " in s)
+    assert shlex.split(add) == ["git", "-C", str(root), "add", "."]
 
 
 def test_a_git_file_counts_as_a_repository(config_tree: ConfigRoot):
@@ -332,8 +371,11 @@ def test_a_relative_root_inside_a_repository_reports_an_absolute_top_level(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     # The other half: normalising must not cost a relative root the repository
-    # it really is in, and the '-C' it prints has to survive the user running
-    # it from somewhere else.
+    # it really is in, or the untracking advice is replaced by 'git init'
+    # inside a working tree. The walk reports the top level absolute because
+    # it normalised before climbing; the printed commands name the root as the
+    # user spelled it, which is the directory that spelling resolves against
+    # in the shell they just ran uv-stack in.
     (tmp_path / ".git").mkdir()
     (tmp_path / "python-envs").mkdir()
     monkeypatch.chdir(tmp_path)
@@ -344,10 +386,8 @@ def test_a_relative_root_inside_a_repository_reports_an_absolute_top_level(
     assert result.repository_root == tmp_path
     untrack = next(s for s in next_steps(config, result) if "rm -r --cached" in s)
     tokens = shlex.split(untrack)
-    assert tokens[:3] == ["git", "-C", str(tmp_path)]
-    assert tokens[tokens.index("--") + 1 :] == [
-        f"python-envs/{pattern}" for pattern in GOLDEN_PATTERNS
-    ]
+    assert tokens[:3] == ["git", "-C", "python-envs"]
+    assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
 
 
 def test_the_repository_branch_does_not_depend_on_the_write_outcome(

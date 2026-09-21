@@ -626,9 +626,9 @@ a repository those begin with an untracking step: files that are now ignored
 stay tracked until `git rm --cached` removes them from the index. That applies
 to any root that is a repository, including one whose `.gitignore` this command
 is creating for the first time. A root that is a *subdirectory* of a repository
-— `python-envs/` inside a dotfiles repo — counts as one: the commands are
-addressed to the enclosing repository's top level, with each ignored pattern
-written relative to it.
+— `python-envs/` inside a dotfiles repo — counts as one: every command is
+addressed to the config root with `-C`, and git finds the enclosing repository
+by walking up from there.
 
 uv-stack never invokes git. It writes the ignore file and prints the commands;
 you run them.
