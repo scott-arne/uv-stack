@@ -21,26 +21,32 @@ def test_clean_tree_has_no_errors(config_tree: ConfigRoot):
 
 def test_missing_root_reports_error(tmp_path: Path):
     cfg = ConfigRoot(tmp_path / "does-not-exist")
-    findings = diagnose(cfg)
-    assert any(f.level == "error" for f in findings)
+    finding = next(f for f in diagnose(cfg) if f.kind == "missing-root")
+    assert finding.level == "error"
+    # The wording, not just the path: a finding that names the root and
+    # diagnoses nothing about it would satisfy the path on its own.
+    assert "Config root does not exist:" in finding.message
+    assert str(cfg.root) in finding.message
 
 
 def test_legacy_profile_in_file_flagged(config_tree: ConfigRoot):
     (config_tree.profiles_dir / "old.in").write_text("numpy\n")
     messages = [f.message for f in diagnose(config_tree)]
-    assert any("old.in" in m for m in messages)
+    assert any("Legacy profile file:" in m and "old.in" in m for m in messages)
 
 
 def test_legacy_bundle_file_flagged(config_tree: ConfigRoot):
     (config_tree.bundles_dir / "old.bundle").write_text("ds\n")
     messages = [f.message for f in diagnose(config_tree)]
-    assert any("old.bundle" in m for m in messages)
+    assert any("Legacy bundle file:" in m and "old.bundle" in m for m in messages)
 
 
 def test_legacy_profiles_txt_flagged(config_tree: ConfigRoot):
     (config_tree.env_dir("main") / "profiles.txt").write_text("ds\n")
     messages = [f.message for f in diagnose(config_tree)]
-    assert any("profiles.txt" in m for m in messages)
+    # "profiles.txt" alone is also in the finding's own path, so it says
+    # nothing about the message having diagnosed anything.
+    assert any("Legacy profiles.txt in env 'main'" in m for m in messages)
 
 
 def test_legacy_env_at_root_flagged(config_tree: ConfigRoot):
@@ -49,13 +55,17 @@ def test_legacy_env_at_root_flagged(config_tree: ConfigRoot):
     legacy.mkdir()
     (legacy / "requirements.in").write_text("# x\n")
     messages = [f.message for f in diagnose(config_tree)]
-    assert any("legacyenv" in m for m in messages)
+    assert any(
+        "Env-like directory not under envs/:" in m and "legacyenv" in m for m in messages
+    )
 
 
 def test_env_missing_python_txt_flagged(config_tree: ConfigRoot):
     config_tree.env_python_path("main").unlink()
     messages = [f.message for f in diagnose(config_tree)]
-    assert any("python.txt" in m for m in messages)
+    # As above: the finding's path ends in python.txt, so the bare filename
+    # cannot tell the diagnosis apart from the path it points at.
+    assert any("missing python.txt (will default to 3.12)" in m for m in messages)
 
 
 def test_findings_carry_kinds(tmp_path):
@@ -1236,6 +1246,7 @@ def test_an_unparseable_source_is_reported_not_raised(config_tree: ConfigRoot):
     finding = next(f for f in findings if f.kind == "unparseable-source")
     assert finding.level == "warn"
     assert finding.path == config_tree.profile_path("broken")
+    assert finding.message.startswith("Cannot read ")
 
 
 def test_an_unparseable_variables_file_is_reported_not_raised(
@@ -1257,6 +1268,7 @@ def test_a_missing_editable_checkout_is_a_warning(
     config_tree.profile_path("dev").write_text("includes:\n  - -e ${DEV}/widget\n")
     finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
     assert finding.level == "warn"
+    assert "editable checkout does not exist:" in finding.message
     assert str(tmp_path / "gone" / "widget") in finding.message
 
 
@@ -1315,6 +1327,7 @@ def test_a_relative_editable_resolves_against_the_config_root(
     # must resolve a relative path the same way rather than against the cwd.
     config_tree.profile_path("dev").write_text("includes:\n  - -e lib/widget\n")
     finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
+    assert "editable checkout does not exist:" in finding.message
     assert str(config_tree.root / "lib" / "widget") in finding.message
     (config_tree.root / "lib" / "widget").mkdir(parents=True)
     assert "missing-checkout" not in _kinds(diagnose(config_tree))
@@ -1373,6 +1386,7 @@ def test_an_unsafe_expansion_is_reported_as_an_error(config_tree: ConfigRoot):
     assert finding.level == "error"
     assert finding.path == config_tree.profile_path("dev")
     # The source, the entry, and the explanation -- converge's own words.
+    assert finding.message.startswith(f"{config_tree.profile_path('dev')}: ")
     assert "-e ${DEV}/widget" in finding.message
     assert "-r/widget" in finding.message
     assert finding.fix is not None
@@ -1431,6 +1445,7 @@ def test_a_project_python_path_is_a_warning(config_tree: ConfigRoot):
     config_tree.project_python_path().write_text("/opt/envs/x/bin/python\n")
     finding = next(f for f in diagnose(config_tree) if f.kind == "project-python-path")
     assert finding.level == "warn"
+    assert "holds an interpreter path:" in finding.message
 
 
 def test_a_project_python_naming_an_undeclared_env_is_a_warning(
@@ -1441,6 +1456,7 @@ def test_a_project_python_naming_an_undeclared_env_is_a_warning(
         f for f in diagnose(config_tree) if f.kind == "project-python-undeclared-env"
     )
     assert finding.level == "warn"
+    assert "names environment 'scratch', which this root does not declare" in finding.message
     assert finding.fix is not None
     assert "Declared environments: main." in finding.fix
 
