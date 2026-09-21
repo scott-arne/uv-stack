@@ -224,7 +224,7 @@ def test_next_steps_for_an_existing_repository_untrack_first(config_tree: Config
     assert result.is_repository is True
     steps = next_steps(config_tree, result)
     untrack = next(i for i, s in enumerate(steps) if "rm -r --cached" in s)
-    add = next(i for i, s in enumerate(steps) if s.endswith(" add .gitignore"))
+    add = next(i for i, s in enumerate(steps) if s.endswith(" add -f .gitignore"))
     assert untrack < add
     assert not any(" init" in step for step in steps)
     assert sum("push" in step for step in steps) == 1
@@ -272,7 +272,7 @@ def test_the_nested_add_step_stages_only_the_ignore_file(config_tree: ConfigRoot
     (config_tree.root.parent / ".git").mkdir()
     result = write_portable_ignore(config_tree, dry_run=True)
     add = next(step for step in next_steps(config_tree, result) if " add " in step)
-    assert shlex.split(add) == ["git", "-C", str(config_tree.root), "add", ".gitignore"]
+    assert shlex.split(add) == ["git", "-C", str(config_tree.root), "add", "-f", ".gitignore"]
 
 
 # The user's own git configuration must not decide what the executed test
@@ -299,6 +299,38 @@ def _git(*args: str) -> str:
     done = subprocess.run(["git", *args], capture_output=True, text=True, env=_GIT_ENV)
     assert done.returncode == 0, f"git {' '.join(args)}\n{done.stdout}{done.stderr}"
     return done.stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="requires a git executable")
+def test_the_ignore_file_is_staged_even_when_the_repository_ignores_it(tmp_path: Path):
+    """The add is forced, because the enclosing repository may ignore this path.
+
+    A parent .gitignore holding ``python-envs/`` is enough for git to refuse
+    an unforced ``add`` of the file this command just wrote. The refusal does
+    not stop the sequence: the commit and push two lines below still run, and
+    publish the untracking without the rules that justify it, so the next
+    clone tracks the generated files again.
+    """
+    top = tmp_path / "dotfiles"
+    root = top / "python-envs"
+    root.mkdir(parents=True)
+    _git("init", "-q", str(top))
+    (top / ".gitignore").write_text("python-envs/\n")
+    (root / "variables.local.txt").write_text("DEV=/srv/src\n")
+    _git("-C", str(top), "add", "-f", ".gitignore", "python-envs/variables.local.txt")
+    _git("-C", str(top), "commit", "-q", "-m", "initial")
+
+    config = ConfigRoot(root)
+    steps = next_steps(config, write_portable_ignore(config))
+    _git(*shlex.split(next(s for s in steps if "rm -r --cached" in s))[1:])
+    _git(*shlex.split(next(s for s in steps if " add " in s))[1:])
+
+    staged = {
+        line[3:]
+        for line in _git("-C", str(top), "status", "--porcelain").splitlines()
+        if line[0] not in " ?"
+    }
+    assert staged == {"python-envs/.gitignore", "python-envs/variables.local.txt"}
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="requires a git executable")
@@ -409,7 +441,7 @@ def test_no_printed_pathspec_carries_the_roots_own_name(tmp_path: Path, name: st
     assert tokens[:3] == ["git", "-C", str(root)]
     assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
     add = next(s for s in steps if " add " in s)
-    assert shlex.split(add) == ["git", "-C", str(root), "add", ".gitignore"]
+    assert shlex.split(add) == ["git", "-C", str(root), "add", "-f", ".gitignore"]
 
 
 def test_a_git_file_counts_as_a_repository(config_tree: ConfigRoot):

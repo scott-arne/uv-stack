@@ -391,6 +391,15 @@ def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:
     # looks like, because a pathspec switches the commit to --only semantics,
     # which records the working-tree state of those paths and would put back
     # the very entries 'rm --cached' just removed from the index.
+    #
+    # '-f' because the enclosing repository may ignore this very path — a
+    # parent .gitignore holding 'python-envs/' or '*.gitignore' is enough —
+    # and without it git refuses the add and says so, while the commit and
+    # push two lines below still run. That publishes the untracking without
+    # the rules that justify it, so the next clone tracks the generated files
+    # again: the one outcome this command exists to prevent. Forcing is safe
+    # here and nowhere else in the sequence, because the path is this module's
+    # own constant naming the file uv-stack just wrote.
     patterns = " ".join(shlex.quote(pattern) for pattern in ignore_patterns(config))
     return [
         "Some of these patterns may already be tracked from before they were "
@@ -398,7 +407,7 @@ def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:
         "The commit records everything already staged in the repository, not "
         "just this root; check 'git status' first.",
         f"git -C {root} rm -r --cached --ignore-unmatch -- {patterns}",
-        f"git -C {root} add .gitignore",
+        f"git -C {root} add -f .gitignore",
         f'git -C {root} commit -m "Stop tracking generated files"',
         f"git -C {root} push",
     ]
