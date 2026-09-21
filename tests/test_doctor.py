@@ -64,8 +64,29 @@ def test_env_missing_python_txt_flagged(config_tree: ConfigRoot):
     config_tree.env_python_path("main").unlink()
     messages = [f.message for f in diagnose(config_tree)]
     # As above: the finding's path ends in python.txt, so the bare filename
-    # cannot tell the diagnosis apart from the path it points at.
-    assert any("missing python.txt (will default to 3.12)" in m for m in messages)
+    # cannot tell the diagnosis apart from the path it points at. The env name
+    # is interleaved with the wording for the same reason -- either half alone
+    # is data the finding already carries.
+    assert any("Env 'main' missing python.txt (will default to 3.12)" in m for m in messages)
+
+
+def test_a_missing_directory_names_which_one(tmp_path):
+    # diagnose reports the three required directories from one loop, so the
+    # name is the only thing distinguishing the three messages. Asserting the
+    # path alone would pass for whichever of them happened to be reported.
+    root = tmp_path / "python-envs"
+    (root / "profiles").mkdir(parents=True)
+    (root / "envs").mkdir()
+    config = ConfigRoot(root)
+
+    missing = [f for f in diagnose(config) if f.kind == "missing-dir"]
+
+    assert len(missing) == 1
+    assert missing[0].level == "error"
+    assert missing[0].path == config.bundles_dir
+    assert missing[0].message == f"Missing bundles directory: {config.bundles_dir}"
+    assert missing[0].fix is not None
+    assert "stack config init" in missing[0].fix
 
 
 def test_findings_carry_kinds(tmp_path):
@@ -1246,7 +1267,10 @@ def test_an_unparseable_source_is_reported_not_raised(config_tree: ConfigRoot):
     finding = next(f for f in findings if f.kind == "unparseable-source")
     assert finding.level == "warn"
     assert finding.path == config_tree.profile_path("broken")
+    # The detail is the other half of this message's job: a "Cannot read"
+    # carrying no reason names a file without saying what is wrong with it.
     assert finding.message.startswith("Cannot read ")
+    assert "Invalid YAML" in finding.message
 
 
 def test_an_unparseable_variables_file_is_reported_not_raised(
@@ -1389,6 +1413,11 @@ def test_an_unsafe_expansion_is_reported_as_an_error(config_tree: ConfigRoot):
     assert finding.message.startswith(f"{config_tree.profile_path('dev')}: ")
     assert "-e ${DEV}/widget" in finding.message
     assert "-r/widget" in finding.message
+    # Converge's wording is deliberately not pinned here -- doctor quotes it
+    # verbatim so the two cannot drift, and test_variables.py owns it. What is
+    # doctor's own is the flattening: converge raises a multi-line ConfigError,
+    # and a finding message is one line.
+    assert "\n" not in finding.message
     assert finding.fix is not None
 
 
@@ -1446,6 +1475,7 @@ def test_a_project_python_path_is_a_warning(config_tree: ConfigRoot):
     finding = next(f for f in diagnose(config_tree) if f.kind == "project-python-path")
     assert finding.level == "warn"
     assert "holds an interpreter path:" in finding.message
+    assert "/opt/envs/x/bin/python" in finding.message
 
 
 def test_a_project_python_naming_an_undeclared_env_is_a_warning(
