@@ -60,6 +60,43 @@ def test_legacy_env_at_root_flagged(config_tree: ConfigRoot):
     )
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "directory",
+        "dangling-symlink",
+        pytest.param(
+            "fifo",
+            marks=pytest.mark.skipif(
+                not hasattr(os, "mkfifo"), reason="platform lacks mkfifo"
+            ),
+        ),
+    ],
+)
+def test_an_env_with_an_unusable_stack_txt_is_reported(config_tree: ConfigRoot, shape: str):
+    # list_envs keeps a child only when its stack.txt is a regular file, so
+    # each of these shapes drops the env out of every listing in the program
+    # without a word. Doctor used the same test one line down and skipped it
+    # too, reporting a clean root for a tree that normal env loading refuses.
+    env = config_tree.env_dir("broken")
+    env.mkdir()
+    stack = env / "stack.txt"
+    if shape == "directory":
+        stack.mkdir()
+    elif shape == "dangling-symlink":
+        stack.symlink_to(env / "nowhere")
+    else:
+        os.mkfifo(stack)
+    findings = diagnose(config_tree)
+    # Exactly one finding: the missing-python-txt check probes the same
+    # stack.txt with os.path.isfile, so it must stay silent rather than stack
+    # a second, wrong diagnosis on top of this one.
+    assert _kinds(findings) == ["unusable-env"]
+    assert findings[0].level == "error"
+    assert findings[0].path == stack
+    assert "stack.txt that is not a regular file" in findings[0].message
+
+
 def test_env_missing_python_txt_flagged(config_tree: ConfigRoot):
     config_tree.env_python_path("main").unlink()
     messages = [f.message for f in diagnose(config_tree)]

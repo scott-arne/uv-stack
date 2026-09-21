@@ -248,9 +248,24 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                         dest=env_dir / "stack.txt",
                     )
                 )
-            if os.path.isfile(env_dir / "stack.txt") and not os.path.isfile(
-                env_dir / "python.txt"
-            ):
+            stack_txt = env_dir / "stack.txt"
+            # lexists, not exists: a dangling symlink reads as absent to
+            # exists(). list_envs keeps a child only when its stack.txt is a
+            # regular file, so every shape caught here drops the env out of
+            # every listing in the program; reporting it is the only way the
+            # user learns why. Left as a report, not a repair -- doctor cannot
+            # guess what the file was meant to contain.
+            if os.path.lexists(stack_txt) and not os.path.isfile(stack_txt):
+                findings.append(
+                    Finding(
+                        "error",
+                        f"Env '{env_dir.name}' has a stack.txt that is not a regular file",
+                        fix=f"Replace {stack_txt} with a regular file, or remove {env_dir}.",
+                        kind="unusable-env",
+                        path=stack_txt,
+                    )
+                )
+            if os.path.isfile(stack_txt) and not os.path.isfile(env_dir / "python.txt"):
                 findings.append(
                     Finding(
                         "warn",
