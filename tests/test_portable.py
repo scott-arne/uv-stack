@@ -292,6 +292,64 @@ def test_a_git_file_counts_as_a_repository(config_tree: ConfigRoot):
     assert any("rm -r --cached" in step for step in next_steps(config_tree, result))
 
 
+def test_a_dot_dot_in_the_root_does_not_hand_it_to_a_repository_it_passes_through(
+    tmp_path: Path,
+):
+    # Path.parent is lexical and does not collapse '..', so an unnormalised
+    # walk steps through 'repo/sub/..', finds repo's .git, and names a top
+    # level the root is not under. The printed commands then carry an escaping
+    # '../' pathspec that git refuses outright ("is outside repository"), and
+    # doctor judges the ignore block of a root that is in no repository.
+    (tmp_path / "repo" / "sub").mkdir(parents=True)
+    (tmp_path / "repo" / ".git").mkdir()
+    (tmp_path / "outside" / "python-envs").mkdir(parents=True)
+
+    config = ConfigRoot(tmp_path / "repo" / "sub" / ".." / ".." / "outside" / "python-envs")
+    result = write_portable_ignore(config, dry_run=True)
+
+    assert result.repository_root is None
+    assert any(step.endswith(" init") for step in next_steps(config, result))
+
+
+def test_a_relative_root_is_anchored_to_the_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # '--root' is documented with no constraint and ConfigRoot does not
+    # absolutise, so a relative root is a supported spelling. Walking it
+    # unnormalised bottoms out at '.' -- whose parts are empty, which
+    # relative_to then accepts as a prefix of anything -- and the root inherits
+    # the working directory's repository rather than its own.
+    (tmp_path / "dotfiles" / ".git").mkdir(parents=True)
+    (tmp_path / "python-envs").mkdir()
+    monkeypatch.chdir(tmp_path / "dotfiles")
+
+    result = write_portable_ignore(ConfigRoot(Path("../python-envs")), dry_run=True)
+
+    assert result.repository_root is None
+
+
+def test_a_relative_root_inside_a_repository_reports_an_absolute_top_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The other half: normalising must not cost a relative root the repository
+    # it really is in, and the '-C' it prints has to survive the user running
+    # it from somewhere else.
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "python-envs").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    config = ConfigRoot(Path("python-envs"))
+    result = write_portable_ignore(config, dry_run=True)
+
+    assert result.repository_root == tmp_path
+    untrack = next(s for s in next_steps(config, result) if "rm -r --cached" in s)
+    tokens = shlex.split(untrack)
+    assert tokens[:3] == ["git", "-C", str(tmp_path)]
+    assert tokens[tokens.index("--") + 1 :] == [
+        f"python-envs/{pattern}" for pattern in GOLDEN_PATTERNS
+    ]
+
+
 def test_the_repository_branch_does_not_depend_on_the_write_outcome(
     config_tree: ConfigRoot,
 ):

@@ -89,17 +89,27 @@ def enclosing_repository(path: Path) -> Path | None:
     No git is invoked, for the reason given on :class:`PortableResult`: the
     answer has to be the same on a machine where git is not installed. The
     price is that a ``.git`` in a directory this process may not search reads
-    as absent, and that a relative root is walked only as far as the working
-    directory it is relative to.
+    as absent, and that a symlinked root is walked through its own path
+    rather than its target's.
 
-    :param path: The directory to start from. It is tested before its parents,
-        so a root that *is* a top level answers with itself.
-    :returns: The nearest directory at or above ``path`` holding a ``.git``
-        entry, or ``None`` when there is none below the filesystem root. A
-        ``.git`` *file* — the worktree and submodule spelling — counts as
-        readily as the directory, since either one means the files are tracked.
+    :param path: The directory to start from, absolute or relative. It is
+        normalised before the walk and tested before its parents, so a root
+        that *is* a top level answers with itself.
+    :returns: The absolute, ``..``-free path of the nearest directory at or
+        above ``path`` holding a ``.git`` entry, or ``None`` when there is
+        none below the filesystem root. A ``.git`` *file* — the worktree and
+        submodule spelling — counts as readily as the directory, since either
+        one means the files are tracked.
     """
-    current = path
+    # abspath, not the path as given: Path.parent is lexical and does not
+    # collapse '..', so a root spelled '<repo>/sub/../../elsewhere' would have
+    # the walk step through '<repo>/sub/..', find that repository's .git, and
+    # name a top level the root is not under at all. abspath normalises '..'
+    # away and anchors a relative root to the working directory, which is the
+    # only reading of a relative --root that git could act on. It stays purely
+    # lexical -- no symlink is resolved and no filesystem is consulted -- so
+    # every property the walk below relies on is preserved.
+    current = Path(os.path.abspath(path))
     while True:
         # os.path.exists, never Path.exists: before 3.14 the pathlib probe
         # re-raises any OSError whose errno is outside its small allowed set,
@@ -348,7 +358,11 @@ def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:
     # own path in front of each one or 'rm --cached' matches the wrong files,
     # or none. A root that is itself the top level relativizes to '.', which
     # prefixes nothing and leaves both commands exactly as they were.
-    relative = config.root.relative_to(top).as_posix()
+    # The root is normalised the same way enclosing_repository normalised the
+    # top level it returned, so the two are comparable and relative_to cannot
+    # produce an escaping '../' prefix that git would refuse as outside the
+    # repository.
+    relative = Path(os.path.abspath(config.root)).relative_to(top).as_posix()
     prefix = "" if relative == "." else f"{relative}/"
     patterns = " ".join(
         shlex.quote(prefix + pattern) for pattern in ignore_patterns(config)
