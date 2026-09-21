@@ -1289,6 +1289,24 @@ def test_a_plain_url_editable_is_not_a_checkout(config_tree: ConfigRoot):
     assert "missing-checkout" not in _kinds(diagnose(config_tree))
 
 
+def test_an_editable_with_extras_is_read_as_a_path(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    # '-e ./pkg[dev]' is valid pip syntax: the bracket suffix names extras and
+    # is not part of the path. Probing the whole token reports a checkout that
+    # is sitting right there as missing.
+    checkout = tmp_path / "widget"
+    checkout.mkdir()
+    config_tree.profile_path("dev").write_text(f"includes:\n  - -e {checkout}[dev,test]\n")
+    assert "missing-checkout" not in _kinds(diagnose(config_tree))
+
+    # And the suffix does not buy an absent checkout a pass.
+    config_tree.profile_path("gone").write_text(
+        f"includes:\n  - -e {tmp_path / 'absent'}[dev]\n"
+    )
+    assert "missing-checkout" in _kinds(diagnose(config_tree))
+
+
 def test_a_relative_editable_resolves_against_the_config_root(
     config_tree: ConfigRoot,
 ):

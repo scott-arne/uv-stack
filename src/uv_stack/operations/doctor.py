@@ -1034,6 +1034,8 @@ def _editable_target(entry: str) -> str | None:
     token is ``-e`` or ``--editable`` and the following value carries no URL
     scheme. Anything else is a remote install with no path to check.
 
+    A trailing PEP 508 extras suffix is dropped from the operand.
+
     :param entry: One expanded requirement entry.
     :returns: The path operand, or ``None``.
     """
@@ -1043,7 +1045,13 @@ def _editable_target(entry: str) -> str | None:
     target = parts[1]
     if "://" in target or target.startswith("git+"):
         return None
-    return target
+    # pip reads '-e ./pkg[dev]' as the path './pkg' carrying extras, so probing
+    # the whole token would report a checkout that is present as missing. The
+    # suffix is stripped rather than parsed: the operand is a path here, and
+    # nothing downstream has any use for the extras names.
+    if target.endswith("]") and "[" in target:
+        target = target[: target.rindex("[")]
+    return target or None
 
 
 def _expanded_entry_findings(
