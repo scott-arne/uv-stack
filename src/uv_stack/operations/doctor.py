@@ -297,14 +297,23 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                         path=stack_txt,
                     )
                 )
-            if os.path.isfile(stack_txt) and not os.path.isfile(env_dir / "python.txt"):
+            python_txt = env_dir / "python.txt"
+            # lexists, not isfile: a directory or a dangling symlink at this
+            # path is emphatically present, and calling it missing offers a
+            # repair -- create the file -- that cannot run, because
+            # atomic_write_new opens O_EXCL and the entry is already there.
+            # That contradiction is the one require_regular_file exists to
+            # prevent, and load_env now raises it by name, which _scan_sources
+            # turns into its own finding; so the shapes this test declines to
+            # call missing are reported, not dropped.
+            if os.path.isfile(stack_txt) and not os.path.lexists(python_txt):
                 findings.append(
                     Finding(
                         "warn",
                         f"Env '{env_dir.name}' missing python.txt (will default to 3.12)",
-                        fix=f"Create {env_dir / 'python.txt'}.",
+                        fix=f"Create {python_txt}.",
                         kind="missing-python-txt",
-                        path=env_dir / "python.txt",
+                        path=python_txt,
                     )
                 )
 

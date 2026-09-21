@@ -486,7 +486,34 @@ class ConfigRoot:
         )
 
     def load_env(self, name: str) -> EnvConfig:
+        """Load an environment's four source files.
+
+        :param name: The environment name.
+        :returns: The environment's declared interpreter, stack entries,
+            micromamba packages and channels.
+        :raises ConfigError: When the env has no ``stack.txt``, when any of the
+            four sources is present but is not a regular file, or when one of
+            them is not valid UTF-8.
+        """
         self.require_env(name)
+        # Ahead of the reads, per require_regular_file's own contract:
+        # read_clean_lines and first_clean_line both test is_file(), which
+        # answers False for a directory or a dangling symlink named
+        # channels.txt exactly as it does for an absent one. Absence is a
+        # supported state for all three -- python.txt falls back to 3.12, the
+        # other two to no entries -- so the unreadable path does not fail, it
+        # silently becomes the default, and converge then builds against the
+        # wrong interpreter or generates an environment.yml with no channels
+        # while doctor reports the root clean. stack.txt is not in the list
+        # because require_env has already held it to the same rule. On a
+        # genuinely absent path each call is a no-op, which is what keeps an
+        # optional file optional.
+        for source in (
+            self.env_python_path(name),
+            self.env_micromamba_path(name),
+            self.env_channels_path(name),
+        ):
+            require_regular_file(source)
         return EnvConfig(
             name=name,
             python=first_clean_line(self.env_python_path(name), default="3.12"),

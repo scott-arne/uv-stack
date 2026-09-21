@@ -122,6 +122,89 @@ def test_env_missing_python_txt_flagged(config_tree: ConfigRoot):
     assert any("Env 'main' missing python.txt (will default to 3.12)" in m for m in messages)
 
 
+_ENV_SOURCE_ACCESSORS = ["env_python_path", "env_micromamba_path", "env_channels_path"]
+
+_UNUSABLE_SHAPES = [
+    "directory",
+    "dangling-symlink",
+    pytest.param(
+        "fifo",
+        marks=pytest.mark.skipif(
+            not hasattr(os, "mkfifo"), reason="platform lacks mkfifo"
+        ),
+    ),
+]
+
+
+def _replace_with_unusable(path: Path, shape: str) -> None:
+    """Put something present but unreadable where a regular file was."""
+    path.unlink()
+    if shape == "directory":
+        path.mkdir()
+    elif shape == "dangling-symlink":
+        path.symlink_to(path.parent / "nowhere")
+    else:
+        os.mkfifo(path)
+
+
+@pytest.mark.parametrize("accessor", _ENV_SOURCE_ACCESSORS)
+@pytest.mark.parametrize("shape", _UNUSABLE_SHAPES)
+def test_an_unusable_env_source_is_reported_not_defaulted(
+    config_tree: ConfigRoot, accessor: str, shape: str
+):
+    # read_clean_lines and first_clean_line answer for an unreadable path
+    # exactly what they answer for an absent one, so none of these shapes was
+    # a failure to load: the value was replaced by a default. Doctor printed
+    # "No problems detected." over a root that converge would build against
+    # 3.12 instead of the configured interpreter, or generate an
+    # environment.yml for with no channels at all.
+    path = getattr(config_tree, accessor)("main")
+    _replace_with_unusable(path, shape)
+
+    findings = diagnose(config_tree)
+
+    assert [f.kind for f in findings] == ["unparseable-source"]
+    assert str(path) in findings[0].message
+
+
+@pytest.mark.parametrize("shape", _UNUSABLE_SHAPES)
+def test_an_unusable_python_txt_is_not_reported_as_missing(
+    config_tree: ConfigRoot, shape: str
+):
+    # 'missing python.txt (will default to 3.12)' about a file that is
+    # emphatically present, offering a repair -- create it -- that cannot run,
+    # because atomic_write_new opens O_EXCL and the entry is already there.
+    # The presence test is what tells the two states apart.
+    _replace_with_unusable(config_tree.env_python_path("main"), shape)
+
+    assert "missing-python-txt" not in _kinds(diagnose(config_tree))
+
+
+@pytest.mark.parametrize("accessor", ["env_micromamba_path", "env_channels_path"])
+def test_a_genuinely_absent_optional_env_source_stays_silent(
+    config_tree: ConfigRoot, accessor: str
+):
+    # The guard must not promote an optional file to a required one: a root
+    # that declares no conda packages and no channels is the common case.
+    getattr(config_tree, accessor)("main").unlink()
+
+    assert diagnose(config_tree) == []
+
+
+def test_diagnose_survives_every_env_source_being_unusable(config_tree: ConfigRoot):
+    # All three at once, which is what a checkout that put directories where
+    # files belong leaves behind. load_env is reached from inside _scan_sources
+    # only, and its guard is what keeps the governing rule's first clause --
+    # doctor must never fail because the thing it is diagnosing is broken --
+    # true while the second one is closed.
+    for accessor in _ENV_SOURCE_ACCESSORS:
+        _replace_with_unusable(getattr(config_tree, accessor)("main"), "directory")
+
+    findings = diagnose(config_tree)
+
+    assert [f.kind for f in findings] == ["unparseable-source"]
+
+
 def test_a_missing_directory_names_which_one(tmp_path):
     # diagnose reports the three required directories from one loop, so the
     # name is the only thing distinguishing the three messages. Asserting the
@@ -1927,7 +2010,8 @@ def test_an_unreadable_python_txt_does_not_abort_diagnose(
     # that makes the first operand fail short-circuits past it: the mode-400
     # cases elsewhere in this file reach it never. Pointing python.txt at a
     # directory this user cannot search, with the real stack.txt left beside
-    # it, is the shape that makes both operands run.
+    # it, is the shape that makes both operands run, and the one that makes
+    # the presence test answer for a path whose target it cannot reach.
     closed = tmp_path / "closed"
     closed.mkdir()
     (closed / "python.txt").write_text("3.12\n")
@@ -1939,9 +2023,13 @@ def test_an_unreadable_python_txt_does_not_abort_diagnose(
     finally:
         # Restore, or tmp_path teardown cannot remove the directory.
         os.chmod(closed, 0o700)
-    # A python.txt that cannot be read is reported as one that is not there,
-    # which is the answer the total spelling gives and a traceback is not.
-    assert "missing-python-txt" in kinds
+    # Reported by name, and not a traceback. The symlink is present, so the
+    # presence test declines to call it missing -- which is what it is for:
+    # the old 'missing python.txt (will default to 3.12)' arrived alongside
+    # this finding and contradicted it, offering a repair that O_EXCL refuses
+    # because the entry is already there.
+    assert kinds == ["unparseable-source"]
+    assert "missing-python-txt" not in kinds
 
 
 @pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")

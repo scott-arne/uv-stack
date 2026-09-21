@@ -463,6 +463,36 @@ def test_a_non_regular_editor_file_is_refused(config_tree: ConfigRoot, shape: st
     assert "editor.txt" in excinfo.value.message
 
 
+@pytest.mark.parametrize("shape", _NON_REGULAR_SHAPES)
+@pytest.mark.parametrize(
+    "accessor", ["env_python_path", "env_micromamba_path", "env_channels_path"]
+)
+def test_a_non_regular_env_source_is_refused(
+    config_tree: ConfigRoot, accessor: str, shape: str
+):
+    # All three are optional, and both readers answer for an unreadable path
+    # what they answer for an absent one -- so the configured value was not
+    # failing to load, it was being replaced by a default: 3.12 for the
+    # interpreter, nothing at all for the conda packages and channels.
+    # stack.txt is absent from this list because require_env, one call
+    # earlier, already holds it to the same rule.
+    path = getattr(config_tree, accessor)("main")
+    path.unlink()
+    _make_non_regular(path, shape)
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_env("main")
+    assert str(path) in excinfo.value.message
+
+
+def test_load_env_still_admits_absent_optional_sources(config_tree: ConfigRoot):
+    # The guard above must not turn an optional file into a required one;
+    # require_regular_file is a no-op on a genuinely absent path.
+    for accessor in ("env_python_path", "env_micromamba_path", "env_channels_path"):
+        getattr(config_tree, accessor)("main").unlink()
+    env = config_tree.load_env("main")
+    assert (env.python, env.micromamba, env.channels) == ("3.12", [], [])
+
+
 def test_a_malformed_declaration_names_the_file_and_line(config_tree: ConfigRoot):
     config_tree.variables_path().write_text("DEV\n2BAD\n")
     with pytest.raises(ConfigError) as excinfo:
