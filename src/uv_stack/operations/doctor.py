@@ -1096,7 +1096,11 @@ def _expanded_entry_findings(
         path = Path(os.path.expanduser(target))
         if not path.is_absolute():
             path = config.root / path
-        if path.exists():
+        # os.path.exists for the same family of reason: the pathlib probe
+        # re-raises every errno but a handful, and this path is built from a
+        # variable value, so an ancestor this user cannot search is ordinary
+        # input rather than a pathology.
+        if os.path.exists(path):
             continue
         findings.append(
             Finding(
@@ -1176,7 +1180,9 @@ def _ignore_block_findings(config: ConfigRoot) -> list[Finding]:
     :param config: The configuration root.
     :returns: At most one finding; empty when the root is not a repository.
     """
-    if not (config.root / ".git").exists():
+    # os.path.exists: the pathlib probe re-raises EACCES, and it sits above
+    # the guard below rather than inside it.
+    if not os.path.exists(config.root / ".git"):
         return []
     try:
         result = write_portable_ignore(config, dry_run=True)

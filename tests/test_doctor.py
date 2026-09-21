@@ -1372,6 +1372,28 @@ def test_an_unresolvable_tilde_user_is_reported_not_raised(config_tree: ConfigRo
     assert "~__no_such_user__/widget" in finding.message
 
 
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_an_unsearchable_checkout_parent_is_reported_not_raised(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    # The probed path is built from a variable value, so an ancestor this user
+    # cannot search is ordinary input. Path.exists re-raises EACCES on every
+    # interpreter this project supports, which would abort the whole run over
+    # one entry -- on the happy path, with nothing else wrong with the root.
+    closed = tmp_path / "closed"
+    (closed / "widget").mkdir(parents=True)
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text(f"DEV={closed}\n")
+    config_tree.profile_path("dev").write_text("includes:\n  - -e ${DEV}/widget\n")
+    os.chmod(closed, 0o000)
+    try:
+        kinds = _kinds(diagnose(config_tree))
+    finally:
+        # Restore, or tmp_path teardown cannot remove the directory.
+        os.chmod(closed, 0o700)
+    assert "missing-checkout" in kinds
+
+
 def test_a_project_python_path_is_a_warning(config_tree: ConfigRoot):
     config_tree.project_python_path().write_text("/opt/envs/x/bin/python\n")
     finding = next(f for f in diagnose(config_tree) if f.kind == "project-python-path")
