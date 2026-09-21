@@ -1273,6 +1273,33 @@ def test_an_unparseable_source_is_reported_not_raised(config_tree: ConfigRoot):
     assert "Invalid YAML" in finding.message
 
 
+@pytest.mark.parametrize(
+    "document",
+    [
+        pytest.param("description: 2020-99-99\nincludes: []\n", id="value-error"),
+        pytest.param('description: !!bool "nope"\nincludes: []\n', id="key-error"),
+        pytest.param(
+            'description: !!timestamp "nope"\nincludes: []\n', id="attribute-error"
+        ),
+    ],
+)
+def test_a_yaml_constructor_failure_is_reported_not_raised(
+    config_tree: ConfigRoot, document: str
+):
+    # A YAML constructor that rejects its own scalar does not raise YAMLError:
+    # it raises whatever the conversion raised. Three families reach here, and
+    # none of them is one _scan_sources catches, so each took the run down.
+    config_tree.profile_path("broken").write_text(document)
+    finding = next(
+        f
+        for f in diagnose(config_tree)
+        if f.kind == "unparseable-source"
+        and f.path == config_tree.profile_path("broken")
+    )
+    assert finding.message.startswith("Cannot read ")
+    assert str(config_tree.profile_path("broken")) in finding.message
+
+
 def test_an_unparseable_variables_file_is_reported_not_raised(
     config_tree: ConfigRoot,
 ):

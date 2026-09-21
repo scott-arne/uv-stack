@@ -118,6 +118,46 @@ def test_load_profile_malformed_yaml_raises(config_tree: ConfigRoot):
         config_tree.load_profile("ds")
 
 
+# One document per exception family. PyYAML's contract is that a loader raises
+# YAMLError; its constructors break that contract, and not in one way.
+_CONSTRUCTOR_FAILURES = [
+    pytest.param("description: 2020-99-99\nincludes: []\n", id="value-error"),
+    pytest.param('description: !!bool "nope"\nincludes: []\n', id="key-error"),
+    pytest.param('description: !!timestamp "nope"\nincludes: []\n', id="attribute-error"),
+]
+
+
+@pytest.mark.parametrize("document", _CONSTRUCTOR_FAILURES)
+def test_load_profile_constructor_failure_raises_config_error(
+    config_tree: ConfigRoot, document: str
+):
+    config_tree.profile_path("ds").write_text(document)
+    with pytest.raises(ConfigError) as caught:
+        config_tree.load_profile("ds")
+    assert str(config_tree.profile_path("ds")) in str(caught.value)
+
+
+@pytest.mark.parametrize("document", _CONSTRUCTOR_FAILURES)
+def test_load_bundle_constructor_failure_raises_config_error(
+    config_tree: ConfigRoot, document: str
+):
+    config_tree.bundle_path("standard").write_text(document)
+    with pytest.raises(ConfigError) as caught:
+        config_tree.load_bundle("standard")
+    assert str(config_tree.bundle_path("standard")) in str(caught.value)
+
+
+def test_load_profile_bad_utf8_is_not_reported_as_invalid_yaml(config_tree: ConfigRoot):
+    # The YAML guard is broad, so the read has to stay outside it: a file that
+    # is not UTF-8 never reached the parser, and "Invalid YAML" would send the
+    # reader hunting for a syntax error that is not there.
+    config_tree.profile_path("ds").write_bytes(b"includes: [\xff\xfe]\n")
+    with pytest.raises(ConfigError) as caught:
+        config_tree.load_profile("ds")
+    assert "Cannot read" in str(caught.value)
+    assert "Invalid YAML" not in str(caught.value)
+
+
 def test_load_profile_empty_file_raises(config_tree: ConfigRoot):
     config_tree.profile_path("ds").write_text("")
     with pytest.raises(ConfigError):

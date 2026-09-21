@@ -371,9 +371,22 @@ class ConfigRoot:
                 f"Missing {model.__name__.lower()}: {path}",
                 hint=f"Create {path} or check the name.",
             )
+        # Read outside the guard below. read_text_utf8 reports bad UTF-8 as a
+        # ConfigError and a failed read as an OSError, and both already say the
+        # right thing; relabelling either one "Invalid YAML" would be wrong.
+        text = read_text_utf8(path)
         try:
-            data = yaml.safe_load(read_text_utf8(path))
-        except yaml.YAMLError as exc:
+            data = yaml.safe_load(text)
+        except Exception as exc:
+            # Deliberately broad, and not a substitute for naming the error.
+            # PyYAML documents YAMLError as what a loader raises, but its
+            # constructors break that contract in at least three families: a
+            # date of 2020-99-99 escapes as ValueError, '!!bool "nope"' as
+            # KeyError, '!!timestamp "nope"' as AttributeError. The set is
+            # open-ended -- any constructor can have the same bug, including
+            # ones added later -- so an enumerated except would be a list that
+            # silently stops being complete, and one unlisted document would
+            # be a traceback out of a command that is meant to report it.
             raise ConfigError(
                 f"Invalid YAML in {path}: {exc}",
                 hint="Fix the YAML syntax.",
