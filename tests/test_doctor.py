@@ -1651,6 +1651,31 @@ def test_an_unsearchable_directory_does_not_abort_diagnose(
 
 
 @pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_an_unreadable_python_txt_does_not_abort_diagnose(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    # The python.txt probe is the second operand of an 'and', so every state
+    # that makes the first operand fail short-circuits past it: the mode-400
+    # cases elsewhere in this file reach it never. Pointing python.txt at a
+    # directory this user cannot search, with the real stack.txt left beside
+    # it, is the shape that makes both operands run.
+    closed = tmp_path / "closed"
+    closed.mkdir()
+    (closed / "python.txt").write_text("3.12\n")
+    config_tree.env_python_path("main").unlink()
+    config_tree.env_python_path("main").symlink_to(closed / "python.txt")
+    os.chmod(closed, 0o000)
+    try:
+        kinds = _kinds(diagnose(config_tree))
+    finally:
+        # Restore, or tmp_path teardown cannot remove the directory.
+        os.chmod(closed, 0o700)
+    # A python.txt that cannot be read is reported as one that is not there,
+    # which is the answer the total spelling gives and a traceback is not.
+    assert "missing-python-txt" in kinds
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
 def test_an_unsearchable_config_root_reports_instead_of_raising(config_tree: ConfigRoot):
     # The same state one level up. The root still lists, so every fixed-path
     # probe beneath it -- and the .git probe in the ignore-block check -- gets
