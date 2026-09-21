@@ -1728,6 +1728,27 @@ def test_a_stale_ignore_block_says_out_of_date(config_tree: ConfigRoot):
     assert "out of date" in finding.message
 
 
+def test_a_stale_ignore_block_in_a_nested_root_is_reported(config_tree: ConfigRoot):
+    # The root is a subdirectory of the working tree rather than the working
+    # tree itself, which is the 'git clone <url> ~/.config/python-envs' layout
+    # inside a dotfiles repo. Its files are tracked all the same, so a stale
+    # block is the same defect here as one directory up — and gating on
+    # <root>/.git alone reported this root clean, which is the one answer a
+    # check that could not tell is never allowed to give.
+    (config_tree.root.parent / ".git").mkdir()
+    (config_tree.root / ".gitignore").write_text(
+        f"{BEGIN_MARKER}\nstale-entry\n{END_MARKER}\n"
+    )
+    finding = next(f for f in diagnose(config_tree) if f.kind == "stale-ignore-block")
+    assert "out of date" in finding.message
+
+
+def test_a_missing_ignore_block_in_a_nested_root_is_reported(config_tree: ConfigRoot):
+    (config_tree.root.parent / ".git").mkdir()
+    finding = next(f for f in diagnose(config_tree) if f.kind == "stale-ignore-block")
+    assert finding.message.endswith("is missing.")
+
+
 def test_a_current_ignore_block_is_not_flagged(config_tree: ConfigRoot):
     (config_tree.root / ".git").mkdir()
     write_portable_ignore(config_tree)

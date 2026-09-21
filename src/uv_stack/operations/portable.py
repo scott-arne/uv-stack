@@ -14,6 +14,7 @@ they were ignored is a history-touching operation that belongs to the user.
 
 from __future__ import annotations
 
+import os
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,6 +75,49 @@ def render_block(config: ConfigRoot, newline: str = "\n") -> str:
     return newline.join([BEGIN_MARKER, *ignore_patterns(config), END_MARKER])
 
 
+def enclosing_repository(path: Path) -> Path | None:
+    """The top level of the git working tree ``path`` sits in, if any.
+
+    A config root is as often a subdirectory of a repository as a repository
+    itself — ``~/dotfiles`` with ``python-envs/`` inside it, or any monorepo
+    layout. Probing ``<root>/.git`` alone reads that as "not a repository" for
+    a root whose every file the enclosing repository already tracks, which
+    drops the untracking advice from :func:`next_steps` and silences doctor's
+    ignore-block finding on precisely the roots that need it. So the probe
+    walks upward instead of asking once.
+
+    No git is invoked, for the reason given on :class:`PortableResult`: the
+    answer has to be the same on a machine where git is not installed. The
+    price is that a ``.git`` in a directory this process may not search reads
+    as absent, and that a relative root is walked only as far as the working
+    directory it is relative to.
+
+    :param path: The directory to start from. It is tested before its parents,
+        so a root that *is* a top level answers with itself.
+    :returns: The nearest directory at or above ``path`` holding a ``.git``
+        entry, or ``None`` when there is none below the filesystem root. A
+        ``.git`` *file* — the worktree and submodule spelling — counts as
+        readily as the directory, since either one means the files are tracked.
+    """
+    current = path
+    while True:
+        # os.path.exists, never Path.exists: before 3.14 the pathlib probe
+        # re-raises any OSError whose errno is outside its small allowed set,
+        # so one unsearchable ancestor would abort a write that has nothing to
+        # do with it. The os.path spelling absorbs OSError and ValueError
+        # alike and answers False, which is the honest reading of "cannot
+        # tell" for a check whose only job is to pick which advice to print.
+        if os.path.exists(current / ".git"):
+            return current
+        parent = current.parent
+        # The walk is lexical, so no symlink cycle can extend it; this test is
+        # what bounds it at the filesystem root, where a path is its own
+        # parent. A relative path bounds out at '.' by the same rule.
+        if parent == current:
+            return None
+        current = parent
+
+
 @dataclass(frozen=True)
 class PortableResult:
     """What ``stack config portable`` did, or would do under ``--dry-run``.
@@ -82,15 +126,29 @@ class PortableResult:
     :ivar outcome: ``"created"``, ``"updated"``, or ``"unchanged"``.
     :ivar block: The managed block's text, LF-joined. This is the form the CLI
         prints; what was written to disk uses the target file's own terminator.
-    :ivar is_repository: Whether ``<root>/.git`` exists. Decided by a
-        filesystem check rather than a git invocation, so the command works on
-        a machine where git is not installed.
+    :ivar repository_root: The top level of the git working tree the config
+        root sits in, or ``None`` when it sits in none. Decided by a filesystem
+        walk rather than a git invocation, so the command works on a machine
+        where git is not installed. The advice in :func:`next_steps` needs the
+        top level itself, not merely its existence, because that is the
+        directory the untracking pathspecs are resolved against.
     """
 
     path: Path
     outcome: Literal["created", "updated", "unchanged"]
     block: str
-    is_repository: bool
+    repository_root: Path | None
+
+    @property
+    def is_repository(self) -> bool:
+        """Whether the config root is inside a git working tree.
+
+        Derived rather than stored so the two cannot disagree: "inside a
+        repository" is exactly "a top level was found".
+
+        :returns: True when :attr:`repository_root` names a directory.
+        """
+        return self.repository_root is not None
 
 
 def _line_numbers(indexes: list[int]) -> str:
@@ -212,7 +270,7 @@ def write_portable_ignore(
     """
     path = config.root / ".gitignore"
     block = render_block(config)
-    is_repository = (config.root / ".git").exists()
+    repository_root = enclosing_repository(config.root)
 
     original: str | None = None
     if path.exists():
@@ -243,7 +301,7 @@ def write_portable_ignore(
     if not dry_run and updated != original:
         atomic_write(path, updated)
     return PortableResult(
-        path=path, outcome=outcome, block=block, is_repository=is_repository
+        path=path, outcome=outcome, block=block, repository_root=repository_root
     )
 
 
@@ -254,17 +312,27 @@ def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:
     rewrites what the index holds, and a root may already have a remote,
     a branch policy, or uncommitted work that only its owner knows about.
 
-    The branch keys on whether the root is a repository, not on what the write
-    did — an ``unchanged`` outcome in an existing repository still needs the
-    untracking step, because files committed before they were ignored stay
+    Three states, not two. A root with no repository above it gets the
+    bootstrap sequence. A root that *is* a working tree's top level, and a root
+    nested inside one, both get the untracking sequence — the second addressed
+    to the top level that was found, since that is the repository holding the
+    files. Only the first state may print ``git init``: offering it inside an
+    existing working tree would advise nesting one repository in another.
+
+    The branch keys on whether the root is in a repository, not on what the
+    write did — an ``unchanged`` outcome in an existing repository still needs
+    the untracking step, because files committed before they were ignored stay
     tracked no matter how current the ignore file is.
 
     :param config: The config root.
-    :param result: What the write did.
+    :param result: What the write did, including the working tree it found.
+        Both come from one :func:`write_portable_ignore` call on ``config``,
+        which is what makes the root a descendant of the top level below.
     :returns: One command (or note) per line, in the order to run them.
     """
     root = shlex.quote(str(config.root))
-    if not result.is_repository:
+    top = result.repository_root
+    if top is None:
         return [
             f"git -C {root} init",
             f"git -C {root} add .",
@@ -272,12 +340,24 @@ def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:
             f"git -C {root} remote add origin <url>",
             f"git -C {root} push -u origin HEAD",
         ]
-    patterns = " ".join(shlex.quote(pattern) for pattern in ignore_patterns(config))
+    where = shlex.quote(str(top))
+    # Every command is addressed to the top level, so every pathspec in them
+    # resolves against the top level too — git takes a pathspec relative to
+    # the working directory, and -C is what sets that. The block's patterns
+    # are written relative to the config root, so a nested root has to put its
+    # own path in front of each one or 'rm --cached' matches the wrong files,
+    # or none. A root that is itself the top level relativizes to '.', which
+    # prefixes nothing and leaves both commands exactly as they were.
+    relative = config.root.relative_to(top).as_posix()
+    prefix = "" if relative == "." else f"{relative}/"
+    patterns = " ".join(
+        shlex.quote(prefix + pattern) for pattern in ignore_patterns(config)
+    )
     return [
         "Some of these patterns may already be tracked from before they were "
         "ignored; untrack them first.",
-        f"git -C {root} rm -r --cached --ignore-unmatch -- {patterns}",
-        f"git -C {root} add .",
-        f'git -C {root} commit -m "Stop tracking generated files"',
-        f"git -C {root} push",
+        f"git -C {where} rm -r --cached --ignore-unmatch -- {patterns}",
+        f"git -C {where} add {shlex.quote(relative)}",
+        f'git -C {where} commit -m "Stop tracking generated files"',
+        f"git -C {where} push",
     ]

@@ -13,7 +13,7 @@ It also reports portability problems: declared variables with no value here,
 references that are undeclared, malformed, or in an entry that may not hold
 one, editable checkouts that are absent, a ``project-python.txt`` value that
 will not travel, and a missing or stale managed ``.gitignore`` block in a
-config root that is a git repository.
+config root that sits inside a git repository.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from uv_stack.fsutil import (
     nofollow_read_flags,
     probe_locking,
 )
-from uv_stack.operations.portable import write_portable_ignore
+from uv_stack.operations.portable import enclosing_repository, write_portable_ignore
 from uv_stack.operations.project import python_travel_problem
 from uv_stack.parse import read_clean_lines
 from uv_stack.variables import Variables, expand_all, placement_problem, referenced_names
@@ -1269,18 +1269,23 @@ def _project_python_findings(config: ConfigRoot) -> list[Finding]:
 
 
 def _ignore_block_findings(config: ConfigRoot) -> list[Finding]:
-    """Report a missing or stale managed ignore block in a repository root.
+    """Report a missing or stale managed ignore block in a root git tracks.
 
     Staleness is decided by the writer itself, under ``dry_run``, so doctor's
     notion of stale can never drift from what ``stack config portable`` would
     actually write.
 
     :param config: The configuration root.
-    :returns: At most one finding; empty when the root is not a repository.
+    :returns: At most one finding; empty when the root is inside no repository.
     """
-    # os.path.exists: the pathlib probe re-raises EACCES, and it sits above
-    # the guard below rather than inside it.
-    if not os.path.exists(config.root / ".git"):
+    # The writer's own predicate, so the two can never disagree about which
+    # roots the block is for. A root nested in a working tree is one of them:
+    # its files are tracked by the enclosing repository, so a missing or stale
+    # block there leaves another machine's generated files committed, and
+    # reporting clean on that is the one thing this scan may not do. The walk
+    # probes with os.path.exists, which is why it can sit above the guard
+    # below rather than inside it.
+    if enclosing_repository(config.root) is None:
         return []
     try:
         result = write_portable_ignore(config, dry_run=True)

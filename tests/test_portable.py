@@ -195,7 +195,11 @@ def test_dry_run_writes_nothing(
 
 
 def test_next_steps_for_a_root_that_is_not_a_repository(config_tree: ConfigRoot):
+    # Nothing at <root>/.git and nothing above it either: the walk has to
+    # reach the filesystem root and stop there, which it does because pytest's
+    # temp directory is not itself inside a working tree.
     result = write_portable_ignore(config_tree, dry_run=True)
+    assert result.repository_root is None
     assert result.is_repository is False
     steps = next_steps(config_tree, result)
     assert any(step.endswith(" init") for step in steps)
@@ -218,6 +222,74 @@ def test_next_steps_for_an_existing_repository_untrack_first(config_tree: Config
     # which is precisely the state this step exists to get the root out of.
     tokens = shlex.split(steps[untrack])
     assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
+
+
+def test_next_steps_for_a_root_nested_in_a_repository_address_the_top_level(
+    config_tree: ConfigRoot,
+):
+    # The fixture's root is tmp_path/'python-envs', so a .git beside it makes
+    # the root a subdirectory of a working tree rather than the working tree —
+    # a dotfiles repo with python-envs/ inside it, and the layout a lone
+    # <root>/.git probe read as no repository at all, printing 'git init'
+    # inside an existing repository and never offering to untrack anything.
+    top = config_tree.root.parent
+    (top / ".git").mkdir()
+    result = write_portable_ignore(config_tree, dry_run=True)
+    assert result.repository_root == top
+    assert result.is_repository is True
+    steps = next_steps(config_tree, result)
+    assert not any(" init" in step for step in steps)
+    untrack = next(step for step in steps if "rm -r --cached" in step)
+    tokens = shlex.split(untrack)
+    assert tokens[:3] == ["git", "-C", str(top)]
+    # Prefixed, and compared whole: -C makes the top level the directory every
+    # pathspec resolves against, so a bare 'editor.txt' names the top level's
+    # own file. Unprefixed, this step would untrack something else or nothing
+    # at all while every generated file under the root stayed committed.
+    assert tokens[tokens.index("--") + 1 :] == [
+        f"{config_tree.root.name}/{pattern}" for pattern in GOLDEN_PATTERNS
+    ]
+
+
+def test_the_nested_add_step_stages_the_config_root_only(config_tree: ConfigRoot):
+    # 'add .' would stage the whole enclosing repository, which for a dotfiles
+    # root is a pile of unrelated work the user did not ask to commit.
+    (config_tree.root.parent / ".git").mkdir()
+    result = write_portable_ignore(config_tree, dry_run=True)
+    add = next(step for step in next_steps(config_tree, result) if " add " in step)
+    assert shlex.split(add) == [
+        "git",
+        "-C",
+        str(config_tree.root.parent),
+        "add",
+        config_tree.root.name,
+    ]
+
+
+def test_the_walk_climbs_past_more_than_one_level(tmp_path: Path):
+    # One level up is the easy case to get right by accident; the prefix has
+    # to carry every segment between the top level and the root.
+    root = tmp_path / "repo" / "config" / "python-envs"
+    root.mkdir(parents=True)
+    (tmp_path / "repo" / ".git").mkdir()
+    config = ConfigRoot(root)
+    result = write_portable_ignore(config, dry_run=True)
+    assert result.repository_root == tmp_path / "repo"
+    untrack = next(s for s in next_steps(config, result) if "rm -r --cached" in s)
+    tokens = shlex.split(untrack)
+    assert tokens[tokens.index("--") + 1 :] == [
+        f"config/python-envs/{pattern}" for pattern in GOLDEN_PATTERNS
+    ]
+
+
+def test_a_git_file_counts_as_a_repository(config_tree: ConfigRoot):
+    # A worktree or submodule spells .git as a file holding 'gitdir: <path>'.
+    # Its files are tracked exactly as a .git directory's are, so the probe
+    # asks whether the entry exists and never whether it is a directory.
+    (config_tree.root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n")
+    result = write_portable_ignore(config_tree, dry_run=True)
+    assert result.repository_root == config_tree.root
+    assert any("rm -r --cached" in step for step in next_steps(config_tree, result))
 
 
 def test_the_repository_branch_does_not_depend_on_the_write_outcome(
