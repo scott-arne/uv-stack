@@ -1583,3 +1583,86 @@ def test_an_unreadable_envs_directory_does_not_escape_the_project_check(
         and f.path == config_tree.project_python_path()
         for f in findings
     )
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+@pytest.mark.parametrize("unsearchable", ["envs-dir", "one-env", "root-child"])
+def test_an_unsearchable_directory_does_not_abort_diagnose(
+    config_tree: ConfigRoot, unsearchable: str
+):
+    # Mode 400 is the state that bites: the directory still lists, so the walk
+    # guard hands back names, and the very next statement probes one of them.
+    # The pathlib probes re-raise EACCES there, taking the run down one line
+    # after the guard did its job.
+    #
+    # Each case leaves a different probe holding the bag: the envs directory
+    # reaches the per-env isdir, one env reaches the source-file probes inside
+    # it, and a directory under the root reaches the misplaced-env probes.
+    # All three assert on project-python-path, which is produced by the last
+    # stage of the run: if it survives, every probe above it did.
+    config_tree.project_python_path().write_text("/opt/envs/x/bin/python\n")
+    legacy = config_tree.root / "legacyenv"
+    legacy.mkdir()
+    target = {
+        "envs-dir": config_tree.envs_dir,
+        "one-env": config_tree.env_dir("main"),
+        "root-child": legacy,
+    }[unsearchable]
+    os.chmod(target, 0o400)
+    try:
+        kinds = _kinds(diagnose(config_tree))
+    finally:
+        # Restore, or tmp_path teardown cannot remove the directory.
+        os.chmod(target, 0o700)
+    assert "project-python-path" in kinds
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_an_unsearchable_config_root_reports_instead_of_raising(config_tree: ConfigRoot):
+    # The same state one level up. The root still lists, so every fixed-path
+    # probe beneath it -- and the .git probe in the ignore-block check -- gets
+    # an EACCES the pathlib spelling would re-raise. The finding asserted on
+    # comes from the source scan at the end of the run, so it stands for the
+    # run having finished rather than for any one probe.
+    os.chmod(config_tree.root, 0o400)
+    try:
+        findings = diagnose(config_tree)
+    finally:
+        os.chmod(config_tree.root, 0o700)
+    assert any(
+        f.kind == "unparseable-source" and f.path == config_tree.profiles_dir for f in findings
+    )
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_an_unsearchable_parent_of_the_root_reports_a_missing_root(tmp_path: Path):
+    # The root's own probe needs search permission on the root's parent, which
+    # is the only place it is reachable. "Does not exist" is not the whole
+    # truth about a root that cannot be stat'd, but it is an error with a fix
+    # attached, which a traceback is not.
+    outer = tmp_path / "outer"
+    (outer / "python-envs").mkdir(parents=True)
+    os.chmod(outer, 0o400)
+    try:
+        kinds = _kinds(diagnose(ConfigRoot(outer / "python-envs")))
+    finally:
+        os.chmod(outer, 0o700)
+    assert kinds == ["missing-root"]
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+@pytest.mark.parametrize("directory", ["profiles", "bundles"])
+def test_an_unreadable_legacy_scan_directory_is_not_reported_clean(
+    config_tree: ConfigRoot, directory: str
+):
+    # glob answers a directory it cannot read with an empty match, so a legacy
+    # scan written with it lets 'stack doctor' print a clean bill of health for
+    # a directory it never read. The listings inside list_profiles and
+    # list_bundles are globs too, so nothing else here would notice.
+    target = config_tree.profiles_dir if directory == "profiles" else config_tree.bundles_dir
+    os.chmod(target, 0o000)
+    try:
+        findings = diagnose(config_tree)
+    finally:
+        os.chmod(target, 0o700)
+    assert any(f.kind == "unparseable-source" and f.path == target for f in findings)

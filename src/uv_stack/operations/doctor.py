@@ -140,7 +140,11 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
     """
     findings: list[Finding] = []
 
-    if not config.root.is_dir():
+    # Every probe below uses the os.path spelling, which answers an errno it
+    # cannot act on with False, rather than the pathlib one, which re-raises
+    # anything but a missing path. A directory this user cannot search is a
+    # thing to report, not a reason to abort before reporting anything at all.
+    if not os.path.isdir(config.root):
         findings.append(
             Finding(
                 "error",
@@ -157,7 +161,7 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
         ("bundles", config.bundles_dir),
         ("envs", config.envs_dir),
     ):
-        if not directory.is_dir():
+        if not os.path.isdir(directory):
             findings.append(
                 Finding(
                     "error",
@@ -169,8 +173,16 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
             )
 
     # Leftover pre-YAML config files (clean break: these are no longer read).
-    if config.profiles_dir.is_dir():
-        for legacy in config.profiles_dir.glob("*.in"):
+    # Walked rather than globbed: glob answers a directory it cannot read with
+    # an empty match, which would report a clean bill of health for a tree
+    # doctor never saw. The isdir guard stays because an absent directory is
+    # already reported above as missing-dir.
+    if os.path.isdir(config.profiles_dir):
+        profile_children, walk_findings = _children(config.profiles_dir)
+        findings += walk_findings
+        for legacy in profile_children:
+            if legacy.suffix != ".in":
+                continue
             findings.append(
                 Finding(
                     "warn",
@@ -181,8 +193,12 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                     dest=legacy.with_suffix(".yaml"),
                 )
             )
-    if config.bundles_dir.is_dir():
-        for legacy in config.bundles_dir.glob("*.bundle"):
+    if os.path.isdir(config.bundles_dir):
+        bundle_children, walk_findings = _children(config.bundles_dir)
+        findings += walk_findings
+        for legacy in bundle_children:
+            if legacy.suffix != ".bundle":
+                continue
             findings.append(
                 Finding(
                     "warn",
@@ -198,9 +214,11 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
     root_children, walk_findings = _children(config.root)
     findings += walk_findings
     for child in root_children:
-        if not child.is_dir() or child.name in _KNOWN_TOP_LEVEL:
+        if not os.path.isdir(child) or child.name in _KNOWN_TOP_LEVEL:
             continue
-        if (child / "requirements.in").exists() or (child / "environment.yml").exists():
+        if os.path.exists(child / "requirements.in") or os.path.exists(
+            child / "environment.yml"
+        ):
             findings.append(
                 Finding(
                     "warn",
@@ -213,13 +231,13 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
             )
 
     # Per-env source-file checks.
-    if config.envs_dir.is_dir():
+    if os.path.isdir(config.envs_dir):
         env_children, walk_findings = _children(config.envs_dir)
         findings += walk_findings
         for env_dir in env_children:
-            if not env_dir.is_dir():
+            if not os.path.isdir(env_dir):
                 continue
-            if (env_dir / "profiles.txt").exists():
+            if os.path.exists(env_dir / "profiles.txt"):
                 findings.append(
                     Finding(
                         "warn",
@@ -230,9 +248,9 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                         dest=env_dir / "stack.txt",
                     )
                 )
-            if (env_dir / "stack.txt").is_file() and not (
+            if os.path.isfile(env_dir / "stack.txt") and not os.path.isfile(
                 env_dir / "python.txt"
-            ).is_file():
+            ):
                 findings.append(
                     Finding(
                         "warn",
