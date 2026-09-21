@@ -45,6 +45,12 @@ from uv_stack.variables import Variables, expand_all, placement_problem, referen
 
 _KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib", ".locks"}
 
+#: Files whose presence makes a directory an env directory rather than an
+#: unrelated one. Matched against enumerated names, so a marker left as a
+#: dangling symlink still marks its directory -- the entry is there, and
+#: the repair moves the directory whole either way.
+_ENV_MARKERS = {"requirements.in", "environment.yml"}
+
 # Public-source fallback: narrower than the temp-file set, because on Linux
 # with fs.protected_hardlinks=1, EPERM from os.link means "policy denies
 # hardlinking a file you do not own," not "this filesystem has no hard links."
@@ -210,25 +216,36 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                 )
             )
 
-    # Env-like directories left directly under root.
+    # Env-like directories left directly under root. Membership is decided
+    # from the enumerated names rather than from exists() probes, for the
+    # reason the two legacy scans above were rerouted: a directory this user
+    # cannot search answers every probe inside it with False, so the marker
+    # test reported nothing at all for a directory doctor never inspected --
+    # while the same tree one chmod away yields a real misplaced-env.
+    #
+    # The price is that every unknown top-level directory is now enumerated,
+    # so an unreadable one is reported even when it is not env-like at all.
+    # That is the rule working: doctor could not read it, so it must not call
+    # it clean.
     root_children, walk_findings = _children(config.root)
     findings += walk_findings
     for child in root_children:
         if not os.path.isdir(child) or child.name in _KNOWN_TOP_LEVEL:
             continue
-        if os.path.exists(child / "requirements.in") or os.path.exists(
-            child / "environment.yml"
-        ):
-            findings.append(
-                Finding(
-                    "warn",
-                    f"Env-like directory not under envs/: {child.name}",
-                    fix=f"Move it: mv {child} {config.envs_dir / child.name}",
-                    kind="misplaced-env",
-                    path=child,
-                    dest=config.envs_dir / child.name,
-                )
+        child_entries, walk_findings = _children(child)
+        findings += walk_findings
+        if not {entry.name for entry in child_entries} & _ENV_MARKERS:
+            continue
+        findings.append(
+            Finding(
+                "warn",
+                f"Env-like directory not under envs/: {child.name}",
+                fix=f"Move it: mv {child} {config.envs_dir / child.name}",
+                kind="misplaced-env",
+                path=child,
+                dest=config.envs_dir / child.name,
             )
+        )
 
     # Per-env source-file checks.
     if os.path.isdir(config.envs_dir):

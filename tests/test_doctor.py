@@ -1938,3 +1938,42 @@ def test_an_unreadable_legacy_scan_directory_is_not_reported_clean(
     finally:
         os.chmod(target, 0o700)
     assert any(f.kind == "unparseable-source" and f.path == target for f in findings)
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_an_unsearchable_directory_under_root_is_not_reported_clean(
+    config_tree: ConfigRoot,
+):
+    # Stat'ing a directory needs search permission on its parent, not on
+    # itself, so the root walk hands this child back and the marker test runs
+    # against it. Written with exists() that test collapsed EACCES to False
+    # and doctor returned nothing at all -- for a directory that, one chmod
+    # later, produces a real finding. The control below is the whole point:
+    # this is a diagnosis lost, not a diagnosis never attempted.
+    legacy = config_tree.root / "legacyenv"
+    legacy.mkdir()
+    (legacy / "requirements.in").write_text("# x\n")
+    os.chmod(legacy, 0o000)
+    try:
+        findings = diagnose(config_tree)
+    finally:
+        # Restore, or tmp_path teardown cannot remove the directory.
+        os.chmod(legacy, 0o755)
+    assert _kinds(findings) == ["unparseable-source"]
+    assert findings[0].path == legacy
+
+    assert _kinds(diagnose(config_tree)) == ["misplaced-env"]
+
+
+def test_a_readable_directory_under_root_without_markers_is_not_a_finding(
+    config_tree: ConfigRoot,
+):
+    # Every unknown top-level directory is enumerated now, not just the
+    # env-like ones, so the marker test is the only thing keeping an ordinary
+    # directory out of the findings. Without this, reporting each one that was
+    # merely walked would pass the rest of the suite.
+    notes = config_tree.root / "notes"
+    notes.mkdir()
+    (notes / "README").write_text("scratch\n")
+
+    assert diagnose(config_tree) == []
