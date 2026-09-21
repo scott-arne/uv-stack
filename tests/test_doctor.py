@@ -1156,9 +1156,10 @@ def test_a_declared_variable_with_no_value_is_an_error(config_tree: ConfigRoot):
     findings = diagnose(config_tree)
     finding = next(f for f in findings if f.kind == "undefined-variable")
     assert finding.level == "error"
-    assert "DEV" in finding.message
+    assert "Variable 'DEV' is declared in" in finding.message
+    assert "has no value on this machine" in finding.message
     assert finding.fix is not None
-    assert "variables.local.txt" in finding.fix
+    assert f"Add 'DEV=<value>' to {config_tree.variables_local_path()}" in finding.fix
 
 
 def test_an_undeclared_reference_is_an_error(config_tree: ConfigRoot):
@@ -1166,7 +1167,7 @@ def test_an_undeclared_reference_is_an_error(config_tree: ConfigRoot):
     findings = diagnose(config_tree)
     finding = next(f for f in findings if f.kind == "undeclared-variable")
     assert finding.level == "error"
-    assert "NOPE" in finding.message
+    assert "references 'NOPE', which" in finding.message
     assert finding.path == config_tree.profile_path("dev")
 
 
@@ -1191,7 +1192,7 @@ def test_a_malformed_reference_is_an_error(config_tree: ConfigRoot, entry):
     config_tree.profile_path("dev").write_text(f"includes:\n  - {entry}\n")
     finding = next(f for f in diagnose(config_tree) if f.kind == "malformed-reference")
     assert finding.level == "error"
-    assert "${" in finding.message
+    assert "is not a well-formed reference" in finding.message
 
 
 def test_a_misplaced_reference_is_an_error(config_tree: ConfigRoot):
@@ -1427,7 +1428,7 @@ def test_a_project_python_naming_an_undeclared_env_is_a_warning(
     )
     assert finding.level == "warn"
     assert finding.fix is not None
-    assert "main" in finding.fix
+    assert "Declared environments: main." in finding.fix
 
 
 def test_portable_project_python_values_are_not_flagged(config_tree: ConfigRoot):
