@@ -1404,7 +1404,10 @@ def test_a_missing_ignore_block_in_a_repository_is_a_warning(
     (config_tree.root / ".git").mkdir()
     finding = next(f for f in diagnose(config_tree) if f.kind == "stale-ignore-block")
     assert finding.level == "warn"
-    assert "missing" in finding.message
+    # Anchored to the end of the message rather than searched for: the message
+    # quotes the config root, and pytest builds that path out of this test's
+    # own name, so a substring test for 'missing' passes whatever the wording.
+    assert finding.message.endswith("is missing.")
     assert finding.fix is not None
     assert "stack config portable" in finding.fix
 
@@ -1527,9 +1530,13 @@ def test_an_unwalkable_directory_is_reported_not_raised(
     real_iterdir = Path.iterdir
 
     def _selective(self: Path):
+        # A generator function, because Path.iterdir is one on Python 3.12:
+        # the failure surfaces on the first iteration, not at the call. 3.13
+        # made it eager, so an ordinary function here would quietly stop
+        # testing that _children materializes the walk inside its guard.
         if self == target:
             raise PermissionError(13, "Permission denied")
-        return real_iterdir(self)
+        yield from real_iterdir(self)
 
     monkeypatch.setattr(Path, "iterdir", _selective)
     findings = diagnose(config_tree)
