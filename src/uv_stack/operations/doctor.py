@@ -234,7 +234,22 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
             continue
         child_entries, walk_findings = _children(child)
         findings += walk_findings
-        if not {entry.name for entry in child_entries} & _ENV_MARKERS:
+        # Two questions, because neither one answers for the other. The
+        # enumerated names see an entry the filesystem will not resolve -- a
+        # marker that is a dangling symlink -- and they see it in a directory
+        # that can be read at all. The exists() probes see the filesystem's
+        # own idea of the name: on a case-insensitive filesystem, APFS and the
+        # macOS default, 'Requirements.in' IS the file config.py, render.py,
+        # status.py and upgrade.py all open, so a name test alone reports
+        # clean on a misplaced env the rest of the tool would use. Casefolding
+        # the names instead of asking would be the mirror bug -- on a
+        # case-sensitive filesystem that spelling is a different file uv-stack
+        # never reads, and the mv fix would be wrong. Asking leaves each
+        # platform's answer to that platform.
+        names = {entry.name for entry in child_entries}
+        if not names & _ENV_MARKERS and not any(
+            os.path.exists(child / marker) for marker in _ENV_MARKERS
+        ):
             continue
         findings.append(
             Finding(

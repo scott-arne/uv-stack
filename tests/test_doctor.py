@@ -2011,3 +2011,40 @@ def test_a_readable_directory_under_root_without_markers_is_not_a_finding(
     (notes / "README").write_text("scratch\n")
 
     assert diagnose(config_tree) == []
+
+
+def test_a_case_variant_marker_is_diagnosed_where_the_filesystem_resolves_it(
+    config_tree: ConfigRoot,
+):
+    # Membership is decided from the enumerated names, which are exact-case.
+    # On a case-insensitive filesystem -- APFS, the macOS default -- that name
+    # is the same file config.py, render.py, status.py and upgrade.py all
+    # open, so a name test on its own would report clean on a misplaced env
+    # the rest of the tool would use. The assertion branches because the right
+    # answer genuinely differs by platform: where the filesystem does not
+    # resolve it, this is a different file uv-stack never reads, and flagging
+    # it would offer an mv repair for a directory that is not an env.
+    legacy = config_tree.root / "legacyenv"
+    legacy.mkdir()
+    (legacy / "Requirements.in").write_text("# x\n")
+
+    findings = diagnose(config_tree)
+    if os.path.exists(legacy / "requirements.in"):
+        assert _kinds(findings) == ["misplaced-env"]
+    else:
+        assert findings == []
+
+
+def test_a_marker_the_filesystem_will_not_resolve_is_still_a_misplaced_env(
+    config_tree: ConfigRoot,
+):
+    # The other half of the membership test. A dangling symlink is listed by
+    # the enumeration and answered False by exists(), so deciding membership
+    # from the probes alone drops it -- and placement is what this finding is
+    # about, not whether the marker resolves. The mv repair moves the broken
+    # link along with everything else in the directory.
+    legacy = config_tree.root / "legacyenv"
+    legacy.mkdir()
+    (legacy / "requirements.in").symlink_to(legacy / "nowhere")
+
+    assert _kinds(diagnose(config_tree)) == ["misplaced-env"]
