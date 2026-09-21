@@ -440,6 +440,17 @@ def test_a_non_regular_local_variables_file_is_refused(config_tree: ConfigRoot, 
     assert "variables.local.txt" in excinfo.value.message
 
 
+@pytest.mark.parametrize("shape", _NON_REGULAR_SHAPES)
+def test_a_non_regular_project_python_file_is_refused(config_tree: ConfigRoot, shape: str):
+    # first_clean_line reads through the same is_file() test, so each of these
+    # shapes answered "no default is configured" -- the answer an absent file
+    # gives -- for a file that is present and unreadable.
+    _make_non_regular(config_tree.project_python_path(), shape)
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.default_project_python()
+    assert "project-python.txt" in excinfo.value.message
+
+
 def test_a_malformed_declaration_names_the_file_and_line(config_tree: ConfigRoot):
     config_tree.variables_path().write_text("DEV\n2BAD\n")
     with pytest.raises(ConfigError) as excinfo:

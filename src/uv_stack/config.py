@@ -319,8 +319,17 @@ class ConfigRoot:
 
         :returns: The first clean line of ``project-python.txt``, or ``None``
             when the file is absent or empty.
+        :raises ConfigError: When the path is not a regular file, or the file
+            is not valid UTF-8.
         """
-        line = first_clean_line(self.project_python_path(), default="")
+        path = self.project_python_path()
+        # Ahead of the read, per require_regular_file's own contract:
+        # read_clean_lines under first_clean_line tests is_file(), which
+        # answers False for a directory named project-python.txt just as it
+        # does for an absent one, and "no default is configured" is not a safe
+        # reading of "I could not read the default you configured".
+        require_regular_file(path)
+        line = first_clean_line(path, default="")
         return line or None
 
     def default_editor(self) -> str | None:
