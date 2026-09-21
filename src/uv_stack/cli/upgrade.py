@@ -15,6 +15,11 @@ from uv_stack.operations.scaffold import validate_name
 from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
 from uv_stack.runner import SubprocessRunner
 
+#: The all-succeeded line for a dry run. Both commands share it because
+#: neither one upgraded or converged anything: what came out whole is the
+#: plan. Keeping their own wording here would claim work that did not happen.
+_ALL_PLANNED = "All requested environments planned."
+
 
 def _checked_names(names: tuple[str, ...]) -> list[str]:
     """Reject a NAME that is not a plain environment name.
@@ -59,7 +64,9 @@ def _run_upgrade(
     :param rule_verb: The verb in each environment's section rule. Supplied by
         ``stack converge``, which runs the same pipeline under another name.
     :param all_succeeded: The line printed when nothing failed. Author-supplied
-        from a call site in this package, never user input.
+        from a call site in this package, never user input. A dry run ignores
+        it in favour of :data:`_ALL_PLANNED`, since neither command upgraded
+        nor converged anything.
     """
     runner = SubprocessRunner()
     failures: list[tuple[str, UvStackError | OSError]] = []
@@ -101,12 +108,17 @@ def _run_upgrade(
             for command in result.planned:
                 echo("  " + " ".join(command.args))
 
-    if options.dry_run:
-        if failures:
-            sys.exit(1)
-        return
-
-    _print_summary(targets, failures, attempted, all_succeeded=all_succeeded)
+    # The summary is printed for a plan too. A whole-root dry run over a dozen
+    # environments of which two failed otherwise gave the user two error
+    # panels somewhere in the scroll-back, a non-zero status, and no roll-up
+    # naming which two — and the three outcomes describe a plan as exactly as
+    # they describe an execution.
+    _print_summary(
+        targets,
+        failures,
+        attempted,
+        all_succeeded=_ALL_PLANNED if options.dry_run else all_succeeded,
+    )
     if failures:
         sys.exit(1)
 

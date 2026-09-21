@@ -5192,9 +5192,10 @@ def test_converge_dry_run_probes_and_mutates_nothing(tmp_path: Path, monkeypatch
     result = CliRunner().invoke(cli, ["--root", str(root), "converge", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert [c.args for c in runner.commands] == [micromamba_python_info("main").args]
-    # The section rule is the only place converge's own verb reaches the screen
-    # on this path: --dry-run returns before the summary.
+    # The section rule carries converge's own verb, and the summary under a
+    # dry run reports the plan without claiming anything was converged.
     assert "Converging main" in result.output
+    assert "All requested environments planned." in result.output
     # The two generated files are refreshed; nothing else is written.
     assert config.env_requirements_in("main").is_file()
     assert config.env_environment_yml("main").is_file()
@@ -5221,6 +5222,31 @@ def test_converge_success_summary_uses_its_own_line(tmp_path: Path, monkeypatch)
     assert result.exit_code == 0, result.output
     assert "All requested environments converged." in result.output
     assert "All requested environments upgraded." not in result.output
+
+@pytest.mark.parametrize("command", ["upgrade", "converge"])
+def test_a_dry_run_success_line_claims_a_plan_and_nothing_more(
+    tmp_path: Path, monkeypatch, command: str
+):
+    """Neither command may report work a dry run did not do.
+
+    Both call sites supply their own past-tense line — 'upgraded', 'converged'
+    — and under --dry-run neither is true, so the two share one that is.
+    """
+    from uv_stack.operations.upgrade import UpgradeResult
+
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env",
+        lambda config, runner, name, options: UpgradeResult(env_name=name),
+    )
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), command, "--dry-run", "main"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "All requested environments planned." in result.output
+    assert "upgraded." not in result.output
+    assert "converged." not in result.output
+
 
 def _three_envs_root(tmp_path: Path) -> Path:
     """A config root declaring three environments, for batch-behavior tests.
@@ -5310,6 +5336,57 @@ def test_upgrade_continues_past_an_os_error_and_accounts_for_it(
     assert attempted == ["beta", "gamma", "main"]
     summary = result.output.split("Summary", 1)[1]
     assert "1 of 3 environment(s) failed." in summary
+
+
+@pytest.mark.parametrize("command", ["upgrade", "converge"])
+def test_a_dry_run_batch_rolls_its_failures_up_too(
+    tmp_path: Path, monkeypatch, command: str
+):
+    """A plan over a whole root gets the same roll-up an execution gets.
+
+    Without it a dozen-environment dry run with two failures left the user an
+    error panel somewhere in the scroll-back for each, a non-zero status, and
+    nothing that named which two — on the command whose entire purpose is the
+    whole-root batch.
+    """
+    root = _three_envs_root(tmp_path)
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_raising(attempted, _eisdir())
+    )
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), command, "--dry-run", "beta", "gamma", "main"]
+    )
+
+    assert result.exit_code == 1, result.output
+    summary = result.output.split("Summary", 1)[1]
+    assert "✗ beta" in summary
+    assert "Is a directory" in summary
+    assert "✓ gamma" in summary
+    assert "✓ main" in summary
+    assert "1 of 3 environment(s) failed." in summary
+
+
+def test_a_dry_run_with_stop_on_error_still_reports_the_skipped(
+    tmp_path: Path, monkeypatch
+):
+    """The third outcome describes a plan as well as it describes a run."""
+    root = _three_envs_root(tmp_path)
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_raising(attempted, _eisdir())
+    )
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--dry-run", "--stop-on-error"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert attempted == ["beta"]
+    summary = result.output.split("Summary", 1)[1]
+    assert "– gamma" in summary
+    assert "– main" in summary
 
 
 def test_os_error_with_stop_on_error_skips_remaining_environments(
