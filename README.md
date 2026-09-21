@@ -630,6 +630,12 @@ is creating for the first time. A root that is a *subdirectory* of a repository
 addressed to the config root with `-C`, and git finds the enclosing repository
 by walking up from there.
 
+That sequence stages only the `.gitignore` it just wrote, so nothing else
+sitting in the root is committed on your behalf; a root whose own files have
+never been committed needs a `git add` of your own. Its `commit` records
+everything already staged in the repository, this root or not, which is worth
+a `git status` before you paste it.
+
 uv-stack never invokes git. It writes the ignore file and prints the commands;
 you run them.
 

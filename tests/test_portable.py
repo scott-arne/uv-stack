@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import shlex
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -205,6 +208,14 @@ def test_next_steps_for_a_root_that_is_not_a_repository(config_tree: ConfigRoot)
     assert any(step.endswith(" init") for step in steps)
     assert not any("rm -r --cached" in step for step in steps)
     assert sum("push" in step for step in steps) == 1
+    # Bootstrapping stages the whole root on purpose, and only this branch may:
+    # the repository it stages into is the one 'git init' just created one line
+    # above, so there is nothing else in it to sweep up and no remote to push
+    # a surprise to. The repository branch narrows its own add to the ignore
+    # file; this assertion is what keeps that narrowing from spreading here and
+    # leaving a fresh root with an initial commit holding one file.
+    add = next(step for step in steps if " add " in step and "remote" not in step)
+    assert shlex.split(add) == ["git", "-C", str(config_tree.root), "add", "."]
 
 
 def test_next_steps_for_an_existing_repository_untrack_first(config_tree: ConfigRoot):
@@ -213,7 +224,7 @@ def test_next_steps_for_an_existing_repository_untrack_first(config_tree: Config
     assert result.is_repository is True
     steps = next_steps(config_tree, result)
     untrack = next(i for i, s in enumerate(steps) if "rm -r --cached" in s)
-    add = next(i for i, s in enumerate(steps) if s.endswith(" add ."))
+    add = next(i for i, s in enumerate(steps) if s.endswith(" add .gitignore"))
     assert untrack < add
     assert not any(" init" in step for step in steps)
     assert sum("push" in step for step in steps) == 1
@@ -251,14 +262,94 @@ def test_next_steps_for_a_root_nested_in_a_repository_address_the_root(
     assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
 
 
-def test_the_nested_add_step_stages_the_config_root_only(config_tree: ConfigRoot):
-    # Staging the whole enclosing repository would sweep up a pile of
-    # unrelated dotfiles work the user did not ask to commit. '.' stays
-    # bounded by the -C directory, so the root is all it can reach.
+def test_the_nested_add_step_stages_only_the_ignore_file(config_tree: ConfigRoot):
+    # '.' is bounded by the -C directory, so it cannot reach the enclosing
+    # dotfiles repository — but the root itself is where this machine's
+    # private values live, and 'add .' stages any untracked file there that no
+    # pattern happens to cover, and the sequence ends in a push. The
+    # untracking step has already staged its deletions, so naming the ignore
+    # file stages everything the sequence's purpose requires and nothing else.
     (config_tree.root.parent / ".git").mkdir()
     result = write_portable_ignore(config_tree, dry_run=True)
     add = next(step for step in next_steps(config_tree, result) if " add " in step)
-    assert shlex.split(add) == ["git", "-C", str(config_tree.root), "add", "."]
+    assert shlex.split(add) == ["git", "-C", str(config_tree.root), "add", ".gitignore"]
+
+
+# The user's own git configuration must not decide what the executed test
+# below observes: a global core.excludesFile, a commit template or a hooks
+# path all change what 'add' stages or what 'status' reports. The identity
+# variables are what let its setup commit run against no configured user.
+_GIT_ENV = {
+    **os.environ,
+    "GIT_CONFIG_GLOBAL": os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "uv-stack tests",
+    "GIT_AUTHOR_EMAIL": "tests@example.invalid",
+    "GIT_COMMITTER_NAME": "uv-stack tests",
+    "GIT_COMMITTER_EMAIL": "tests@example.invalid",
+}
+
+
+def _git(*args: str) -> str:
+    """Run one git command to completion, failing the test on a non-zero exit.
+
+    :param args: The command's arguments, without the leading ``git``.
+    :returns: Its standard output.
+    """
+    done = subprocess.run(["git", *args], capture_output=True, text=True, env=_GIT_ENV)
+    assert done.returncode == 0, f"git {' '.join(args)}\n{done.stdout}{done.stderr}"
+    return done.stdout
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="requires a git executable")
+def test_the_printed_commands_stage_nothing_the_user_did_not_ask_for(tmp_path: Path):
+    """Run the printed sequence against a real repository and read the index.
+
+    Comparing command strings pins their spelling; only git can say what the
+    user's repository is left holding, which is what was wrong. Under
+    ``add .`` a file sitting untracked in the config root — the one place this
+    machine's private values live — was staged, committed under a message
+    about generated files, and pushed by the last line of the same sequence.
+    """
+    top = tmp_path / "dotfiles"
+    root = top / "python-envs"
+    root.mkdir(parents=True)
+    _git("init", "-q", str(top))
+    (top / "TRACKED.md").write_text("dotfiles\n")
+    (root / "variables.txt").write_text("DEV\n")
+    (root / "variables.local.txt").write_text("DEV=/srv/src\n")
+    _git("-C", str(top), "add", "-A")
+    _git("-C", str(top), "commit", "-q", "-m", "initial")
+
+    # The two things the sequence must not pick up: a file in the root that no
+    # pattern covers and that was never tracked, and an edit outside the root
+    # the user had already staged for a commit of their own.
+    (root / ".env.secret").write_text("TOKEN=hunter2\n")
+    (top / "TRACKED.md").write_text("dotfiles, edited\n")
+    _git("-C", str(top), "add", "TRACKED.md")
+
+    config = ConfigRoot(root)
+    steps = next_steps(config, write_portable_ignore(config))
+    # The sequence is run as far as the add. Its commit would take the staged
+    # edit outside the root — the residual its own note line warns about, and
+    # not something this step can narrow away — and its push has no remote.
+    _git(*shlex.split(next(s for s in steps if "rm -r --cached" in s))[1:])
+    _git(*shlex.split(next(s for s in steps if " add " in s))[1:])
+
+    status = set(_git("-C", str(top), "status", "--porcelain").splitlines())
+    # A staged entry is one whose index column is neither blank nor '?'.
+    staged = {line[3:] for line in status if line[0] not in " ?"}
+    assert "?? python-envs/.env.secret" in status
+    assert staged == {
+        "python-envs/.gitignore",
+        "python-envs/variables.local.txt",
+        # Staged before any of this ran and left exactly as it was found. The
+        # commit will still take it, which is why the sequence says so.
+        "TRACKED.md",
+    }
+    # The untracking step reaches the generated files and stops there: a
+    # declared file that must keep travelling with the root stays in the index.
+    assert "python-envs/variables.txt" in _git("-C", str(top), "ls-files").splitlines()
 
 
 def test_the_walk_climbs_past_more_than_one_level(tmp_path: Path):
@@ -318,7 +409,7 @@ def test_no_printed_pathspec_carries_the_roots_own_name(tmp_path: Path, name: st
     assert tokens[:3] == ["git", "-C", str(root)]
     assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
     add = next(s for s in steps if " add " in s)
-    assert shlex.split(add) == ["git", "-C", str(root), "add", "."]
+    assert shlex.split(add) == ["git", "-C", str(root), "add", ".gitignore"]
 
 
 def test_a_git_file_counts_as_a_repository(config_tree: ConfigRoot):

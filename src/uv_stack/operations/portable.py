@@ -337,6 +337,14 @@ def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:
     the untracking step, because files committed before they were ignored stay
     tracked no matter how current the ignore file is.
 
+    The untracking sequence stages only ``.gitignore``, which costs the one
+    case it does not serve: a root inside a repository whose own files have
+    never been committed gets its ignore file staged and nothing else, so its
+    owner adds the rest themselves after ``git status`` shows it to them. That
+    is the trade taken deliberately, because the alternative — ``add .`` —
+    stages every untracked file sitting in the root, and the sequence ends in
+    a push.
+
     :param config: The config root. Every command names it, so the paths the
         user is asked to paste are the root they asked about.
     :param result: What the write did; only whether a working tree was found
@@ -365,14 +373,32 @@ def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:
     # exclusion, at which point 'rm --cached' untracks the whole repository.
     # Quoting cannot prevent that — the argument reaches git intact and git is
     # what interprets it — and '--' separates options from pathspecs without
-    # disabling magic. 'add .' is safe for the same reason: it stages the root
-    # and nothing above it, and names no user-supplied text at all.
+    # disabling magic. The literal '.gitignore' below is in a pathspec
+    # position and is safe there for the same reason the patterns are: it is
+    # this module's own constant, with no user-supplied text in it.
+    #
+    # It is also the only thing this step may stage. 'add .' is bounded by the
+    # -C directory, but the root is exactly where a user keeps the private
+    # values this block exists to keep out of a commit, and an untracked file
+    # no pattern happens to cover — an '.env.secret' beside the generated
+    # ones — would be staged by it, committed under a message about generated
+    # files, and pushed by the last line of the same sequence. The untracking
+    # step has already staged its deletions, so the ignore file is all that
+    # the sequence's stated purpose still has left to stage.
+    #
+    # The commit stays unrestricted, and the note above it says so rather than
+    # pretending otherwise: 'git commit -- <paths>' is not the narrowing it
+    # looks like, because a pathspec switches the commit to --only semantics,
+    # which records the working-tree state of those paths and would put back
+    # the very entries 'rm --cached' just removed from the index.
     patterns = " ".join(shlex.quote(pattern) for pattern in ignore_patterns(config))
     return [
         "Some of these patterns may already be tracked from before they were "
         "ignored; untrack them first.",
+        "The commit records everything already staged in the repository, not "
+        "just this root; check 'git status' first.",
         f"git -C {root} rm -r --cached --ignore-unmatch -- {patterns}",
-        f"git -C {root} add .",
+        f"git -C {root} add .gitignore",
         f'git -C {root} commit -m "Stop tracking generated files"',
         f"git -C {root} push",
     ]
