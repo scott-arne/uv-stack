@@ -342,7 +342,14 @@ def upgrade_env(
             planned.append(micromamba_remove(env_name))
             planned.append(micromamba_create(config.env_environment_yml(env_name)))
         else:
-            if options.create:
+            # ensure_env creates only when the env is missing, so planning the
+            # create unconditionally described a step the real run declines to
+            # issue -- the dishonesty the drift guard above refuses in its own
+            # case. The answer is already paid for: that guard probed the
+            # interpreter and kept it. None covers both "not there" and "could
+            # not ask", so an unknown answer keeps the create and a dry run on
+            # a machine without micromamba still plans the whole sequence.
+            if options.create and probed_python is None:
                 planned.append(micromamba_create(config.env_environment_yml(env_name)))
             planned.append(
                 uv_pip_compile(

@@ -546,6 +546,48 @@ def test_upgrade_dry_run_recreate_plan_leads_with_the_compile(config_tree: Confi
     ]
 
 
+def test_upgrade_dry_run_omits_the_create_for_an_env_that_is_already_there(
+    config_tree: ConfigRoot,
+):
+    """A plan must never describe commands the real run would refuse to issue.
+
+    ensure_env probes first and creates only what is missing, so --create
+    against an existing env issues no create at all. The plan claimed one
+    anyway, off the flag alone, and 'micromamba create' over a live env is not
+    the no-op that omission would make it look like.
+    """
+    rec = RecordingRunner(responder=_existing_env_responder)
+    result = upgrade_env(
+        config_tree, rec, "main", UpgradeOptions(dry_run=True, create=True)
+    )
+    lock = config_tree.env_requirements_lock("main")
+    assert result.planned == [
+        uv_pip_compile(
+            "<env-python>", config_tree.env_requirements_in("main"), lock, upgrade=True
+        ),
+        uv_pip_sync("<env-python>", lock),
+        uv_pip_check("<env-python>"),
+    ]
+
+
+def test_upgrade_dry_run_keeps_the_create_when_the_env_cannot_be_probed(
+    config_tree: ConfigRoot,
+):
+    # The suppression is conditioned on a positive answer, not on the absence
+    # of a negative one. Without micromamba there is no answer, and the honest
+    # plan is the one the run would follow if the env turns out to be missing.
+    def _spawn_failure(cmd: Command) -> CommandResult:
+        raise ToolError("Could not run micromamba.", command=cmd.args, returncode=127)
+
+    rec = RecordingRunner(responder=_spawn_failure)
+    result = upgrade_env(
+        config_tree, rec, "main", UpgradeOptions(dry_run=True, create=True)
+    )
+    assert result.planned[0] == micromamba_create(
+        config_tree.env_environment_yml("main")
+    )
+
+
 def test_upgrade_dry_run_create_plan_is_unchanged(config_tree: ConfigRoot):
     """Only the recreate plan was reordered; --create still creates first."""
     rec = RecordingRunner(responder=_missing_env_responder)
