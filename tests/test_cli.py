@@ -525,7 +525,8 @@ def test_show_missing_env_errors(tmp_path: Path):
     assert "ghost" in result.output
 
 
-def test_show_env_fails_on_undefined_variable(tmp_path: Path):
+def _undefined_variable_root(tmp_path: Path) -> Path:
+    """An env root whose profile references a declared-but-unset variable."""
     from uv_stack.config import ConfigRoot
 
     root = _env_root(tmp_path)
@@ -535,9 +536,32 @@ def test_show_env_fails_on_undefined_variable(tmp_path: Path):
         "description: Core data-science stack\n"
         "includes:\n  - numpy\n  - -e ${DEV}/mypkg\n"
     )
+    return root
+
+
+def test_show_env_notes_an_undefined_variable_without_failing(tmp_path: Path):
+    root = _undefined_variable_root(tmp_path)
     result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "main"])
-    assert result.exit_code == 1
-    assert "DEV" in result.output
+    # The description above the render is complete and correct; only the
+    # requirements.in the variable would have fed is unavailable. Reporting
+    # that is the whole job, as it already is for stack status.
+    assert result.exit_code == 0
+    output = _combined_output(result)
+    assert "DEV" in output
+    assert "Cannot render requirements.in" in output
+    assert "Environment: main" in output
+
+
+def test_show_env_json_agrees_with_the_text_form_on_an_undefined_variable(tmp_path: Path):
+    import json
+
+    root = _undefined_variable_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "main", "--json"])
+    # --json returns before the render, so it always succeeded here. Pinning the
+    # pair is what keeps one output mode from going fatal on a root the other
+    # describes without complaint.
+    assert result.exit_code == 0
+    assert json.loads(result.output)["name"] == "main"
 
 
 @pytest.mark.parametrize(

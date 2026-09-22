@@ -10,7 +10,7 @@ import rich_click as click
 from uv_stack.cli._complete import KIND_CHOICES, complete_show_names
 from uv_stack.cli._render import echo, render_warnings
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError
+from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.create import env_interpreter
 from uv_stack.operations.pyproject import read_tracking
@@ -91,8 +91,18 @@ def _show_env(config: ConfigRoot, name: str, as_json: bool) -> None:
     echo("Resolved inline requirements:")
     for req in stack.inline:
         echo(f"  {req}")
-    # Touch render to validate it produces text without error.
-    render_requirements_in(stack, config, name, config.load_variables())
+    # The render runs only to surface a config that cannot produce a
+    # requirements.in -- an unresolvable variable, most often. It reports
+    # rather than aborts: every line above is already printed and correct, so
+    # failing here condemned a description that succeeded. It also failed in
+    # this branch alone, since --json returns above and never reaches the
+    # check, which made the same root fatal in one output mode and fine in the
+    # other. stack status sets the precedent, turning the identical failure
+    # into a "config error" row rather than an exit status.
+    try:
+        render_requirements_in(stack, config, name, config.load_variables())
+    except UvStackError as error:
+        render_warnings([f"Cannot render requirements.in: {error.message}"])
 
 
 def _show_project(as_json: bool) -> None:
