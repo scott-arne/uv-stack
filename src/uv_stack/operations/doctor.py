@@ -1360,6 +1360,30 @@ def _ignore_block_findings(config: ConfigRoot) -> list[Finding]:
     ]
 
 
+def _variables_blame(config: ConfigRoot, error: UvStackError | OSError) -> Path:
+    """Name the variables file a failed load was actually about.
+
+    ``load_variables`` reads two files and consults the environment, so the
+    call doctor made identifies none of them. Built from the declaration path
+    unconditionally, the finding told a reader to fix ``variables.txt`` when
+    the fault was in ``variables.local.txt`` -- and pointed a ``--json``
+    consumer at the wrong one, with the message naming the real file only in
+    its tail.
+
+    :param config: The configuration root, for the fallback.
+    :param error: Whatever escaped the load.
+    :returns: The file the raiser blamed, the file the kernel named, or the
+        declaration file. The last is the fallback rather than nothing because
+        an environment override belongs to no file at all, and the declaration
+        file is what admitted the name; the message says which variable it was.
+    """
+    if isinstance(error, ConfigError) and error.path is not None:
+        return error.path
+    if isinstance(error, OSError) and isinstance(error.filename, str):
+        return Path(error.filename)
+    return config.variables_path()
+
+
 def _portability_findings(config: ConfigRoot) -> list[Finding]:
     """Every portability check, ordered so a broken root still reports usefully.
 
@@ -1377,7 +1401,7 @@ def _portability_findings(config: ConfigRoot) -> list[Finding]:
     try:
         variables = config.load_variables()
     except (UvStackError, OSError) as error:
-        findings.append(_unparseable(config.variables_path(), str(error)))
+        findings.append(_unparseable(_variables_blame(config, error), str(error)))
         return findings
 
     references = _reference_findings(config, entries, variables)

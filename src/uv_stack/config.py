@@ -384,12 +384,24 @@ class ConfigRoot:
         unrelated variable that happens to share a name cannot leak in.
 
         :returns: The declared names and the values available here.
-        :raises ConfigError: When either file is malformed.
+        :raises ConfigError: When either file is malformed. ``ConfigError.path``
+            names whichever of the two failed, so a caller that reports instead
+            of aborting -- ``stack doctor`` -- does not have to blame the call
+            it made. The environment branch below leaves it unset: an override
+            belongs to no file, and its message says which variable it was.
         """
-        declared = _parse_declarations(self.variables_path())
-        values = _parse_local_values(
-            self.variables_local_path(), declared, self.variables_path()
-        )
+        try:
+            declared = _parse_declarations(self.variables_path())
+        except ConfigError as error:
+            error.path = error.path or self.variables_path()
+            raise
+        try:
+            values = _parse_local_values(
+                self.variables_local_path(), declared, self.variables_path()
+            )
+        except ConfigError as error:
+            error.path = error.path or self.variables_local_path()
+            raise
         for name in declared:
             raw = os.environ.get(name)
             if raw is None or not raw.strip():

@@ -7,6 +7,8 @@ propagates as an ordinary exception (a real bug) with a full traceback.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 
 class UvStackError(Exception):
     """Base class for user-facing uv-stack errors.
@@ -28,7 +30,20 @@ class UvStackError(Exception):
 
 
 class ConfigError(UvStackError):
-    """A config file or directory is missing or invalid."""
+    """A config file or directory is missing or invalid.
+
+    :param path: The file the error is about, when the raiser knows it and a
+        caller that *reports* rather than aborts would otherwise have to guess.
+        ``stack doctor`` is that caller: a single load can read several files,
+        so the call it made does not identify the one at fault. Left ``None``
+        everywhere the message alone is the whole audience.
+    """
+
+    def __init__(
+        self, message: str, hint: str | None = None, path: Path | None = None
+    ) -> None:
+        super().__init__(message, hint)
+        self.path = path
 
 
 class NewerSchemaError(ConfigError):

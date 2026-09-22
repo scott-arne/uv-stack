@@ -1452,6 +1452,49 @@ def test_an_unparseable_variables_file_is_reported_not_raised(
     )
 
 
+def test_a_broken_local_variables_file_is_blamed_on_itself(config_tree: ConfigRoot):
+    """The finding names the file at fault, not the call doctor happened to make.
+
+    load_variables reads two files, and the finding was built from the
+    declaration path unconditionally -- so a malformed variables.local.txt was
+    reported as "Cannot read variables.txt", with the message then naming the
+    real file in its tail. A reader is told to fix a file that is fine, and the
+    path a JSON consumer acts on is the wrong one.
+    """
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV /srv/src\n")
+
+    finding = next(f for f in diagnose(config_tree) if f.kind == "unparseable-source")
+
+    assert finding.path == config_tree.variables_local_path()
+    assert finding.message.startswith(f"Cannot read {config_tree.variables_local_path()}:")
+
+
+def test_a_broken_declaration_file_is_still_blamed_on_itself(config_tree: ConfigRoot):
+    # The control: blame follows the failing read, and the first read is the
+    # declarations, so this one must keep naming variables.txt.
+    config_tree.variables_path().write_text("not a name\n")
+
+    finding = next(f for f in diagnose(config_tree) if f.kind == "unparseable-source")
+
+    assert finding.path == config_tree.variables_path()
+
+
+def test_a_bad_environment_value_is_blamed_on_the_declaration_file(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    # An environment override belongs to no file, and the message says so. The
+    # declaration file is what named it, so it is the closest thing to an
+    # offender there is; the alternative is a finding with no path at all.
+    config_tree.variables_path().write_text("DEV\n")
+    monkeypatch.setenv("DEV", "/srv/with a space")
+
+    finding = next(f for f in diagnose(config_tree) if f.kind == "unparseable-source")
+
+    assert finding.path == config_tree.variables_path()
+    assert "environment variable DEV" in finding.message
+
+
 @pytest.mark.parametrize(
     "shape",
     [
