@@ -22,7 +22,7 @@ from typing import Literal
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
-from uv_stack.fsutil import atomic_write, read_text_utf8, require_regular_file
+from uv_stack.fsutil import atomic_write, read_text_utf8_nofollow
 
 BEGIN_MARKER = "# BEGIN uv-stack — managed block, do not edit by hand."
 END_MARKER = "# END uv-stack"
@@ -259,6 +259,22 @@ def _append_block(original: str, block: str, newline: str) -> str:
     return f"{original}{separator}{block}{newline}"
 
 
+def _refuse_symlink(path: Path) -> None:
+    """Refuse a symlinked ignore file, whatever its target.
+
+    :param path: The ignore file.
+    :raises ConfigError: When a symlink stands at ``path``.
+    """
+    if path.is_symlink():
+        raise ConfigError(
+            f"Symlinked ignore file: {path}",
+            hint=(
+                "Replace it with a regular file. Git commits the link itself, "
+                "so the rules it points at would not reach another machine."
+            ),
+        )
+
+
 def write_portable_ignore(
     config: ConfigRoot, *, dry_run: bool = False
 ) -> PortableResult:
@@ -273,7 +289,13 @@ def write_portable_ignore(
     through :func:`atomic_write`, which publishes a new inode. Permissions
     revert to the process default and a hardlinked ignore file is de-linked.
     A *symlinked* ignore file is refused outright rather than written through
-    or replaced, because git commits the link and not the rules.
+    or replaced, because git commits the link and not the rules. The read side
+    of that refusal is race-free — it opens ``O_NOFOLLOW``, so a link planted
+    after the check is refused rather than followed to a file the invoking user
+    can read and the planter cannot. The write side is narrowed and not closed:
+    ``os.replace`` never follows a link, so nothing is written through one, but
+    a link planted in the instant before the rename is destroyed rather than
+    refused, and POSIX has no rename that declines a symlinked target.
 
     :param config: The config root.
     :param dry_run: Compute the outcome but write nothing. Malformed-topology
@@ -286,7 +308,7 @@ def write_portable_ignore(
     block = render_block(config)
     repository_root = enclosing_repository(config.root)
 
-    # The symlink refusal sits above the exists() guard, not inside it,
+    # The symlink refusal sits above the read, not inside an exists() guard,
     # because a dangling link is not exists(): left to the code below, a
     # dangling or stale link would be quietly materialised into a regular
     # file while a link to already-correct content survived untouched. Git
@@ -295,19 +317,20 @@ def write_portable_ignore(
     # of these rules and tracks the generated files the block exists to
     # exclude. Refusing is the only outcome that neither destroys a link the
     # user made on purpose nor publishes a root whose rules do not travel.
-    if path.is_symlink():
-        raise ConfigError(
-            f"Symlinked ignore file: {path}",
-            hint=(
-                "Replace it with a regular file. Git commits the link itself, "
-                "so the rules it points at would not reach another machine."
-            ),
-        )
+    #
+    # This call is what makes the refusal legible: it names the ignore file and
+    # says why git is the reason. It is not what makes it hold. Every refusal
+    # below is a test on a name, and the read and the write that follow are
+    # separate syscalls, so the guarantees are layered rather than resting here.
+    _refuse_symlink(path)
 
-    original: str | None = None
-    if path.exists():
-        require_regular_file(path)
-        original = read_text_utf8(path, exact_newlines=True)
+    # The read is the half that can be closed outright, and is: it opens
+    # O_NOFOLLOW, so a link planted after the test above is refused by the
+    # kernel instead of resolved. Left to an ordinary open, that link's target
+    # would be read with the invoking user's permissions — reaching a file the
+    # planter cannot read themselves — spliced into the block, and written to a
+    # .gitignore the printed sequence then tells the user to commit and push.
+    original = read_text_utf8_nofollow(path)
 
     if original is None:
         outcome: Literal["created", "updated", "unchanged"] = "created"
@@ -331,6 +354,15 @@ def write_portable_ignore(
         outcome = "unchanged" if updated == original else "updated"
 
     if not dry_run and updated != original:
+        # The write is the half that cannot be closed. os.replace does not
+        # follow a symlink — it replaces the link itself — so nothing is written
+        # through to a target, but the link is destroyed rather than refused,
+        # and POSIX offers no rename that declines one. Looking again here is
+        # therefore a narrowing and not a guarantee: it moves the window from
+        # "any time during the read and the splice" to the instant between this
+        # lstat and the rename. Taking it costs one syscall on a path already
+        # committed to a write.
+        _refuse_symlink(path)
         atomic_write(path, updated)
     return PortableResult(
         path=path, outcome=outcome, block=block, repository_root=repository_root

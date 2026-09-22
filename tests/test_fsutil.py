@@ -18,6 +18,7 @@ from uv_stack.fsutil import (
     atomic_write_new,
     name_lock,
     read_text_utf8,
+    read_text_utf8_nofollow,
 )
 
 
@@ -1871,3 +1872,93 @@ def test_read_text_utf8_still_names_the_file_on_bad_bytes_when_exact(tmp_path: P
     with pytest.raises(ConfigError) as excinfo:
         read_text_utf8(path, exact_newlines=True)
     assert str(path) in excinfo.value.message
+
+
+def test_read_text_utf8_nofollow_reads_a_regular_file_verbatim(tmp_path: Path):
+    path = tmp_path / "f.txt"
+    path.write_bytes(b"a\r\nb\rc\n")
+    assert read_text_utf8_nofollow(path) == "a\r\nb\rc\n"
+
+
+def test_read_text_utf8_nofollow_reports_an_absent_path_as_none(tmp_path: Path):
+    # Distinct from an empty file, which reads as "". A caller splicing into a
+    # file it may also have to create needs the two apart.
+    assert read_text_utf8_nofollow(tmp_path / "missing.txt") is None
+    (tmp_path / "empty.txt").write_bytes(b"")
+    assert read_text_utf8_nofollow(tmp_path / "empty.txt") == ""
+
+
+@pytest.mark.skipif(not _O_NOFOLLOW, reason="requires O_NOFOLLOW")
+def test_read_text_utf8_nofollow_refuses_a_link_to_a_readable_file(tmp_path: Path):
+    """The difference from read_text_utf8, and the reason this exists.
+
+    require_regular_file accepts a symlink to a regular file and read_text_utf8
+    then returns the target's bytes, so a caller that tested the path and found
+    no link still reads through one planted immediately afterwards — with the
+    invoking user's permissions, reaching a file the planter may not be able to
+    read at all.
+    """
+    target = tmp_path / "secret.txt"
+    target.write_text("BEGIN PRIVATE KEY\n")
+    path = tmp_path / "f.txt"
+    path.symlink_to(target)
+
+    with pytest.raises(ConfigError) as excinfo:
+        read_text_utf8_nofollow(path)
+    assert str(path) in excinfo.value.message
+    assert "PRIVATE" not in excinfo.value.message
+    # The contrast is the point: the same path through the old read discloses.
+    assert read_text_utf8(path) == "BEGIN PRIVATE KEY\n"
+
+
+@pytest.mark.skipif(not _O_NOFOLLOW, reason="requires O_NOFOLLOW")
+def test_read_text_utf8_nofollow_refuses_a_dangling_link(tmp_path: Path):
+    # A dangling link is not exists(), so a caller guarding its read with one
+    # would read nothing and report the path absent — then create a regular
+    # file over the link. O_NOFOLLOW refuses before the question arises.
+    path = tmp_path / "f.txt"
+    path.symlink_to(tmp_path / "nowhere.txt")
+    with pytest.raises(ConfigError) as excinfo:
+        read_text_utf8_nofollow(path)
+    assert str(path) in excinfo.value.message
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
+@pytest.mark.skipif(not _O_NOFOLLOW, reason="requires O_NOFOLLOW")
+def test_read_text_utf8_nofollow_refuses_a_fifo_without_hanging(tmp_path: Path):
+    # The check is on the descriptor, and O_NONBLOCK is what lets the open
+    # return at all: a read-only open of a FIFO waits for a writer, and no test
+    # here will ever supply one.
+    path = tmp_path / "f.txt"
+    os.mkfifo(path)
+    with pytest.raises(ConfigError) as excinfo:
+        read_text_utf8_nofollow(path)
+    assert str(path) in excinfo.value.message
+
+
+def test_read_text_utf8_nofollow_names_the_file_on_bad_bytes(tmp_path: Path):
+    path = tmp_path / "f.txt"
+    path.write_bytes(b"\xff\xfe\n")
+    with pytest.raises(ConfigError) as excinfo:
+        read_text_utf8_nofollow(path)
+    assert str(path) in excinfo.value.message
+
+
+def test_read_text_utf8_nofollow_degrades_without_both_guards(tmp_path, monkeypatch):
+    """Without the open guards it is the name-based check callers had before.
+
+    The guarantee is gone — nothing can supply it — but nothing that worked
+    before is refused either, which is the whole of what the degrade promises.
+    """
+    from uv_stack import fsutil
+
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
+    path = tmp_path / "f.txt"
+    assert fsutil.read_text_utf8_nofollow(path) is None
+    path.write_bytes(b"a\r\nb\n")
+    assert fsutil.read_text_utf8_nofollow(path) == "a\r\nb\n"
+
+    dangling = tmp_path / "dangling.txt"
+    dangling.symlink_to(tmp_path / "nowhere.txt")
+    with pytest.raises(ConfigError):
+        fsutil.read_text_utf8_nofollow(dangling)

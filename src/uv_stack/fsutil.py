@@ -105,6 +105,14 @@ _LOCK_CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCE
 _LOCK_UNOBTAINABLE_ERRNOS = frozenset({errno.ENOENT, errno.EACCES, errno.EPERM})
 
 
+#: What an ``O_NOFOLLOW`` open reports when a symlink is the final component.
+#: POSIX and Linux say ELOOP; the BSDs, and so historically macOS, say EMLINK.
+#: Both are accepted because which one arrives is the platform's choice, not a
+#: property of the link, and reading through a link on the platform that
+#: answers the other way is the failure this set exists to prevent.
+_NOFOLLOW_SYMLINK_ERRNOS = frozenset({errno.ELOOP, errno.EMLINK})
+
+
 def nofollow_read_flags() -> int | None:
     """Open flags for a read that must not follow a symlink or block.
 
@@ -175,6 +183,71 @@ def read_text_utf8(path: Path, *, exact_newlines: bool = False) -> str:
             f"Cannot read {path}: not valid UTF-8.",
             hint="Re-save the file as UTF-8 text.",
         ) from error
+
+
+def read_text_utf8_nofollow(path: Path) -> str | None:
+    """Read ``path`` as UTF-8 verbatim, never through a symlink standing at it.
+
+    Decoding and byte-exact newline handling are :func:`read_text_utf8` with
+    ``exact_newlines=True``; the refusal of a non-regular file is
+    :func:`require_regular_file`. What differs is that both are decided on an
+    open descriptor rather than on the name, so neither answer can go stale
+    between the test and the read.
+
+    That is the whole of its purpose. A caller that tests a path and then opens
+    it has made two syscalls, and a symlink planted between them is resolved by
+    the second: the caller reads a file it never agreed to read, with the
+    invoking user's permissions rather than the planter's, and whatever it does
+    with the content next is done on the planter's behalf. ``O_NOFOLLOW``
+    leaves no window — either the open got something that is not a symlink, or
+    it got nothing.
+
+    :param path: The file to read.
+    :returns: The decoded text, or ``None`` when nothing is at ``path``.
+    :raises ConfigError: When a symlink stands at ``path``, when what is there
+        is not a regular file, or when the bytes are not valid UTF-8.
+    """
+    flags = nofollow_read_flags()
+    if flags is None:
+        # Both guards or none, per nofollow_read_flags. This caller cannot
+        # decline the read — there is nothing else to return — so it degrades
+        # to the name-based check every caller made before this function
+        # existed: no platform is left worse off, it simply does not get the
+        # guarantee. POSIX requires both constants, so the arm is defensive
+        # rather than reachable; the suite drives it by substituting them.
+        require_regular_file(path)
+        if not path.exists():
+            return None
+        return read_text_utf8(path, exact_newlines=True)
+
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        if error.errno not in _NOFOLLOW_SYMLINK_ERRNOS:
+            raise
+        raise ConfigError(
+            f"Symlinked file: {path}",
+            hint="Replace it with a regular file.",
+        ) from error
+
+    with os.fdopen(fd, encoding="utf-8", newline="") as handle:
+        # On the descriptor, so a swap after the open cannot make this true
+        # about a file other than the one about to be read. O_NONBLOCK is why
+        # a FIFO reaches the check at all instead of parking the open.
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ConfigError(
+                f"Not a regular file: {path}",
+                hint="Remove or rename whatever is at that path.",
+            )
+        try:
+            return handle.read()
+        except UnicodeDecodeError as error:
+            raise ConfigError(
+                f"Cannot read {path}: not valid UTF-8.",
+                hint="Re-save the file as UTF-8 text.",
+            ) from error
 
 
 class Published(NamedTuple):

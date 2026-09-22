@@ -217,6 +217,37 @@ def test_a_symlinked_ignore_file_is_refused_and_stays_a_symlink(
     assert written == []
 
 
+def test_a_link_planted_after_the_check_is_refused_by_the_read(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    """The refusal above the read is a test on a name; the read is the guard.
+
+    Neutering the check is how a plant that lands a moment after it runs is
+    reproduced without racing a real one. What the check used to be alone
+    bought: require_regular_file accepts a link to a regular file, so the
+    target was read with the invoking user's permissions — reaching a file the
+    planter need not be able to read — spliced into the block, and written to a
+    .gitignore the printed sequence then says to commit and push.
+    """
+    target = config_tree.root / "secret.txt"
+    target.write_text("BEGIN PRIVATE KEY\n")
+    path = config_tree.root / ".gitignore"
+    path.symlink_to(target)
+    written = _record_writes(monkeypatch)
+    monkeypatch.setattr(
+        "uv_stack.operations.portable._refuse_symlink", lambda _path: None
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_portable_ignore(config_tree)
+
+    assert str(path) in excinfo.value.message
+    assert "PRIVATE" not in excinfo.value.message
+    assert path.is_symlink()
+    assert target.read_text() == "BEGIN PRIVATE KEY\n"
+    assert written == []
+
+
 def test_a_symlinked_ignore_file_is_refused_under_dry_run_too(
     config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
 ):
