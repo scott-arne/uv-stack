@@ -51,7 +51,7 @@ def resolve_editor(config: ConfigRoot, flag: str | None) -> EditorCommand:
     :param flag: The ``--editor`` value, or ``None`` when it was not supplied.
     :returns: The winning command and its source.
     :raises ConfigError: When no rung yields a non-blank value, or when
-        ``editor.txt`` cannot be decoded.
+        ``editor.txt`` is not a regular file or cannot be decoded.
     """
     if flag is not None and flag.strip():
         return EditorCommand(flag, "--editor", from_flag=True)

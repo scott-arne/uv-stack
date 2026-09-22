@@ -67,14 +67,19 @@ def requirement_name(requirement: str) -> str | None:
     """Return the distribution name of a plain requirement string.
 
     Entries that are not plain names — flags/editables (leading ``-``) and
-    paths/archives/direct references (containing ``/`` or ``\\``) — return
-    ``None``; callers must never auto-remove those.
+    paths/archives/direct references (containing ``/`` or ``\\`` in the
+    requirement head) — return ``None``; callers must never auto-remove those.
+    An environment marker is not part of the name and must not make a plain
+    requirement look like a path.
 
     :param requirement: A requirement string such as ``pkg[extra]>=1``.
     :returns: The leading distribution name, or ``None``.
     """
     req = requirement.strip()
-    if not req or req.startswith("-") or "/" in req or "\\" in req:
+    if not req or req.startswith("-"):
+        return None
+    req = req.split(";", 1)[0].strip()
+    if not req or "/" in req or "\\" in req:
         return None
     for index, char in enumerate(req):
         if char in _NAME_TERMINATORS:
@@ -87,7 +92,8 @@ def ownership_name(entry: str) -> str | None:
 
     Handles PEP 508 direct references (``pkg @ url``) by extracting the name
     before the ``@``. VCS entries (``git+https://...``), editables (``-e``),
-    and paths (containing ``/`` or ``\\``) return ``None``.
+    and paths (containing ``/`` or ``\\`` in the requirement head) return
+    ``None``.
 
     :param entry: A ledger entry or requirement string.
     :returns: The distribution name for ownership comparison, or ``None``.

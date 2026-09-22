@@ -7,7 +7,13 @@ import pytest
 from uv_stack.config import ConfigRoot
 from uv_stack.editor import EditorCommand, editor_argv, resolve_editor
 from uv_stack.errors import ConfigError, NewerSchemaError, ResolutionError
-from uv_stack.operations.edit import missing_project_error, validate
+from uv_stack.operations.edit import (
+    missing_project_error,
+    validate,
+    validate_bundle,
+    validate_env,
+    validate_profile,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -458,6 +464,28 @@ def test_validate_env_rejects_a_missing_profile(config_tree: ConfigRoot):
         validate(config_tree, "env", "main", config_tree.root)
 
 
+def test_validate_bundle_refuses_placement_before_resolving_includes(
+    config_tree: ConfigRoot,
+):
+    # '@nope' alone raises ResolutionError. ConfigError here proves the
+    # placement guard runs before the resolver.
+    config_tree.bundle_path("qsar").write_text("includes:\n  - '@nope'\n  - ${PKG}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_bundle(config_tree, "qsar")
+    assert "Refused" in excinfo.value.message
+    assert "Missing bundle" not in excinfo.value.message
+
+
+def test_validate_env_refuses_placement_before_resolving_the_stack(
+    config_tree: ConfigRoot,
+):
+    config_tree.env_stack_path("main").write_text("@nope\n${PKG}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_env(config_tree, "main")
+    assert "Refused" in excinfo.value.message
+    assert "Missing bundle" not in excinfo.value.message
+
+
 def test_validate_env_rejects_an_undecodable_local_requirements_file(
     config_tree: ConfigRoot,
 ):
@@ -674,3 +702,80 @@ def test_validate_project_does_not_warn_on_a_plausible_env_name(
     project = tmp_path / "proj"
     _write_tracked_project(project, "main")
     assert validate(config_tree, "project", "", project) == ([], True)
+
+
+def test_env_validation_does_not_need_this_machines_variable_values(
+    config_tree: ConfigRoot,
+):
+    # Editing a freshly cloned root is exactly what you do *before* filling in
+    # variables.local.txt. DEV is declared and referenced with no value here,
+    # which would be a hard error at render time -- and must not be one at
+    # edit time, because edit passes None.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${DEV}/mypkg\n")
+    assert validate(config_tree, "env", "main", config_tree.root).warnings == []
+
+
+def test_validate_profile_refuses_a_misplaced_reference(config_tree: ConfigRoot):
+    config_tree.profile_path("ds").write_text("includes:\n  - ${PACKAGE}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_profile(config_tree, "ds")
+    assert "${PACKAGE}" in excinfo.value.message
+    assert str(config_tree.profile_path("ds")) in excinfo.value.message
+
+
+def test_validate_profile_refuses_a_multiline_entry(config_tree: ConfigRoot):
+    config_tree.profile_path("ds").write_text('includes:\n  - "numpy\\npandas"\n')
+    with pytest.raises(ConfigError) as excinfo:
+        validate_profile(config_tree, "ds")
+    assert "more than one line" in excinfo.value.message
+
+
+def test_validate_profile_accepts_an_admitted_reference(config_tree: ConfigRoot):
+    # No variables file exists, so this proves edit-time validation never
+    # consults this machine's values.
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${DEV}/pkg\n")
+    assert validate_profile(config_tree, "ds").warnings == []
+
+
+def test_validate_bundle_refuses_a_misplaced_reference(config_tree: ConfigRoot):
+    config_tree.bundle_path("qsar").write_text("includes:\n  - pkg:${NAME}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_bundle(config_tree, "qsar")
+    assert str(config_tree.bundle_path("qsar")) in excinfo.value.message
+
+
+def test_validate_bundle_reports_self_reference_before_placement(
+    config_tree: ConfigRoot,
+):
+    # edit.py deliberately orders the self-reference check ahead of
+    # check_placement, unlike cli/create.py. A bundle with both defects must
+    # report the self-reference, because that is the one the user can act on.
+    config_tree.bundle_path("qsar").write_text("includes:\n  - '@qsar'\n  - ${PKG}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_bundle(config_tree, "qsar")
+    assert "cannot include itself" in excinfo.value.message
+    assert "Refused" not in excinfo.value.message
+
+
+def test_validate_env_refuses_a_misplaced_reference(config_tree: ConfigRoot):
+    config_tree.env_stack_path("main").write_text("@standard\n${PACKAGE}\n")
+    with pytest.raises(ConfigError) as excinfo:
+        validate_env(config_tree, "main")
+    assert str(config_tree.env_stack_path("main")) in excinfo.value.message
+
+
+def test_validate_env_accepts_an_admitted_reference_with_no_values(
+    config_tree: ConfigRoot,
+):
+    config_tree.env_stack_path("main").write_text("@standard\n-e ${DEV}/pkg\n")
+    validate_env(config_tree, "main")
+
+
+def test_validate_env_does_not_reattribute_a_profile_defect(config_tree: ConfigRoot):
+    # 'main' includes 'ds' through @standard, and ds.yaml is broken -- but the
+    # user is editing the env, not the profile. Reporting another file's defect
+    # here gives them nothing to act on in the file they have open; editing
+    # ds.yaml is what catches it, and 'stack doctor' catches it root-wide.
+    config_tree.profile_path("ds").write_text("includes:\n  - ${PACKAGE}\n")
+    validate_env(config_tree, "main")

@@ -35,6 +35,7 @@ from uv_stack.pyversion import (
 )
 from uv_stack.resolver import Resolver
 from uv_stack.runner import Command, Runner
+from uv_stack.variables import expand_all
 
 #: Environment variable consulted between the ``--python`` flag and the
 #: config-root default when selecting the project interpreter.
@@ -227,6 +228,20 @@ def init_project(
                 f"Skipping stack requirement '{entry}': '{name}' is user-owned in this project."
             )
 
+    # Expansion is computed here — after the ownership filter, before the
+    # first write and before any subprocess — so an undefined variable aborts
+    # a run that has changed nothing. This follows the rule already in this
+    # function that resolution errors precede external command execution.
+    # Only the temp requirements file below gets the expanded strings; the
+    # ledger keeps the unexpanded ones, so it never records this machine's
+    # filesystem. expand_all also enforces the placement rule, which is what
+    # makes that split safe (spec "Projects and the ledger split").
+    expanded_adds = expand_all(stack_adds, config.load_variables())
+
+    # Only when the spec is actually recorded: --no-track removes the table
+    # below, so the advisory would name a trip nothing is taking.
+    travel_spec = options.python if options.track else None
+
     # Adopt orphans left by a crashed tracked init/refresh (spec §2.3):
     # durable from the FIRST write below. Skipped entirely with --no-track:
     # the table is deleted below, so there is no ledger to adopt into and the
@@ -243,18 +258,27 @@ def init_project(
     # PREVIOUS retry that then crashed, so it is skipped by _adopt_orphans
     # above and not in stack_adds either). The carried entries ride to the next
     # refresh, whose dropped-diff removes or reports them loudly.
-    carried = []
+    # A reference-bearing entry (editable, VCS, path) has no name, so
+    # [project.dependencies] cannot be consulted to confirm it is still
+    # installed and its exact unexpanded spelling is the only identity it has.
+    # It is therefore carried unless the stack still supplies that same
+    # spelling. That is the recoverable side of the guess: a carried entry the
+    # user no longer wants is reported by the next refresh, whereas one
+    # dropped from the ledger becomes user-owned and is never mentioned again.
+    carried: list[str] = []
     if options.track and previous_pending:
         stack_names = {
             canonical_name(n) for n in (ownership_name(e) for e in stack_adds) if n
         }
-        carried = [
-            e
-            for e in previous_applied
-            if (n := ownership_name(e))
-            and canonical_name(n) in dep_names
-            and canonical_name(n) not in stack_names
-        ]
+        for entry in previous_applied:
+            owned = ownership_name(entry)
+            if owned is None:
+                if entry not in stack_adds:
+                    carried.append(entry)
+                continue
+            canon = canonical_name(owned)
+            if canon in dep_names and canon not in stack_names:
+                carried.append(entry)
 
     # One target, two table shapes derived from it (spec §2.2).
     pending_tracking = ProjectTracking(
@@ -277,6 +301,12 @@ def init_project(
     # runs, and so both uv init and uv sync receive the same value.
     python = resolve_project_python(config, runner, options.python)
 
+    # Classified here, alongside the interpreter probe and above every write:
+    # the classifier reads the config root and can raise, and the delivery
+    # points below cannot afford to. Only the tense is left to them. This is
+    # the last point where a failure costs nothing.
+    travel = _travel_advisory(config, travel_spec)
+
     # Opting out is authoritative once the run commits to touching this
     # project, so this precedes every fallible uv step — but it deliberately
     # FOLLOWS the interpreter probe. A probe failure means nothing has been
@@ -294,9 +324,10 @@ def init_project(
     fresh = not pyproject.is_file()
     fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-stack.", suffix=".txt")
     tmp_req = Path(tmp_name)
+    recorded = False
     try:
         with open(fd, "w", encoding="utf-8") as handle:
-            for entry in stack_adds:
+            for entry in expanded_adds:
                 handle.write(entry)
                 handle.write("\n")
 
@@ -304,16 +335,27 @@ def init_project(
             runner.run(_with_cwd(uv_init(python, options.name), cwd))
         if options.track:
             write_tracking(pyproject, pending_tracking)
+            recorded = True
         runner.run(_with_cwd(uv_add(tmp_req), cwd))
         if options.track:
             write_tracking(pyproject, final_tracking)
         if not options.no_sync:
             runner.run(_with_cwd(uv_sync(python), cwd))
+    except UvStackError as error:
+        # These advisories ride on the returned list, which a raised error
+        # never produces. Hand them to the error instead: a failure past the
+        # pending write leaves the spec on disk, so the caveat outlives the
+        # run that raised.
+        error.resolution_warnings = [
+            *warnings,
+            *_travel_notices(travel, recorded=recorded),
+        ]
+        raise
     finally:
         if tmp_req.exists():
             tmp_req.unlink()
 
-    return warnings
+    return [*warnings, *_travel_notices(travel, recorded=recorded)]
 
 
 def select_project_python(config: ConfigRoot, flag: str | None) -> str:
@@ -351,6 +393,122 @@ def _is_python_passthrough(spec: str) -> bool:
     if PLAIN_VERSION_RE.match(spec):
         return True
     return bool(_IMPLEMENTATION_RE.match(spec))
+
+
+#: Why a recorded interpreter spec will not travel, keyed by
+#: :func:`python_travel_problem`'s return value. The opening that precedes it
+#: is chosen at delivery, because the same problem is worth saying in two
+#: tenses.
+PYTHON_TRAVEL_REASON = {
+    "path": (
+        "a filesystem path does not travel to another machine. A version, a uv "
+        "implementation form, or an environment name this root declares does."
+    ),
+    "undeclared-env": (
+        "this config root declares no environment by that name, so the value "
+        "will not resolve on a machine that clones it."
+    ),
+}
+
+#: 'Recording' is only true once the table holding the spec is on disk. Every
+#: other delivery point -- a dry run, a failure above the write -- is a
+#: prediction, and saying it in the present tense is a false claim about a
+#: durable record.
+PYTHON_TRAVEL_RECORDED = "Recording interpreter '{spec}' in pyproject.toml: "
+PYTHON_TRAVEL_PROSPECTIVE = "Would record interpreter '{spec}' in pyproject.toml: "
+
+
+def python_travel_problem(config: ConfigRoot, spec: str) -> str | None:
+    """Classify why a recorded interpreter spec will not travel, if it will not.
+
+    ``ProjectTracking.python`` records the caller's ``--python`` verbatim, so a
+    path or an environment name only this machine has becomes part of a
+    committed ``pyproject.toml``. Rewriting or refusing the value is out of
+    scope — the tracking contract is settled — but saying so is not.
+
+    The path case is tested independently of :func:`_is_python_passthrough`
+    rather than through it, because a path IS passthrough: it reaches uv
+    unchanged and works perfectly here. It simply does not travel. Reusing the
+    predicate for the environment case (rather than restating it) is what keeps
+    uv implementation forms such as ``cpython@3.12`` from being mistaken for
+    environment names.
+
+    :param config: Configuration root, for the declared environment names.
+    :param spec: The interpreter spec as it would be recorded.
+    :returns: ``"path"``, ``"undeclared-env"``, or ``None`` when it travels.
+    """
+    if "/" in spec or "\\" in spec:
+        return "path"
+    if not _is_python_passthrough(spec) and spec not in config.list_envs():
+        return "undeclared-env"
+    return None
+
+
+@dataclass(frozen=True)
+class TravelAdvisory:
+    """Both tenses of one travel advisory, rendered before any mutation.
+
+    The classification behind the wording reads the config root, which can
+    fail; choosing between two ready strings cannot. Carrying both tenses is
+    what lets the delivery points stay infallible while still saying the true
+    one (see :func:`_travel_advisory`).
+
+    :param prospective: The wording for a delivery above the tracking write.
+    :param recorded: The wording for a delivery below it.
+    """
+
+    prospective: str
+    recorded: str
+
+
+def _travel_advisory(config: ConfigRoot, spec: str | None) -> TravelAdvisory | None:
+    """Classify ``spec``'s travel problem and render both tenses of it.
+
+    Called ONCE per operation, above every write and every file created,
+    because :func:`python_travel_problem` consults
+    :meth:`~uv_stack.config.ConfigRoot.list_envs` and an unreadable envs
+    directory makes that raise. Classifying at each delivery point instead put
+    that OSError on the success returns, where it reported a completed run as
+    failed, and inside the error handlers, where it replaced the
+    :class:`~uv_stack.errors.UvStackError` actually being reported.
+
+    :param config: Configuration root, for the declared environment names.
+    :param spec: The spec about to be recorded, or ``None`` when unset.
+    :returns: The advisory in both tenses, or ``None`` when the spec travels.
+    :raises OSError: If the declared environments cannot be listed. Left to
+        propagate here, above the scaffolding, where the run has changed
+        nothing yet. ``init_project`` calls this below the interpreter probe,
+        so one read-only micromamba command can precede it.
+    """
+    if spec is None:
+        return None
+    problem = python_travel_problem(config, spec)
+    if problem is None:
+        return None
+    reason = PYTHON_TRAVEL_REASON[problem]
+    return TravelAdvisory(
+        prospective=PYTHON_TRAVEL_PROSPECTIVE.format(spec=spec) + reason,
+        recorded=PYTHON_TRAVEL_RECORDED.format(spec=spec) + reason,
+    )
+
+
+def _travel_notices(advisory: TravelAdvisory | None, *, recorded: bool) -> list[str]:
+    """Pick ``advisory``'s tense, or an empty list when there is none.
+
+    At most one advisory is ever produced. A list rather than an optional
+    string because every caller splices the result into a warning list, and
+    five copies of the same ``None`` check read worse than one empty list.
+
+    :param advisory: The pre-classified advisory, or ``None``.
+    :param recorded: Whether the tracking write has already put the spec on
+        disk. Callers pass this rather than letting the advisory assume,
+        because the same problem reads as a false claim when the record it
+        describes does not exist yet.
+    :returns: The warning text in a one-element list, or an empty list.
+    """
+    if advisory is None:
+        return []
+    return [advisory.recorded if recorded else advisory.prospective]
 
 
 def resolve_project_python(
@@ -531,6 +689,14 @@ def refresh_project(
                 f"Skipping stack requirement '{entry}': '{name}' is user-owned in this project."
             )
 
+    # As in init_project, expansion precedes every write. It matters more
+    # here: the pending table is written before the temp file is opened, so
+    # computing expansion first means an undefined variable cannot leave a
+    # pending record behind for a run that never started. It also sits outside
+    # the dry-run guard below, so a dry run reports the refusal rather than
+    # planning a run that cannot succeed.
+    expanded_adds = expand_all(stack_adds, config.load_variables())
+
     adopted = (
         _adopt_orphans(tracking.pending, tracking.applied, stack_adds, dep_names, warnings)
         if tracking.pending
@@ -576,8 +742,21 @@ def refresh_project(
         applied=[*stack_adds, *adopted],
         pending=None,
     )
+
     if not options.dry_run:
         validate_tracking_write(pyproject, pending_tracking)
+
+    # Below the pre-flight and above the dry-run return, which is the only
+    # placement that satisfies both constraints. Above the return, so the dry
+    # run and the real run share one classification and no delivery point below
+    # can raise -- an unreadable envs directory surfacing from the success
+    # return would report a completed refresh as failed, and the same failure
+    # inside the handler would replace the error being reported. Below the
+    # pre-flight, so that when the ledger is also unwritable the user hears
+    # about the ledger, which is their actual blocker; init_project orders the
+    # two the same way. A dry run that fails here is correct -- a dry run
+    # exists to find out.
+    travel = _travel_advisory(config, spec_flag)
 
     if options.dry_run:
         selected = select_project_python(config, spec_flag)
@@ -589,44 +768,53 @@ def refresh_project(
         if not options.no_sync:
             planned.append(uv_sync(shown))
         return RefreshResult(
-            warnings=warnings,
+            warnings=[*warnings, *_travel_notices(travel, recorded=False)],
             added=added,
             removed=removed,
             skipped_removals=skipped,
             planned=planned,
         )
 
+    # The temp file is created and filled before the durable write so that the
+    # filesystem failures this run can produce fall above it, where they cost
+    # nothing: only a UvStackError can carry the advisories out, so an OSError
+    # raised past the write loses them. The two write_tracking calls below are
+    # the residual -- atomic_write can still raise, and validate_tracking_write
+    # pre-flights only the first of them. init_project is built the same way
+    # for the same reason.
+    recorded = False
+    fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-refresh.", suffix=".txt")
+    tmp_req = Path(tmp_name)
     try:
+        # Render only stack-owned dependencies to the temp requirements file.
+        with open(fd, "w", encoding="utf-8") as handle:
+            for entry in expanded_adds:
+                handle.write(entry)
+                handle.write("\n")
         python = resolve_project_python(config, runner, spec_flag)
         write_tracking(pyproject, pending_tracking)
-        fd, tmp_name = tempfile.mkstemp(prefix="uv-stack-refresh.", suffix=".txt")
-        tmp_req = Path(tmp_name)
-        try:
-            # Render only stack-owned dependencies to the temp requirements file.
-            with open(fd, "w", encoding="utf-8") as handle:
-                for entry in stack_adds:
-                    handle.write(entry)
-                    handle.write("\n")
-            if names:
-                runner.run(_with_cwd(uv_remove(names), cwd))
-            runner.run(_with_cwd(uv_add(tmp_req), cwd))
-            write_tracking(pyproject, final_tracking)
-            if not options.no_sync:
-                runner.run(_with_cwd(uv_sync(python), cwd))
-        finally:
-            if tmp_req.exists():
-                tmp_req.unlink()
+        recorded = True
+        if names:
+            runner.run(_with_cwd(uv_remove(names), cwd))
+        runner.run(_with_cwd(uv_add(tmp_req), cwd))
+        write_tracking(pyproject, final_tracking)
+        if not options.no_sync:
+            runner.run(_with_cwd(uv_sync(python), cwd))
     except UvStackError as error:
         # These advisories ride on the RefreshResult, which a raised error never
         # produces. Hand them to the error instead: past the pending write some
         # are gone for good, and this handler cannot tell which (see docstring).
         error.resolution_warnings = [
             *warnings,
+            *_travel_notices(travel, recorded=recorded),
             *(SKIPPED_REMOVAL_NOTICE.format(entry=entry) for entry in skipped),
         ]
         raise
+    finally:
+        if tmp_req.exists():
+            tmp_req.unlink()
     return RefreshResult(
-        warnings=warnings,
+        warnings=[*warnings, *_travel_notices(travel, recorded=True)],
         added=added,
         removed=removed,
         skipped_removals=skipped,

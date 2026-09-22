@@ -147,7 +147,7 @@ def require_regular_file(path: Path) -> None:
         )
 
 
-def read_text_utf8(path: Path) -> str:
+def read_text_utf8(path: Path, *, exact_newlines: bool = False) -> str:
     """Read a file as UTF-8, naming it when the bytes do not decode.
 
     ``UnicodeDecodeError`` is a ``ValueError``, so it is neither a
@@ -158,10 +158,17 @@ def read_text_utf8(path: Path) -> str:
     "a file under ~/.config/python-envs" is not something a user can act on.
 
     :param path: The file to read.
+    :param exact_newlines: Read the file's line endings verbatim instead of
+        translating them to ``"\\n"``. Needed when uv-stack rewrites a file it
+        does not own: translating on read and writing the result back converts
+        every line of a CRLF file, which is a whole-file diff nobody asked for.
     :returns: The decoded text.
     :raises ConfigError: When the bytes are not valid UTF-8.
     """
     try:
+        if exact_newlines:
+            with path.open(encoding="utf-8", newline="") as handle:
+                return handle.read()
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
         raise ConfigError(

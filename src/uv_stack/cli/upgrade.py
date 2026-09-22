@@ -8,11 +8,35 @@ import rich_click as click
 from rich.text import Text
 
 from uv_stack.cli._complete import complete_env_names
-from uv_stack.cli._render import console, echo, render_error, render_warnings
+from uv_stack.cli._render import console, echo, render_error, render_os_error, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ToolError, UvStackError
+from uv_stack.operations.scaffold import validate_name
 from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
 from uv_stack.runner import SubprocessRunner
+
+#: The all-succeeded line for a dry run. Both commands share it because
+#: neither one upgraded or converged anything: what came out whole is the
+#: plan. Keeping their own wording here would claim work that did not happen.
+_ALL_PLANNED = "All requested environments planned."
+
+
+def _checked_names(names: tuple[str, ...]) -> list[str]:
+    """Reject a NAME that is not a plain environment name.
+
+    ``ConfigRoot.env_dir`` joins the name onto ``<root>/envs``, and a join
+    with an absolute or ``..``-bearing name lands outside the root — where
+    this pipeline would go on to read that directory's sources and overwrite
+    its generated files. Discovered names need no such check: ``list_envs``
+    yields single directory components, which cannot escape the join.
+
+    :param names: The NAMEs as given on the command line.
+    :returns: The same names, as a list.
+    :raises ConfigError: On the first name that is not a safe file stem.
+    """
+    for name in names:
+        validate_name("environment", name)
+    return list(names)
 
 
 def _run_upgrade(
@@ -21,28 +45,59 @@ def _run_upgrade(
     options: UpgradeOptions,
     *,
     stop_on_error: bool = False,
+    rule_verb: str = "Upgrading",
+    all_succeeded: str = "All requested environments upgraded.",
 ) -> None:
     """Upgrade each environment, continuing past failures by default.
 
     Each environment's outcome is recorded and printed in a final summary.
-    With ``stop_on_error`` the batch aborts at the first failing environment.
-    A non-empty failure set exits the process with status 1.
+    With ``stop_on_error`` the batch aborts at the first failing environment,
+    and the names it never reached are reported as skipped rather than as
+    successes. A non-empty failure set exits the process with status 1.
 
     :param config: Configuration root.
-    :param names: Environment names to upgrade.
+    :param names: Environment names to upgrade. Repeats are collapsed, keeping
+        first-request order: every outcome below is keyed by name, so the batch
+        runs each distinct environment once.
     :param options: Upgrade options.
     :param stop_on_error: Abort the batch on the first failure.
+    :param rule_verb: The verb in each environment's section rule. Supplied by
+        ``stack converge``, which runs the same pipeline under another name.
+    :param all_succeeded: The line printed when nothing failed. Author-supplied
+        from a call site in this package, never user input. A dry run ignores
+        it in favour of :data:`_ALL_PLANNED`, since neither command upgraded
+        nor converged anything.
     """
     runner = SubprocessRunner()
-    failures: list[tuple[str, UvStackError]] = []
+    failures: list[tuple[str, UvStackError | OSError]] = []
+    attempted: list[str] = []
 
-    for name in names:
-        console.rule(Text(f"Upgrading {name}"))
+    # Uniqueness is this function's invariant rather than a caller
+    # precondition: every outcome below is keyed by name, so a repeat renders
+    # two rows for one attempt — and under stop_on_error a name the loop
+    # never reached renders as a success.
+    targets = list(dict.fromkeys(names))
+
+    for name in targets:
+        attempted.append(name)
+        console.rule(Text(f"{rule_verb} {name}"))
         try:
             result = upgrade_env(config, runner, name, options)
         except UvStackError as error:
             render_warnings(error.resolution_warnings)
             render_error(error)
+            failures.append((name, error))
+            if stop_on_error:
+                break
+            continue
+        except BrokenPipeError:
+            # A dead stdout is not one environment's failure. Recording it as
+            # a row would send the summary and every remaining panel to the
+            # same broken pipe; the CLI edge turns it into the conventional
+            # signal status instead.
+            raise
+        except OSError as error:
+            render_os_error(error)
             failures.append((name, error))
             if stop_on_error:
                 break
@@ -53,36 +108,61 @@ def _run_upgrade(
             for command in result.planned:
                 echo("  " + " ".join(command.args))
 
-    if options.dry_run:
-        if failures:
-            sys.exit(1)
-        return
-
-    _print_summary(names, failures)
+    # The summary is printed for a plan too. A whole-root dry run over a dozen
+    # environments of which two failed otherwise gave the user two error
+    # panels somewhere in the scroll-back, a non-zero status, and no roll-up
+    # naming which two — and the three outcomes describe a plan as exactly as
+    # they describe an execution.
+    _print_summary(
+        targets,
+        failures,
+        attempted,
+        all_succeeded=_ALL_PLANNED if options.dry_run else all_succeeded,
+    )
     if failures:
         sys.exit(1)
 
 
-def _failure_reason(error: UvStackError) -> str:
+def _failure_reason(error: UvStackError | OSError) -> str:
     """Condense an error into a single summary line.
 
     Prefers a :class:`ToolError`'s captured ``detail`` (the failing command's
     stderr tail) collapsed to its last line — typically the actual diagnostic,
     e.g. ``numba requires numpy>=1.22,<2.5, but 2.5.0 is installed`` — and falls
     back to the error message for non-tool failures (bad config, resolution).
+    For an :class:`OSError`, the strerror is used if available.
     """
     if isinstance(error, ToolError) and error.detail:
         return error.detail.splitlines()[-1].strip()
+    if isinstance(error, OSError):
+        return error.strerror or str(error)
     return error.message
 
 
-def _print_summary(names: list[str], failures: list[tuple[str, UvStackError]]) -> None:
-    """Print a per-environment ✓/✗ summary of an upgrade batch.
+def _print_summary(
+    names: list[str],
+    failures: list[tuple[str, UvStackError | OSError]],
+    attempted: list[str],
+    *,
+    all_succeeded: str = "All requested environments upgraded.",
+) -> None:
+    """Print a per-environment summary of an upgrade batch.
+
+    Three outcomes, not two: ``✓`` succeeded, ``✗`` failed, ``–`` never
+    attempted. Without ``--stop-on-error`` the skipped set is always empty and
+    the output is byte-identical to the two-outcome summary this replaced.
 
     Each ``✗`` row is annotated with a one-line reason so the summary explains
     *why* an environment failed without reprinting the full error panel.
+
+    :param names: Every distinct environment requested, in request order.
+    :param failures: The environments that failed, with their errors.
+    :param attempted: The environments the batch actually reached.
+    :param all_succeeded: The line printed when nothing failed.
     """
     reasons = {name: _failure_reason(error) for name, error in failures}
+    reached = set(attempted)
+    skipped = [name for name in names if name not in reached]
     width = max((len(name) for name in names), default=0)
     console.rule("Summary")
     for name in names:
@@ -93,14 +173,30 @@ def _print_summary(names: list[str], failures: list[tuple[str, UvStackError]]) -
                     (reasons[name], "dim"),
                 )
             )
+        elif name not in reached:
+            console.print(
+                Text.assemble(
+                    "  ", ("–", "yellow"), f" {name.ljust(width)}  ",
+                    ("skipped after an earlier failure", "dim"),
+                )
+            )
         else:
             console.print(Text.assemble("  ", ("✓", "green"), f" {name}"))
-    if failures:
+    if failures and skipped:
+        succeeded = len(names) - len(failures) - len(skipped)
         console.print(
-            f"[red]{len(failures)} of {len(names)} environment(s) failed.[/red]"
+            Text(
+                f"{succeeded} succeeded, {len(failures)} failed, "
+                f"{len(skipped)} skipped.",
+                style="red",
+            )
+        )
+    elif failures:
+        console.print(
+            Text(f"{len(failures)} of {len(names)} environment(s) failed.", style="red")
         )
     else:
-        console.print("[green]All requested environments upgraded.[/green]")
+        console.print(Text(all_succeeded, style="green"))
 
 
 @click.command("upgrade")
@@ -112,7 +208,11 @@ def _print_summary(names: list[str], failures: list[tuple[str, UvStackError]]) -
     help="Upgrade all discovered environments (cannot be combined with NAMES).",
 )
 @click.option("-y", "--yes", is_flag=True, help="Confirm bulk upgrade of all envs.")
-@click.option("--dry-run", is_flag=True, help="Print the command plan; change nothing.")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print the command plan and refresh generated files; run none of the planned commands.",
+)
 @click.option(
     "--stop-on-error",
     is_flag=True,
@@ -150,7 +250,8 @@ def upgrade(
     confirmation unless -y is given. By default the batch continues past a
     failing environment and reports a ✓/✗ summary; '--stop-on-error'
     aborts at the first failure. To create a missing environment, use
-    'stack create env'.
+    'stack create env'. To bring every environment in a config root up at once —
+    creating the missing ones, without a prompt — use 'stack converge'.
     """
     if all_envs and names:
         raise click.UsageError("--all cannot be combined with explicit environment NAMES.")
@@ -160,7 +261,7 @@ def upgrade(
         upgrade_packages=list(upgrade_packages),
         strict=strict,
     )
-    targets = list(names)
+    targets = _checked_names(names)
     if not targets:
         targets = config.list_envs()
         if not targets:

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import errno
+import os
+import shutil
 from pathlib import Path
 
 import pytest
 
+from tests.conftest import _deadline
 from uv_stack.commands import (
     micromamba_create,
     micromamba_python_info,
@@ -14,18 +18,21 @@ from uv_stack.commands import (
     uv_pip_sync,
 )
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError, EnvError
+from uv_stack.errors import ConfigError, EnvError, ToolError
 from uv_stack.models import ProjectTracking
 from uv_stack.operations.create import ensure_env, env_micromamba_exists
 from uv_stack.operations.project import (
     PROJECT_PYTHON_ENV,
+    PYTHON_TRAVEL_PROSPECTIVE,
+    PYTHON_TRAVEL_RECORDED,
     ProjectOptions,
     _is_python_passthrough,
     init_project,
+    python_travel_problem,
     resolve_project_python,
     select_project_python,
 )
-from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
+from uv_stack.operations.upgrade import UpgradeOptions, _new_candidate_lock, upgrade_env
 from uv_stack.runner import Command, CommandResult, RecordingRunner
 
 
@@ -1080,6 +1087,179 @@ def test_init_project_force_tracked_over_pending_still_adopts(
     tracking = read_tracking(project_dir / "pyproject.toml")
     assert tracking is not None and "chemprop" in tracking.applied
     assert any("interrupted run" in w for w in warnings), warnings
+
+
+def test_init_resume_carries_a_nameless_applied_entry(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A reference-bearing applied entry must survive a resumed init.
+
+    ownership_name returns None for an editable, and the carry's name guard
+    read that as "do not carry", so the entry left the ledger while 'oldpkg'
+    stayed in [project.dependencies]. A dependency that has left the ledger is
+    user-owned from then on, so no later refresh reports or removes it: the
+    record is wrong, stays wrong, and nothing is printed. The assertion is on
+    the exact unexpanded spelling because that form is the entry's only
+    identity, and storing it unexpanded is what the ledger is for.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_carry_nameless"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "oldpkg"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["-e ${DEV}/oldpkg"]\n'
+        'pending = ["numpy"]\n'
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "-e ${DEV}/oldpkg" in tracking.applied
+
+
+def test_init_resume_does_not_duplicate_a_nameless_entry_the_stack_provides(
+    tmp_path: Path, monkeypatch
+):
+    """The carry must not re-add a nameless entry that arrives via the stack.
+
+    With no name to compare, the carry falls back to the exact spelling. When
+    the stack still supplies that spelling the entry is already in the new
+    applied list, and carrying it as well would write a duplicate row into a
+    durable record. Counting occurrences rather than asserting membership is
+    the whole point: 'in' passes either way.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    config = _portable_root(tmp_path, "root-carry", "/checkouts/a")
+    project_dir = tmp_path / "proj_carry_dup"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["rich", "widget"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["dev"]\n'
+        'applied = ["-e ${DEV}/widget"]\n'
+        'pending = ["rich"]\n'
+    )
+    init_project(
+        config, RecordingRunner(), ["dev"],
+        ProjectOptions(python="3.12", force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert list(tracking.applied).count("-e ${DEV}/widget") == 1
+
+
+def test_init_resume_drops_a_named_entry_that_left_the_dependencies(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A named applied entry no longer in [project.dependencies] must not carry.
+
+    The carry exists to keep a claim on something still installed. Once the
+    dependency is gone from the project, keeping its ledger row resurrects a
+    claim on a package that is not there and hands the next refresh a removal
+    to attempt. test_init_force_triple_crash_carries_owned_orphan pins the
+    positive case; this pins the condition that separates the two, which
+    nothing else did -- deleting it left the suite green.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_carry_gone"
+    project_dir.mkdir()
+    # 'chemprop' is in the ledger but deliberately absent from dependencies.
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["chemprop"]\n'
+        'pending = ["numpy"]\n'
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert "chemprop" not in tracking.applied
+
+
+def test_init_resume_does_not_duplicate_a_named_entry_the_stack_provides(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """The carry must not re-add a named entry that arrives via the stack.
+
+    The nameless branch has its own duplicate guard, pinned above by counting
+    occurrences of the spelling. This is the named branch's equivalent, and it
+    was pinned by nothing: with the stack_names check removed the ledger takes
+    a second 'numpy' row and every other test still passes. Counting rather
+    than asserting membership is again the point -- a durable record with a
+    duplicate row reads as correct to 'in'.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_carry_named_dup"
+    project_dir.mkdir()
+    # numpy is in applied AND in the stack the resume re-resolves to.
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pandas"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["numpy"]\n'
+        'pending = ["pandas"]\n'
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["ds"],
+        ProjectOptions(force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert list(tracking.applied).count("numpy") == 1
+
+
+def test_init_force_reset_without_pending_does_not_carry_the_old_stack(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A --force reset with nothing pending starts the ledger from the new stack.
+
+    The carry is resume-only: it exists to rescue entries a crashed retry would
+    strand, and a project with no pending run stranded nothing. Without the
+    previous_pending half of the guard a --force onto a different stack keeps
+    the old stack's packages as stack-owned, which is the opposite of what a
+    reset means. Nothing pinned that half, so the guard could have been halved
+    silently -- including by the rewrite this test now sits beside.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_force_reset"
+    project_dir.mkdir()
+    # Tracked by the 'ds' stack, no pending run, re-initialized onto 'utils'.
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["numpy", "pandas"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["ds"]\n'
+        'applied = ["numpy", "pandas"]\n'
+    )
+    init_project(
+        config_tree, RecordingRunner(), ["utils"],
+        ProjectOptions(force=True), cwd=project_dir,
+    )
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert list(tracking.applied) == ["rich"]
 
 
 def test_init_add_failure_leaves_pending_intent(
@@ -2825,3 +3005,1158 @@ def test_refresh_never_passes_a_direct_reference_to_uv_remove(
     # when the direct reference is handed over verbatim, because "torch" is never
     # an argv element in its own right.
     assert remove_args == [["uv", "remove", "--no-sync", "scipy"]]
+
+
+def test_upgrade_writes_an_expanded_requirements_in(config_tree: ConfigRoot):
+    # The upgrade path is where this machine's values actually reach uv, and
+    # it is the only call site that writes the rendered text to disk. dry_run
+    # writes the generated files and runs no commands, which isolates the
+    # render from the rest of the pipeline.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=/home/me/code\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${DEV}/mypkg\n")
+    rec = RecordingRunner(responder=_existing_env_responder)
+    upgrade_env(config_tree, rec, "main", UpgradeOptions(dry_run=True))
+    text = config_tree.env_requirements_in("main").read_text()
+    assert "-e /home/me/code/mypkg" in text
+    assert "${DEV}" not in text
+
+
+def test_candidate_lock_is_seeded_from_the_published_lock(config_tree: ConfigRoot):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+    candidate = _new_candidate_lock(lock, seed=True)
+    try:
+        assert candidate.read_text() == "numpy==1.26.0\n"
+        assert candidate != lock
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def test_candidate_lock_is_empty_when_no_lock_is_published(config_tree: ConfigRoot):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    assert not lock.exists()
+    candidate = _new_candidate_lock(lock, seed=True)
+    try:
+        assert candidate.read_text() == ""
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def test_compile_sees_the_existing_pins(config_tree: ConfigRoot):
+    """uv reads prior pins from its output file, so --no-upgrade needs them there."""
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+    seen: list[str] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            _assert_compiles_to_candidate(cmd, lock)
+            seen.append(_compile_output(cmd).read_text())
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    upgrade_env(config_tree, runner, "main", UpgradeOptions(no_upgrade=True))
+    assert seen == ["numpy==1.26.0\n"]
+
+
+def test_the_recreate_branch_also_sees_the_existing_pins(config_tree: ConfigRoot):
+    # The spec requires both branches covered. upgrade_env calls
+    # _new_candidate_lock from two places -- the recreate branch compiles with
+    # uv_pip_compile_for_version before the environment is torn down -- and a
+    # regression could reach one without the other.
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+    seen: list[str] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            _assert_compiles_to_candidate(cmd, lock)
+            seen.append(_compile_output(cmd).read_text())
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    upgrade_env(
+        config_tree, runner, "main", UpgradeOptions(recreate=True, no_upgrade=True)
+    )
+    assert seen == ["numpy==1.26.0\n"]
+    assert lock.read_text() == "numpy==1.26.0\n"
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
+def test_a_failed_compile_leaves_the_published_lock_untouched(config_tree: ConfigRoot):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError):
+        upgrade_env(config_tree, runner, "main", UpgradeOptions())
+    assert lock.read_text() == "numpy==1.26.0\n"
+    leftovers = list(lock.parent.glob(lock.name + ".*.tmp"))
+    assert leftovers == []
+
+
+def test_candidate_lock_is_empty_when_lock_path_is_a_directory(config_tree: ConfigRoot):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.mkdir()  # A directory stands in for any non-regular file.
+    candidate = _new_candidate_lock(lock, seed=True)
+    try:
+        assert candidate.read_text() == ""
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def test_candidate_lock_survives_concurrent_lock_removal(
+    config_tree: ConfigRoot, monkeypatch
+):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    original_open = os.open
+
+    def open_losing_the_race(path, flags, *args, **kwargs):
+        # Removed between the caller deciding to seed and the open landing.
+        if path == lock:
+            raise FileNotFoundError(f"{path}")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", open_losing_the_race)
+
+    candidate = _new_candidate_lock(lock, seed=True)
+    try:
+        assert candidate.read_text() == ""
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def _assert_seeded_hint(hint: str) -> None:
+    """Pin the wording a seeded candidate earns.
+
+    :param hint: The hint attached to the failed compile.
+    """
+    assert "copy of" in hint
+    assert "re-run as a full upgrade" in hint
+    # Both spellings, because one defect this replaced was advice that fit
+    # only one of the two commands reaching it. Either half going missing is
+    # that defect again, pointed the other way.
+    assert "drop --no-upgrade/--upgrade-package from 'stack upgrade'" in hint
+    assert "add --upgrade to 'stack converge'" in hint
+    # And no runnable bare command: 'stack converge --upgrade' on its own
+    # names no environment, so it turns a scoped repair into an unprompted
+    # root-wide force-upgrade.
+    assert "keeping the same environment names" in hint
+    assert "new empty file" not in hint
+
+
+def test_a_failed_compile_hint_names_the_published_lock(config_tree: ConfigRoot):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(config_tree, runner, "main", UpgradeOptions(no_upgrade=True))
+    hint = caught.value.hint
+    assert hint is not None
+    assert str(lock) in hint
+    _assert_seeded_hint(hint)
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
+def test_a_failed_compile_hint_names_the_published_lock_recreate_branch(
+    config_tree: ConfigRoot,
+):
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(
+            config_tree, runner, "main", UpgradeOptions(recreate=True, no_upgrade=True)
+        )
+    hint = caught.value.hint
+    assert hint is not None
+    assert str(lock) in hint
+    _assert_seeded_hint(hint)
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_a_failed_compile_hint_describes_an_unseeded_candidate(
+    config_tree: ConfigRoot, recreate: bool
+):
+    # A full upgrade compiles into an empty candidate, so neither half of the
+    # seeded wording is true of it: nothing was copied, and telling the user to
+    # re-run without --no-upgrade/--upgrade-package names the mode they are
+    # already in. Both branches are covered because upgrade_env attaches the
+    # hint from two separate unwinds, either of which could be left behind.
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(config_tree, runner, "main", UpgradeOptions(recreate=recreate))
+    hint = caught.value.hint
+    assert hint is not None
+    assert str(lock) in hint
+    assert "new empty file" in hint
+    # Multi-word phrases: the lock path is interpolated into the hint, and a
+    # bare "copy" could match a tmp_path component rather than the wording.
+    assert "copy of" not in hint
+    assert "re-run without" not in hint
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
+def test_a_failed_rebuild_gets_no_compile_hint(config_tree: ConfigRoot):
+    # The recreate branch's try also covers ensure_env and the interpreter
+    # probe. A micromamba failure there must not be explained as a compile
+    # writing into a temp copy.
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "create" in cmd.args and "micromamba" in cmd.args[0]:
+            raise ToolError(
+                "Command failed (1): micromamba create",
+                command=cmd.args,
+                returncode=1,
+            )
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(config_tree, runner, "main", UpgradeOptions(recreate=True))
+    assert caught.value.hint is None
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
+def test_an_env_named_compile_does_not_claim_the_compile_hint(config_tree: ConfigRoot):
+    # The env name reaches argv as a bare element in 'micromamba remove -n
+    # <env>', so a membership test for "compile" would hand this hint to every
+    # recreate-path failure for one pathological name.
+    shutil.copytree(
+        config_tree.root / "envs" / "main", config_tree.root / "envs" / "compile"
+    )
+    lock = config_tree.env_requirements_lock("compile")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "remove" in cmd.args:
+            raise ToolError(
+                "Command failed (1): micromamba remove",
+                command=cmd.args,
+                returncode=1,
+            )
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(config_tree, runner, "compile", UpgradeOptions(recreate=True))
+    assert caught.value.command[1] == "remove"
+    assert caught.value.hint is None
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_full_upgrade_recovers_unreadable_lock(config_tree: ConfigRoot, recreate: bool):
+    # A plain upgrade passes --upgrade, so uv ignores the output file. An
+    # unreadable lock must not fail the operation. Both branches are covered
+    # for the same reason as test_the_recreate_branch_also_sees_the_existing_pins:
+    # upgrade_env decides whether to seed at two separate call sites, and a
+    # regression could reach one without the other.
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+    lock.chmod(0o000)
+
+    try:
+        runner = RecordingRunner(responder=_existing_env_responder)
+        upgrade_env(config_tree, runner, "main", UpgradeOptions(recreate=recreate))
+        # The unseeded candidate replaced the lock: the old pins are gone,
+        # which exists() alone would not have shown.
+        assert lock.read_text() == ""
+    finally:
+        lock.chmod(0o644)
+
+
+def test_full_upgrade_does_not_read_the_lock(config_tree: ConfigRoot):
+    # A full upgrade seeds with an empty candidate, so the compile must not
+    # see the published lock's contents.
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+    seen: list[str] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            seen.append(_compile_output(cmd).read_text())
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    upgrade_env(config_tree, runner, "main", UpgradeOptions())
+    assert seen == [""]
+
+
+def test_candidate_lock_is_empty_when_lock_path_is_a_fifo(config_tree: ConfigRoot):
+    # What this pins is O_NONBLOCK, not the S_ISREG check: a FIFO with no
+    # writer reads EOF, so removing S_ISREG still yields an empty candidate --
+    # the directory test is what pins that. Without O_NONBLOCK the open never
+    # returns, which is a hang rather than a failure, so _deadline turns it
+    # into an ordinary assertion error.
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("os.mkfifo not available on this platform")
+
+    os.mkfifo(lock)
+    try:
+        with _deadline(5.0):
+            candidate = _new_candidate_lock(lock, seed=True)
+        try:
+            assert candidate.read_text() == ""
+        finally:
+            candidate.unlink(missing_ok=True)
+    finally:
+        os.unlink(lock)
+
+
+def test_seed_failure_surfaces_its_own_error(config_tree: ConfigRoot, monkeypatch):
+    # The read hands the descriptor to a file object, so the unwind must not
+    # close it a second time: a stray EBADF would replace the real reason the
+    # seed failed, and in a threaded process could close an unrelated file.
+    import errno
+
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.26.0\n")
+
+    original_write_bytes = Path.write_bytes
+
+    def full_disk(self: Path, data: bytes) -> int:
+        if self.name.endswith(".tmp"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return original_write_bytes(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", full_disk)
+
+    with pytest.raises(OSError) as caught:
+        _new_candidate_lock(lock, seed=True)
+    assert caught.value.errno == errno.ENOSPC
+    # The unwind removed the candidate it could not fill.
+    assert list(lock.parent.glob("*.tmp")) == []
+
+
+def _portable_root(tmp_path: Path, name: str, dev: str) -> ConfigRoot:
+    """A config root whose 'dev' profile installs an editable under ``dev``."""
+    root = tmp_path / name
+    (root / "profiles").mkdir(parents=True)
+    (root / "bundles").mkdir(parents=True)
+    (root / "envs").mkdir(parents=True)
+    (root / "profiles" / "dev.yaml").write_text(
+        "includes:\n  - rich\n  - -e ${DEV}/widget\n"
+    )
+    (root / "variables.txt").write_text("DEV\n")
+    (root / "variables.local.txt").write_text(f"DEV={dev}\n")
+    return ConfigRoot(root)
+
+
+def test_the_ledger_keeps_the_unexpanded_entry(tmp_path: Path):
+    from uv_stack.operations.pyproject import read_tracking
+
+    config = _portable_root(tmp_path, "root-a", "/checkouts/a")
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    pyproject = project_dir / "pyproject.toml"
+    captured: list[str] = []
+    # 'pending' is as durable as 'applied': it is written before 'uv add' and
+    # a crash in that window leaves it committed. The only place to observe it
+    # is inside the command the window brackets.
+    mid_run: list[list[str] | None] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        if "add" in cmd.args and "-r" in cmd.args:
+            captured.append(Path(cmd.args[cmd.args.index("-r") + 1]).read_text())
+            during = read_tracking(pyproject)
+            mid_run.append(during.pending if during is not None else None)
+        return CommandResult(returncode=0, stdout="")
+
+    init_project(
+        config, RecordingRunner(responder=responder), ["dev"],
+        ProjectOptions(python="3.12"), cwd=project_dir,
+    )
+    tracking = read_tracking(pyproject)
+    assert tracking is not None
+    assert "-e ${DEV}/widget" in tracking.applied
+    assert "-e /checkouts/a/widget" not in tracking.applied
+    assert "-e /checkouts/a/widget\n" in captured[0]
+    pending = mid_run[0]
+    assert pending is not None
+    assert "-e ${DEV}/widget" in pending
+    assert "-e /checkouts/a/widget" not in pending
+
+
+def test_two_roots_with_different_values_write_identical_ledgers(tmp_path: Path):
+    """The surface uv-stack controls is portable; assert it directly."""
+    from uv_stack.operations.pyproject import read_tracking
+
+    ledgers = []
+    for name, dev in (("root-a", "/checkouts/a"), ("root-b", "/elsewhere/b")):
+        config = _portable_root(tmp_path, name, dev)
+        project_dir = tmp_path / f"proj-{name}"
+        project_dir.mkdir()
+        init_project(
+            config, RecordingRunner(responder=_existing_env_responder), ["dev"],
+            ProjectOptions(python="3.12"), cwd=project_dir,
+        )
+        tracking = read_tracking(project_dir / "pyproject.toml")
+        assert tracking is not None
+        ledgers.append((list(tracking.applied), tracking.pending))
+    assert ledgers[0] == ledgers[1]
+
+
+def test_an_undefined_variable_aborts_before_anything_is_created(tmp_path: Path):
+    config = _portable_root(tmp_path, "root-c", "/checkouts/c")
+    config.variables_local_path().unlink()
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ConfigError) as excinfo:
+        init_project(
+            config, runner, ["dev"], ProjectOptions(python="3.12"), cwd=project_dir
+        )
+    assert "DEV" in str(excinfo.value)
+    assert runner.commands == []
+    assert not (project_dir / "pyproject.toml").exists()
+
+
+def _portable_tracked_project(tmp_path: Path, name: str) -> Path:
+    """A tracked project whose stack is the portable root's 'dev' profile.
+
+    The ledger already holds the unexpanded editable, which is the steady
+    state a second refresh must reproduce: nothing is added, nothing is
+    dropped, and both tables come back byte-identical.
+
+    :param tmp_path: Parent directory.
+    :param name: Project directory name, unique within ``tmp_path``.
+    :returns: The project directory.
+    """
+    project_dir = tmp_path / name
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text(
+        '[project]\nname = "x"\nversion = "0.1.0"\n'
+        'dependencies = ["rich"]\n'
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["dev"]\n'
+        'applied = ["rich", "-e ${DEV}/widget"]\n'
+    )
+    return project_dir
+
+
+def _refresh_ledger_tables(
+    config: ConfigRoot, tmp_path: Path, name: str
+) -> tuple[list[str] | None, list[str]]:
+    """Refresh a tracked project and return both ledger tables it wrote.
+
+    ``pending`` only exists between the first write and the clearing write, so
+    it has to be read from inside a command. A helper rather than a loop body
+    because the responder closes over ``pyproject`` (B023).
+
+    :param config: The root to refresh against.
+    :param tmp_path: Parent for the project directory.
+    :param name: Project directory name, unique within ``tmp_path``.
+    :returns: ``(pending mid-run, applied after the run)``.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    project_dir = _portable_tracked_project(tmp_path, name)
+    pyproject = project_dir / "pyproject.toml"
+    mid_run: list[ProjectTracking | None] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        mid_run.append(read_tracking(pyproject))
+        return CommandResult(returncode=0, stdout="")
+
+    refresh_project(
+        config, RecordingRunner(responder=responder),
+        RefreshOptions(python="3.12"), cwd=project_dir,
+    )
+    first = mid_run[0]
+    final = read_tracking(pyproject)
+    assert first is not None and final is not None
+    return first.pending, list(final.applied)
+
+
+def test_refresh_keeps_the_ledger_unexpanded_and_expands_the_temp_file(tmp_path: Path):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    config = _portable_root(tmp_path, "root-r", "/checkouts/r")
+    project_dir = _portable_tracked_project(tmp_path, "proj-r")
+    pyproject = project_dir / "pyproject.toml"
+    captured: list[str] = []
+    mid_run: list[ProjectTracking | None] = []
+
+    def responder(cmd: Command) -> CommandResult:
+        mid_run.append(read_tracking(pyproject))
+        if "add" in cmd.args and "-r" in cmd.args:
+            captured.append(Path(cmd.args[cmd.args.index("-r") + 1]).read_text())
+        return CommandResult(returncode=0, stdout="")
+
+    refresh_project(
+        config, RecordingRunner(responder=responder),
+        RefreshOptions(python="3.12"), cwd=project_dir,
+    )
+    assert "-e /checkouts/r/widget\n" in captured[0]
+    # 'uv add' is the first command this run issues, so snapshot 0 is taken
+    # with the pending table already on disk.
+    first = mid_run[0]
+    assert first is not None
+    assert first.pending == ["rich", "-e ${DEV}/widget"]
+    final = read_tracking(pyproject)
+    assert final is not None
+    assert list(final.applied) == ["rich", "-e ${DEV}/widget"]
+
+
+def test_refresh_with_an_undefined_variable_writes_no_pending_table(tmp_path: Path):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    config = _portable_root(tmp_path, "root-u", "/checkouts/u")
+    config.variables_local_path().unlink()
+    project_dir = _portable_tracked_project(tmp_path, "proj-u")
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_text()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ConfigError) as excinfo:
+        refresh_project(config, runner, RefreshOptions(python="3.12"), cwd=project_dir)
+    assert "DEV" in str(excinfo.value)
+    assert runner.commands == []
+    tracking = read_tracking(pyproject)
+    assert tracking is not None and tracking.pending is None
+    assert pyproject.read_text() == before
+
+
+def test_two_roots_refresh_to_identical_ledgers(tmp_path: Path):
+    """Both tables refresh writes must match across roots with different values."""
+    observed = []
+    for name, dev in (("root-x", "/checkouts/x"), ("root-y", "/elsewhere/y")):
+        config = _portable_root(tmp_path, name, dev)
+        observed.append(_refresh_ledger_tables(config, tmp_path, f"proj-{name}"))
+    assert observed[0] == observed[1]
+    assert observed[0] == (["rich", "-e ${DEV}/widget"], ["rich", "-e ${DEV}/widget"])
+
+
+def test_refreshing_an_unchanged_reference_bearing_project_is_a_no_op(tmp_path: Path):
+    """Both diffs must compare the ledger against the same spelling it holds.
+
+    'dropped' and 'added' run against the unexpanded 'stack_adds'. Diffing
+    the unexpanded ledger against the expanded list instead compares two
+    spellings of one requirement and concludes the project changed: every
+    refresh of a stable project would report a spurious addition, and -- since
+    an editable is never auto-removed -- a spurious 'Not auto-removed'
+    instruction to hand-edit a file that is already correct.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    config = _portable_root(tmp_path, "root-noop", "/checkouts/noop")
+    project_dir = tmp_path / "proj-noop"
+    project_dir.mkdir()
+    init_project(
+        config, RecordingRunner(responder=_existing_env_responder), ["dev"],
+        ProjectOptions(python="3.12"), cwd=project_dir,
+    )
+    result = refresh_project(
+        config, RecordingRunner(responder=_existing_env_responder),
+        RefreshOptions(python="3.12"), cwd=project_dir,
+    )
+    assert result.added == []
+    assert result.removed == []
+    assert result.skipped_removals == []
+
+
+def test_python_travel_problem_classifies_every_selector_shape(config_tree: ConfigRoot):
+    # 'cpython@3.12' and 'pypy-3.10' are the regression guard: both are uv
+    # implementation forms, and neither may be reclassified as an env name.
+    assert python_travel_problem(config_tree, "/opt/envs/x/bin/python") == "path"
+    assert python_travel_problem(config_tree, "scratch") == "undeclared-env"
+    assert python_travel_problem(config_tree, "main") is None
+    assert python_travel_problem(config_tree, "3.12") is None
+    assert python_travel_problem(config_tree, "cpython@3.12") is None
+    assert python_travel_problem(config_tree, "pypy-3.10") is None
+
+
+#: (spec, the phrase its advisory must carry, or None for "stay silent").
+#: 'main' is the environment 'config_tree' declares; 'scratch' is not.
+_TRAVEL_MATRIX = [
+    ("/opt/envs/x/bin/python", "does not travel"),
+    ("scratch", "declares no environment"),
+    ("main", None),
+    ("3.12", None),
+    ("cpython@3.12", None),
+    ("pypy-3.10", None),
+]
+
+
+#: The openings a travel advisory can take, derived from the constants rather
+#: than restated, so a reworded advisory cannot quietly empty the filter below.
+_TRAVEL_OPENINGS = tuple(
+    opening.split("{spec}")[0]
+    for opening in (PYTHON_TRAVEL_RECORDED, PYTHON_TRAVEL_PROSPECTIVE)
+)
+
+
+def _travel_warnings(warnings: list[str]) -> list[str]:
+    """The travel advisories in a warning list, in either tense.
+
+    The two advisories no longer share one opening: a completed run says
+    'Recording interpreter ' and every prospective delivery says 'Would record
+    interpreter '. Nothing else either operation emits opens either way.
+    Naming pyproject.toml would be the obvious discriminator and is the wrong
+    one: SKIPPED_REMOVAL_NOTICE mentions the file too, and refresh puts both
+    kinds in one list on its error path.
+
+    :param warnings: Warnings returned by init or refresh.
+    :returns: Only the travel advisories, in order.
+    """
+    return [w for w in warnings if w.startswith(_TRAVEL_OPENINGS)]
+
+
+@pytest.mark.parametrize(("spec", "expected"), _TRAVEL_MATRIX)
+def test_init_warns_only_for_an_interpreter_that_will_not_travel(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch, spec: str, expected: str | None
+):
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    warnings = init_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder), ["ds"],
+        ProjectOptions(python=spec), cwd=project_dir,
+    )
+    travel = _travel_warnings(warnings)
+    if expected is None:
+        assert travel == []
+    else:
+        assert len(travel) == 1 and expected in travel[0]
+
+
+@pytest.mark.parametrize(("spec", "expected"), _TRAVEL_MATRIX)
+def test_refresh_warns_only_for_an_interpreter_that_will_not_travel(
+    config_tree: ConfigRoot, tmp_path, monkeypatch, spec: str, expected: str | None
+):
+    # refresh judges 'spec_flag', not options.python: the value actually
+    # written to the table is the value that has to travel.
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    result = refresh_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder),
+        RefreshOptions(python=spec), cwd=project_dir,
+    )
+    travel = _travel_warnings(result.warnings)
+    if expected is None:
+        assert travel == []
+    else:
+        assert len(travel) == 1 and expected in travel[0]
+
+
+def test_refresh_warns_for_the_recorded_spec_when_no_flag_is_given(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    # No --python, so spec_flag falls back to tracking.python, which is the
+    # stale path a clone inherited. That is exactly the case worth naming.
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    tracking_text = (
+        "\n[tool.uv-stack]\nversion = 1\n"
+        'stack = ["standard"]\n'
+        'python = "/opt/envs/x/bin/python"\n'
+        'applied = ["numpy", "pandas", "rdkit", "rich"]\n'
+    )
+    project_dir = _tracked_project(tmp_path, tracking_text)
+    result = refresh_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder),
+        RefreshOptions(), cwd=project_dir,
+    )
+    assert len(_travel_warnings(result.warnings)) == 1
+
+
+def test_init_no_track_stays_silent_about_an_interpreter_it_never_records(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """--no-track stores no spec, so there is no trip for one to survive.
+
+    Neither wording is true on this path: nothing is being recorded, and
+    nothing would be either. Asserting the table is absent as well as the
+    advisory keeps the test from passing on a run that merely warned about
+    something else.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    warnings = init_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder), ["ds"],
+        ProjectOptions(python="/opt/envs/x/bin/python", track=False),
+        cwd=project_dir,
+    )
+    assert _travel_warnings(warnings) == []
+    assert read_tracking(project_dir / "pyproject.toml") is None
+
+
+def _fail_on(word: str):
+    """A responder that raises ToolError for the uv subcommand ``word``.
+
+    :param word: An argument that identifies the command to fail, e.g. 'add'.
+    """
+
+    def responder(cmd: Command) -> CommandResult:
+        if word in cmd.args:
+            raise ToolError(f"{word} failed", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    return responder
+
+
+def test_init_failure_past_the_write_still_reports_the_spec_it_recorded(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """A tracked init that dies after the pending write must still say so.
+
+    The advisory used to ride only on the success return, so a run that wrote
+    the untravelable spec and then failed told nobody. Asserting the recorded
+    value alongside the wording is what makes the claim checkable: the present
+    tense is honest only because the table really is on disk.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_travel_addfail"
+    project_dir.mkdir()
+    with pytest.raises(ToolError) as excinfo:
+        init_project(
+            config_tree, RecordingRunner(responder=_fail_on("add")), ["ds"],
+            ProjectOptions(python="/opt/envs/x/bin/python"), cwd=project_dir,
+        )
+    travel = _travel_warnings(excinfo.value.resolution_warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Recording interpreter '/opt/envs/x/bin/python'")
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None and tracking.python == "/opt/envs/x/bin/python"
+
+
+def test_init_failure_above_the_write_only_predicts_the_recording(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """A fresh init that dies in uv init recorded nothing, and must say so.
+
+    uv init runs one line above the pending write, which makes this the only
+    reachable path where the advisory is delivered before the spec is on disk.
+    Without it, hardcoding the completed tense would pass every other travel
+    test here. The absent table is half the assertion: the future tense is
+    correct only because nothing was written.
+    """
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_travel_initfail"
+    project_dir.mkdir()
+    with pytest.raises(ToolError) as excinfo:
+        init_project(
+            config_tree, RecordingRunner(responder=_fail_on("init")), ["ds"],
+            ProjectOptions(python="/opt/envs/x/bin/python"), cwd=project_dir,
+        )
+    travel = _travel_warnings(excinfo.value.resolution_warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Would record interpreter '/opt/envs/x/bin/python'")
+    assert read_tracking(project_dir / "pyproject.toml") is None
+
+
+def test_init_success_says_it_recorded_the_spec(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """A completed init wrote the spec, so the advisory stays in the present.
+
+    Suppressing the advisory outright, or moving everything to the future
+    tense, would satisfy the two failure tests above. This is the pin that
+    keeps the completed wording alive on the path that earns it.
+    """
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_travel_ok"
+    project_dir.mkdir()
+    warnings = init_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder), ["ds"],
+        ProjectOptions(python="/opt/envs/x/bin/python"), cwd=project_dir,
+    )
+    travel = _travel_warnings(warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Recording interpreter '/opt/envs/x/bin/python'")
+
+
+def test_refresh_dry_run_only_predicts_the_recording(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A dry run changes nothing, so it may not claim to have recorded anything.
+
+    The advisory used to be appended above the dry-run guard, so the one run
+    that is defined to touch nothing still said 'Recording'. Comparing the
+    file bytes either side is what separates a wording change from a fix: the
+    present tense is wrong precisely because the write did not happen.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_bytes()
+    result = refresh_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder),
+        RefreshOptions(python="/opt/envs/x/bin/python", dry_run=True), cwd=project_dir,
+    )
+    travel = _travel_warnings(result.warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Would record interpreter '/opt/envs/x/bin/python'")
+    assert pyproject.read_bytes() == before
+
+
+def test_refresh_failure_above_the_write_only_predicts_the_recording(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """An unresolvable env aborts refresh before the write, so nothing is recorded.
+
+    resolve_project_python sits one line above write_tracking, so the ledger
+    is untouched when it raises. The advisory reaches the user only on the
+    error, and the byte comparison is what proves the future tense is the true
+    reading rather than a guess about where the run died.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_bytes()
+    with pytest.raises(EnvError) as excinfo:
+        refresh_project(
+            config_tree, RecordingRunner(responder=_missing_env_responder),
+            RefreshOptions(python="scratch"), cwd=project_dir,
+        )
+    travel = _travel_warnings(excinfo.value.resolution_warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Would record interpreter 'scratch'")
+    assert pyproject.read_bytes() == before
+
+
+def test_refresh_success_says_it_recorded_the_spec(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A completed refresh wrote the spec, so the advisory stays in the present.
+
+    Counterpart to the init pin above, and for the same reason: without it,
+    suppressing the advisory on every path would pass the dry-run and
+    pre-write tests. Reading the table back ties the wording to the write.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    result = refresh_project(
+        config_tree, RecordingRunner(responder=_existing_env_responder),
+        RefreshOptions(python="/opt/envs/x/bin/python"), cwd=project_dir,
+    )
+    travel = _travel_warnings(result.warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Recording interpreter '/opt/envs/x/bin/python'")
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None and tracking.python == "/opt/envs/x/bin/python"
+
+
+def _break_env_listing(monkeypatch) -> None:
+    """Make every ``list_envs`` call raise, as a failing mount does.
+
+    ``list_envs`` walks ``envs_dir`` with ``iterdir``, so an unreadable
+    directory or a dead network mount surfaces as OSError rather than an empty
+    list. Patching the class rather than one instance keeps the injection from
+    being sidestepped by an operation that builds its own ConfigRoot.
+
+    :param monkeypatch: The pytest monkeypatch fixture.
+    """
+
+    def unreadable(self: ConfigRoot) -> list[str]:
+        raise OSError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(ConfigRoot, "list_envs", unreadable)
+
+
+def _watch_env_listing(monkeypatch, runner: RecordingRunner) -> list[list[str]]:
+    """Log what the run had already executed at each ``list_envs`` call.
+
+    One entry per lookup, holding the program name of every command issued so
+    far. The length therefore counts the lookups and each entry dates one:
+    an entry containing 'uv' is a lookup that happened after the run started
+    mutating the project, which is the shape the delivery-point classifier had.
+
+    :param monkeypatch: The pytest monkeypatch fixture.
+    :param runner: The runner whose recorded commands date each lookup.
+    :returns: The log, appended to as the run proceeds.
+    """
+    real_list_envs = ConfigRoot.list_envs
+    log: list[list[str]] = []
+
+    def spy(self: ConfigRoot) -> list[str]:
+        log.append([command.args[0] for command in runner.commands])
+        return real_list_envs(self)
+
+    monkeypatch.setattr(ConfigRoot, "list_envs", spy)
+    return log
+
+
+def test_init_env_listing_failure_aborts_before_anything_is_mutated(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """An unreadable envs directory must abort the run rather than outlive it.
+
+    Classifying the travel advisory at the delivery point put this OSError on
+    the success return, where uv add had run, the final ledger was written and
+    uv sync had completed: the CLI reported a failed run that had in fact done
+    everything it meant to. Asserting the absent pyproject and the unrun uv
+    commands is what separates an honest abort from a late complaint.
+    """
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    _break_env_listing(monkeypatch)
+    project_dir = tmp_path / "proj_travel_unreadable"
+    project_dir.mkdir()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(OSError) as excinfo:
+        init_project(
+            config_tree, runner, ["ds"],
+            ProjectOptions(python="scratch"), cwd=project_dir,
+        )
+    # The injected failure, not an incidental one.
+    assert excinfo.value.errno == errno.EACCES
+    assert not (project_dir / "pyproject.toml").exists()
+    assert [c.args[0] for c in runner.commands if c.args[0] == "uv"] == []
+
+
+def test_refresh_env_listing_failure_aborts_before_anything_is_mutated(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """The refresh counterpart: the same OSError, the same required timing.
+
+    refresh classifies above its own pre-flight, so the dry run and the real
+    run share one lookup and a failing mount costs the project nothing. The
+    byte comparison is the pin: before the hoist, this run rewrote the ledger
+    twice and ran uv before the OSError escaped.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    _break_env_listing(monkeypatch)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_bytes()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(OSError) as excinfo:
+        refresh_project(
+            config_tree, runner, RefreshOptions(python="scratch"), cwd=project_dir,
+        )
+    assert excinfo.value.errno == errno.EACCES
+    assert pyproject.read_bytes() == before
+    assert runner.commands == []
+
+
+def test_refresh_reports_the_unwritable_ledger_ahead_of_the_unreadable_envs(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """When both pre-flights would fail, the ledger's refusal is the useful one.
+
+    The travel classifier reads the config root and the pre-flight reads the
+    project, so a run can be blocked by both at once. The user's actual blocker
+    is the unwritable ledger -- an unreadable envs directory only costs them an
+    advisory -- so the pre-flight has to come first. This pins the ordering that
+    keeps refresh agreeing with init, which has always reported the ConfigError
+    here; nothing else does, and the classification has already drifted above
+    the pre-flight once.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    _break_env_listing(monkeypatch)
+    project_dir = tmp_path / "proj_both_preflights_fail"
+    project_dir.mkdir()
+    # A lone \r mid-table: read_tracking uses universal newlines and accepts
+    # it, while the pre-flight's _read_exact uses newline="" and refuses.
+    pyproject = project_dir / "pyproject.toml"
+    pyproject.write_bytes(
+        b'[project]\nname = "demo"\ndependencies = []\n\n[tool.uv-stack]\n'
+        b'version = 1\nstack = ["ds"]\rapplied = []\n'
+    )
+    before = pyproject.read_bytes()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ConfigError):
+        refresh_project(
+            config_tree, runner, RefreshOptions(python="scratch"), cwd=project_dir,
+        )
+    assert pyproject.read_bytes() == before
+    assert runner.commands == []
+
+
+def test_init_consults_the_declared_envs_once_and_before_it_starts(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """One lookup per run, above the scaffolding, on the path that succeeds.
+
+    The advisory still has to be delivered twice in principle (both tenses),
+    so the guard has to be the lookup rather than the wording: classify once,
+    format twice.
+    """
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_travel_once"
+    project_dir.mkdir()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    log = _watch_env_listing(monkeypatch, runner)
+    warnings = init_project(
+        config_tree, runner, ["ds"],
+        ProjectOptions(python="scratch"), cwd=project_dir,
+    )
+    assert len(_travel_warnings(warnings)) == 1
+    assert len(log) == 1
+    assert "uv" not in log[0]
+
+
+def test_init_failure_reuses_the_lookup_instead_of_repeating_it(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    """The error handler formats a tense; it may not go back to the filesystem.
+
+    A lookup inside the handler can raise, and an OSError raised there replaces
+    the UvStackError being handled — the user loses the real failure and every
+    advisory attached to it. Pinning the surviving error and its advisory
+    alongside the single early lookup is what makes that unrepeatable.
+    """
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = tmp_path / "proj_travel_once_failed"
+    project_dir.mkdir()
+    runner = RecordingRunner(responder=_fail_on("add"))
+    log = _watch_env_listing(monkeypatch, runner)
+    with pytest.raises(ToolError) as excinfo:
+        init_project(
+            config_tree, runner, ["ds"],
+            ProjectOptions(python="scratch"), cwd=project_dir,
+        )
+    assert "add failed" in str(excinfo.value)
+    assert len(log) == 1
+    assert "uv" not in log[0]
+    travel = _travel_warnings(excinfo.value.resolution_warnings)
+    assert len(travel) == 1
+    assert travel[0].startswith("Recording interpreter 'scratch'")
+
+
+def test_refresh_temp_file_failure_leaves_the_ledger_untouched(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A refusal to build the temp requirements file must land above the write.
+
+    An OSError is not a UvStackError, so it carries no resolution_warnings and
+    the travel advisory has no way out on it. Building and filling the temp
+    file ahead of the durable write is what keeps that from mattering: the
+    only filesystem failure the run can still produce happens before anything
+    is recorded. Asserting the ledger rather than the exception type is the
+    stronger pin, and it survives any further file work this region grows.
+
+    The patch is narrowed to refresh's own prefix because atomic_write calls
+    mkstemp too; a global patch would abort the run above the write for an
+    unrelated reason and hide the defect rather than expose it.
+    """
+    import tempfile as tempfile_module
+
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_bytes()
+    real_mkstemp = tempfile_module.mkstemp
+
+    def _no_space(*args, **kwargs):
+        if str(kwargs.get("prefix", "")).startswith("uv-stack-refresh"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(tempfile_module, "mkstemp", _no_space)
+    with pytest.raises(OSError) as excinfo:
+        refresh_project(
+            config_tree, RecordingRunner(responder=_existing_env_responder),
+            RefreshOptions(python="/opt/envs/x/bin/python"), cwd=project_dir,
+        )
+    # The injected failure, not an incidental one, and not a silent success.
+    assert excinfo.value.errno == errno.ENOSPC
+    assert pyproject.read_bytes() == before
+    tracking = read_tracking(pyproject)
+    assert tracking is not None
+    assert tracking.python is None
+    assert tracking.pending is None
+
+
+def test_refresh_dry_run_still_runs_the_placement_check(tmp_path: Path):
+    """A dry run exists to find out, so the refusal comes before the plan.
+
+    The check sits outside refresh's ``dry_run`` guard, which is the same
+    placement that keeps it ahead of the pending write on the real path.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    root = tmp_path / "root-dry"
+    (root / "profiles").mkdir(parents=True)
+    (root / "bundles").mkdir(parents=True)
+    (root / "envs").mkdir(parents=True)
+    # A trailing backslash continues onto the next line, so this entry would
+    # swallow whichever requirement the render writes after it.
+    (root / "profiles" / "dev.yaml").write_text(
+        "includes:\n  - rich\n  - -e /checkouts/widget\\\n"
+    )
+    config = ConfigRoot(root)
+    project_dir = _portable_tracked_project(tmp_path, "proj-dry")
+    pyproject = project_dir / "pyproject.toml"
+    before = pyproject.read_text()
+    runner = RecordingRunner(responder=_existing_env_responder)
+    with pytest.raises(ConfigError) as excinfo:
+        refresh_project(config, runner, RefreshOptions(dry_run=True), cwd=project_dir)
+    assert "backslash" in str(excinfo.value)
+    assert runner.commands == []
+    assert pyproject.read_text() == before

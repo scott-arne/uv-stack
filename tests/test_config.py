@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,58 @@ def test_load_profile_malformed_yaml_raises(config_tree: ConfigRoot):
     config_tree.profile_path("ds").write_text("includes: [unterminated\n")
     with pytest.raises(ConfigError):
         config_tree.load_profile("ds")
+
+
+# One document per exception family. PyYAML's contract is that a loader raises
+# YAMLError; its constructors break that contract, and not in one way.
+_CONSTRUCTOR_FAILURES = [
+    pytest.param("description: 2020-99-99\nincludes: []\n", id="value-error"),
+    pytest.param('description: !!bool "nope"\nincludes: []\n', id="key-error"),
+    pytest.param('description: !!timestamp "nope"\nincludes: []\n', id="attribute-error"),
+]
+
+
+@pytest.mark.parametrize("document", _CONSTRUCTOR_FAILURES)
+def test_load_profile_constructor_failure_raises_config_error(
+    config_tree: ConfigRoot, document: str
+):
+    config_tree.profile_path("ds").write_text(document)
+    with pytest.raises(ConfigError) as caught:
+        config_tree.load_profile("ds")
+    assert str(config_tree.profile_path("ds")) in str(caught.value)
+
+
+@pytest.mark.parametrize("document", _CONSTRUCTOR_FAILURES)
+def test_load_bundle_constructor_failure_raises_config_error(
+    config_tree: ConfigRoot, document: str
+):
+    config_tree.bundle_path("standard").write_text(document)
+    with pytest.raises(ConfigError) as caught:
+        config_tree.load_bundle("standard")
+    assert str(config_tree.bundle_path("standard")) in str(caught.value)
+
+
+def test_a_constructor_failure_names_the_exception_type(config_tree: ConfigRoot):
+    # Two of the three families stringify to a bare operand: KeyError('nope')
+    # renders as "'nope'", which on its own tells a reader nothing about what
+    # the loader objected to. The type is what makes the message legible.
+    config_tree.profile_path("ds").write_text('description: !!bool "nope"\nincludes: []\n')
+
+    with pytest.raises(ConfigError) as caught:
+        config_tree.load_profile("ds")
+
+    assert "KeyError" in str(caught.value)
+
+
+def test_load_profile_bad_utf8_is_not_reported_as_invalid_yaml(config_tree: ConfigRoot):
+    # The YAML guard is broad, so the read has to stay outside it: a file that
+    # is not UTF-8 never reached the parser, and "Invalid YAML" would send the
+    # reader hunting for a syntax error that is not there.
+    config_tree.profile_path("ds").write_bytes(b"includes: [\xff\xfe]\n")
+    with pytest.raises(ConfigError) as caught:
+        config_tree.load_profile("ds")
+    assert "Cannot read" in str(caught.value)
+    assert "Invalid YAML" not in str(caught.value)
 
 
 def test_load_profile_empty_file_raises(config_tree: ConfigRoot):
@@ -273,3 +326,264 @@ def test_require_env_names_a_non_regular_stack_path(
     assert expected in excinfo.value.message
     assert str(path) in excinfo.value.message
     assert hint in (excinfo.value.hint or "")
+
+
+def test_variables_paths(config_tree: ConfigRoot):
+    assert config_tree.variables_path() == config_tree.root / "variables.txt"
+    assert (
+        config_tree.variables_local_path() == config_tree.root / "variables.local.txt"
+    )
+
+
+def test_load_variables_on_a_root_with_no_variable_files(config_tree: ConfigRoot):
+    variables = config_tree.load_variables()
+    assert variables.declared == ()
+    assert dict(variables.values) == {}
+
+
+def test_load_variables_reads_declarations_and_values(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\n# a comment\nWORK\n")
+    config_tree.variables_local_path().write_text("DEV=/home/me/dev\n")
+    variables = config_tree.load_variables()
+    assert variables.declared == ("DEV", "WORK")
+    assert dict(variables.values) == {"DEV": "/home/me/dev"}
+    assert variables.undefined() == ["WORK"]
+
+
+def test_a_value_may_contain_an_equals_sign(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("HOST\n")
+    config_tree.variables_local_path().write_text("HOST=https://h/simple?a=b\n")
+    assert config_tree.load_variables().values["HOST"] == "https://h/simple?a=b"
+
+
+def test_spaces_around_the_separator_are_tolerated(config_tree: ConfigRoot):
+    # 'DEV = /x' is what a user writes by habit. The name is stripped before
+    # the declared-name lookup and the value before the whitespace refusal, so
+    # neither strip is cosmetic.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV = /home/me/dev\n")
+    assert config_tree.load_variables().values["DEV"] == "/home/me/dev"
+
+
+def test_a_value_is_tilde_expanded(config_tree: ConfigRoot, monkeypatch):
+    monkeypatch.setenv("HOME", "/home/tester")
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=~/code\n")
+    assert config_tree.load_variables().values["DEV"] == "/home/tester/code"
+
+
+def test_an_environment_variable_wins_over_the_file(config_tree: ConfigRoot, monkeypatch):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=/from/file\n")
+    monkeypatch.setenv("DEV", "/from/env")
+    assert config_tree.load_variables().values["DEV"] == "/from/env"
+
+
+def test_an_empty_environment_variable_does_not_count(config_tree: ConfigRoot, monkeypatch):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=/from/file\n")
+    monkeypatch.setenv("DEV", "   ")
+    assert config_tree.load_variables().values["DEV"] == "/from/file"
+
+
+def test_an_environment_value_may_contain_a_hash(config_tree: ConfigRoot, monkeypatch):
+    # The file grammar strips '#' as a comment; the environment has no grammar.
+    config_tree.variables_path().write_text("DEV\n")
+    monkeypatch.setenv("DEV", "/a#b")
+    assert config_tree.load_variables().values["DEV"] == "/a#b"
+
+
+def test_an_environment_variable_for_an_undeclared_name_is_ignored(
+    config_tree: ConfigRoot, monkeypatch
+):
+    monkeypatch.setenv("NOPE", "/x")
+    assert dict(config_tree.load_variables().values) == {}
+
+
+_NON_REGULAR_SHAPES = [
+    "directory",
+    "dangling-symlink",
+    pytest.param(
+        "fifo",
+        marks=pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo"),
+    ),
+]
+
+
+def _make_non_regular(path: Path, shape: str) -> None:
+    """Create ``path`` as something that is present but not a regular file."""
+    if shape == "directory":
+        path.mkdir()
+    elif shape == "dangling-symlink":
+        path.symlink_to(path.parent / "nowhere")
+    else:
+        os.mkfifo(path)
+
+
+@pytest.mark.parametrize("shape", _NON_REGULAR_SHAPES)
+def test_a_non_regular_variables_file_is_refused(config_tree: ConfigRoot, shape: str):
+    # is_file() cannot tell absent from broken, so without the guard a
+    # directory named variables.txt reads as a root that declares nothing and
+    # every command runs on with no variables at all.
+    _make_non_regular(config_tree.variables_path(), shape)
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "variables.txt" in excinfo.value.message
+
+
+@pytest.mark.parametrize("shape", _NON_REGULAR_SHAPES)
+def test_a_non_regular_local_variables_file_is_refused(config_tree: ConfigRoot, shape: str):
+    config_tree.variables_path().write_text("DEV\n")
+    _make_non_regular(config_tree.variables_local_path(), shape)
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "variables.local.txt" in excinfo.value.message
+
+
+@pytest.mark.parametrize("shape", _NON_REGULAR_SHAPES)
+def test_a_non_regular_project_python_file_is_refused(config_tree: ConfigRoot, shape: str):
+    # first_clean_line reads through the same is_file() test, so each of these
+    # shapes answered "no default is configured" -- the answer an absent file
+    # gives -- for a file that is present and unreadable.
+    _make_non_regular(config_tree.project_python_path(), shape)
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.default_project_python()
+    assert "project-python.txt" in excinfo.value.message
+
+
+@pytest.mark.parametrize("shape", _NON_REGULAR_SHAPES)
+def test_a_non_regular_editor_file_is_refused(config_tree: ConfigRoot, shape: str):
+    # The same argument as the method above, and as the five targets
+    # cli/edit.py guards: without this, a directory at editor.txt reads as
+    # "no editor configured" and 'stack edit' quietly opens $VISUAL instead of
+    # the editor the root names.
+    _make_non_regular(config_tree.editor_path(), shape)
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.default_editor()
+    assert "editor.txt" in excinfo.value.message
+
+
+@pytest.mark.parametrize("shape", _NON_REGULAR_SHAPES)
+@pytest.mark.parametrize(
+    "accessor", ["env_python_path", "env_micromamba_path", "env_channels_path"]
+)
+def test_a_non_regular_env_source_is_refused(
+    config_tree: ConfigRoot, accessor: str, shape: str
+):
+    # All three are optional, and both readers answer for an unreadable path
+    # what they answer for an absent one -- so the configured value was not
+    # failing to load, it was being replaced by a default: 3.12 for the
+    # interpreter, nothing at all for the conda packages and channels.
+    # stack.txt is absent from this list because require_env, one call
+    # earlier, already holds it to the same rule.
+    path = getattr(config_tree, accessor)("main")
+    path.unlink()
+    _make_non_regular(path, shape)
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_env("main")
+    assert str(path) in excinfo.value.message
+
+
+def test_load_env_still_admits_absent_optional_sources(config_tree: ConfigRoot):
+    # The guard above must not turn an optional file into a required one;
+    # require_regular_file is a no-op on a genuinely absent path.
+    for accessor in ("env_python_path", "env_micromamba_path", "env_channels_path"):
+        getattr(config_tree, accessor)("main").unlink()
+    env = config_tree.load_env("main")
+    assert (env.python, env.micromamba, env.channels) == ("3.12", [], [])
+
+
+def test_a_malformed_declaration_names_the_file_and_line(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\n2BAD\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "variables.txt" in excinfo.value.message
+    assert "line 2" in excinfo.value.message
+
+
+def test_a_duplicate_declaration_names_both_lines(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\nWORK\nDEV\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "lines 1 and 3" in excinfo.value.message
+
+
+def test_a_value_line_without_an_equals_sign_is_refused(config_tree: ConfigRoot):
+    # 'Line', capitalized: this message opens with the position, unlike the
+    # declaration message, which puts it mid-sentence.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV /home/me\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "Line 1" in excinfo.value.message
+    assert "not an assignment" in excinfo.value.message
+
+
+def test_an_undeclared_assignment_is_refused(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("NOPE=/x\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "NOPE" in excinfo.value.message
+
+
+def test_a_duplicate_assignment_names_both_lines(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=/a\nDEV=/b\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "lines 1 and 2" in excinfo.value.message
+
+
+def test_an_empty_value_is_refused(config_tree: ConfigRoot):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "empty" in excinfo.value.message
+
+
+def test_a_value_containing_whitespace_is_refused(config_tree: ConfigRoot):
+    # 'DEV=--requirement /tmp' would turn the admitted '${DEV}/deps.txt' into a
+    # recursive include, which is what condition 3 exists to prevent.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=--requirement /tmp\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "whitespace" in excinfo.value.message
+
+
+def test_whitespace_is_refused_after_tilde_expansion(
+    config_tree: ConfigRoot, monkeypatch
+):
+    monkeypatch.setenv("HOME", "/home/my tester")
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=~/code\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "whitespace" in excinfo.value.message
+
+
+def test_a_value_whose_expansion_fails_is_refused(config_tree: ConfigRoot):
+    # os.path.expanduser is not total: the '~user' form goes to the password
+    # database, and a NUL in the name raises ValueError. A ValueError is
+    # neither a UvStackError nor an OSError, so unconverted this one leaves
+    # 'stack doctor', 'stack converge', and 'stack status' printing a
+    # traceback for a file the user can fix in one edit.
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=~a\x00b/x\n")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "'DEV'" in excinfo.value.message
+    assert "cannot be expanded" in excinfo.value.message
+    assert "variables.local.txt" in excinfo.value.message
+
+
+def test_an_environment_value_containing_whitespace_is_refused(
+    config_tree: ConfigRoot, monkeypatch
+):
+    config_tree.variables_path().write_text("DEV\n")
+    monkeypatch.setenv("DEV", "/a b")
+    with pytest.raises(ConfigError) as excinfo:
+        config_tree.load_variables()
+    assert "whitespace" in excinfo.value.message

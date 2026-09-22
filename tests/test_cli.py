@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import signal
@@ -10,6 +11,7 @@ import rich_click
 from click.testing import CliRunner
 
 from uv_stack.cli import cli
+from uv_stack.config import ConfigRoot
 from uv_stack.runner import Command
 
 
@@ -119,7 +121,7 @@ def _two_failing_envs_root(tmp_path: Path) -> Path:
 def test_version():
     result = CliRunner().invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "stack, version 0.5.0" in result.output
+    assert "stack, version 0.6.0" in result.output
 
 
 def test_config_init_reports_the_locks_directory(tmp_path: Path):
@@ -213,6 +215,25 @@ def test_upgrade_stop_on_error_aborts_after_first(tmp_path: Path):
     assert result.exit_code == 1
     assert "Upgrading alpha" in result.output
     assert "Upgrading beta" not in result.output
+
+def test_stop_on_error_marks_unattempted_environments_skipped(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "upgrade", "--stop-on-error", "alpha", "beta"]
+    )
+    assert result.exit_code == 1
+    summary = result.output.split("Summary", 1)[1]
+    assert "skipped after an earlier failure" in summary
+    assert "0 succeeded, 1 failed, 1 skipped." in summary
+
+
+def test_the_count_line_is_unchanged_without_stop_on_error(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "alpha", "beta"])
+    summary = result.output.split("Summary", 1)[1]
+    assert "2 of 2 environment(s) failed." in summary
+    assert "skipped" not in summary
+
 
 
 def test_upgrade_dry_run_strict_exits_nonzero_on_failure(tmp_path: Path):
@@ -502,6 +523,21 @@ def test_show_missing_env_errors(tmp_path: Path):
     result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "ghost"])
     assert result.exit_code == 1
     assert "ghost" in result.output
+
+
+def test_show_env_fails_on_undefined_variable(tmp_path: Path):
+    from uv_stack.config import ConfigRoot
+
+    root = _env_root(tmp_path)
+    cfg = ConfigRoot(root)
+    cfg.variables_path().write_text("DEV\n")
+    cfg.profile_path("ds").write_text(
+        "description: Core data-science stack\n"
+        "includes:\n  - numpy\n  - -e ${DEV}/mypkg\n"
+    )
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "main"])
+    assert result.exit_code == 1
+    assert "DEV" in result.output
 
 
 @pytest.mark.parametrize(
@@ -3804,6 +3840,48 @@ def test_create_project_python_is_stripped_before_tracking(
     assert captured["python"] == "3.12"
 
 
+def test_create_project_renders_advisories_from_a_failed_run(tmp_path: Path, monkeypatch):
+    """A failed create must still print the advisory for the spec it recorded.
+
+    init_project writes the tracking table before ``uv add`` runs, so a
+    failure there leaves the untravelable interpreter in pyproject.toml. The
+    advisory reaches the CLI only on the raised error — the warning list it
+    normally arrives on is never returned — so the command renders
+    error.resolution_warnings and re-raises into the group-level handler.
+    """
+    from uv_stack.errors import ToolError
+    from uv_stack.runner import CommandResult, RecordingRunner
+
+    root = _seeded_root(tmp_path)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    monkeypatch.chdir(project_dir)
+    # Keep the advisory off the fold so it can be matched whole.
+    monkeypatch.setenv("COLUMNS", "1000")
+
+    def _fail_add(command: Command) -> CommandResult:
+        if "add" in command.args:
+            raise ToolError("add failed", command=command.args, returncode=1)
+        return CommandResult(returncode=0, stdout="")
+
+    monkeypatch.setattr(
+        "uv_stack.cli.create.SubprocessRunner",
+        lambda: RecordingRunner(responder=_fail_add),
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "--root", str(root), "create", "project", "ds",
+            "--python", "/opt/envs/x/bin/python",
+        ],
+    )
+    assert result.exit_code == 1
+    flat = _flat_panel(result)
+    assert "warning: Recording interpreter '/opt/envs/x/bin/python'" in flat
+    # Re-raised, so the group-level handler still rendered the error panel.
+    assert "add failed" in flat
+
+
 # ---------------------------------------------------------------------------
 # refresh
 # ---------------------------------------------------------------------------
@@ -3970,12 +4048,12 @@ def test_command_panels_separate_create_env_and_project_work():
     Asserts structurally against COMMAND_GROUPS: 'refresh' only ever operates
     on projects and gets its own panel; 'create' is cross-cutting (it makes
     environments, projects, profiles, and bundles) and gets its own panel;
-    'upgrade' is the only genuinely environment-only command.
+    'upgrade' and 'converge' are the genuinely environment-only commands.
     """
     command_groups = rich_click.rich_click.COMMAND_GROUPS.get("stack", [])
     panels = {group["name"]: group["commands"] for group in command_groups}
     assert panels.get("Create") == ["create"], panels
-    assert panels.get("Environments") == ["upgrade"], panels
+    assert panels.get("Environments") == ["upgrade", "converge"], panels
     assert panels.get("Projects") == ["refresh"], panels
 
     # Completeness: the per-panel assertions above pin what each panel holds,
@@ -4683,3 +4761,799 @@ def test_show_project_never_resolves_tokens(tmp_path: Path, monkeypatch, broken:
     as_json = runner.invoke(cli, ["--root", str(root), "show", "project", "--json"])
     assert as_json.exit_code == 0, _combined_output(as_json)
     assert json.loads(as_json.output)["stack"] == [token]
+
+
+def test_create_profile_refuses_a_misplaced_reference(config_tree: ConfigRoot):
+    runner = CliRunner()
+    expected = str(config_tree.profile_path("bad"))
+    result = runner.invoke(
+        cli,
+        ["--root", str(config_tree.root), "create", "profile", "bad", "${PKG}"],
+        # Rich splits a path longer than the panel mid-token, and _flat_panel
+        # cannot rejoin it; size the console from the path rather than guessing.
+        env={"COLUMNS": str(len(expected) + 60)},
+    )
+    assert result.exit_code != 0
+    assert not config_tree.profile_path("bad").exists()
+    # The panel must name the file the entry was refused in; nothing else in
+    # the suite holds the `source=` argument at this call site.
+    assert expected in _flat_panel(result)
+
+
+def test_create_profile_accepts_an_admitted_reference(config_tree: ConfigRoot):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root", str(config_tree.root),
+            "create", "profile", "dev", "--", "-e ${DEV}/pkg",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "${DEV}" in config_tree.profile_path("dev").read_text()
+
+
+def test_create_bundle_refuses_a_misplaced_reference(config_tree: ConfigRoot):
+    runner = CliRunner()
+    expected = str(config_tree.bundle_path("bad"))
+    result = runner.invoke(
+        cli,
+        ["--root", str(config_tree.root), "create", "bundle", "bad", "${PKG}"],
+        env={"COLUMNS": str(len(expected) + 60)},
+    )
+    assert result.exit_code != 0
+    assert not config_tree.bundle_path("bad").exists()
+    assert expected in _flat_panel(result)
+
+
+def test_create_env_refuses_a_misplaced_reference(config_tree: ConfigRoot, monkeypatch):
+    monkeypatch.setattr("uv_stack.cli.create._run_upgrade", lambda *a, **kw: None)
+    runner = CliRunner()
+    expected = str(config_tree.env_stack_path("new"))
+    result = runner.invoke(
+        cli,
+        ["--root", str(config_tree.root), "create", "env", "new", "${PKG}"],
+        env={"COLUMNS": str(len(expected) + 60)},
+    )
+    assert result.exit_code != 0
+    assert not config_tree.env_stack_path("new").exists()
+    assert expected in _flat_panel(result)
+
+
+def test_create_profile_refuses_placement_before_checking_the_name(
+    config_tree: ConfigRoot,
+):
+    # The guard is the first statement of the body, so placement is reported
+    # even when the name would also be rejected. Without that ordering this
+    # input reports "Invalid profile name" instead.
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(config_tree.root), "create", "profile", "../../evil", "${PKG}"],
+        env={"COLUMNS": "300"},
+    )
+    assert result.exit_code != 0
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "Invalid profile name" not in panel
+
+
+def test_create_bundle_refuses_placement_before_resolving_tokens(
+    config_tree: ConfigRoot,
+):
+    # '@nope' alone reports "Missing bundle"; with a misplaced reference
+    # present, placement must win because its guard runs first.
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(config_tree.root), "create", "bundle", "bad", "@nope", "${PKG}"],
+        env={"COLUMNS": "300"},
+    )
+    assert result.exit_code != 0
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "Missing bundle" not in panel
+
+
+def test_create_env_refuses_placement_before_resolving_tokens(
+    config_tree: ConfigRoot, monkeypatch
+):
+    monkeypatch.setattr("uv_stack.cli.create._run_upgrade", lambda *a, **kw: None)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(config_tree.root), "create", "env", "new", "@nope", "${PKG}"],
+        env={"COLUMNS": "300"},
+    )
+    assert result.exit_code != 0
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "Missing bundle" not in panel
+
+
+def test_create_env_refuses_placement_before_checking_python(
+    config_tree: ConfigRoot, monkeypatch
+):
+    # '--python 3.12.*' alone is a UsageError; placement must still win,
+    # because its guard is the first statement of the body.
+    monkeypatch.setattr("uv_stack.cli.create._run_upgrade", lambda *a, **kw: None)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root", str(config_tree.root), "create", "env", "new",
+            "--recreate", "--python", "3.12.*", "${PKG}",
+        ],
+        env={"COLUMNS": "300"},
+    )
+    assert result.exit_code != 0
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "must be a plain version" not in panel
+
+
+def test_create_bundle_refuses_placement_before_classifying_tokens(
+    config_tree: ConfigRoot,
+):
+    # Under --strict an unqualified token is itself an error. Placement runs
+    # ahead of classify(), so the refusal is what the user hears about.
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root", str(config_tree.root), "create", "bundle", "b",
+            "--strict", "numpy", "${PKG}",
+        ],
+        env={"COLUMNS": "300"},
+    )
+    assert result.exit_code != 0
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "Unqualified token" not in panel
+
+
+def test_init_refuses_placement_before_resolving_tokens(tmp_path: Path, monkeypatch):
+    # Mirrors 'stack create env': '@nope' alone reports "Missing bundle", so
+    # a refusal here proves placement runs before resolution.
+    from uv_stack.config import ConfigRoot
+
+    root = tmp_path / "python-envs"
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "init"],
+        env={"COLUMNS": "300"},
+        input="y\ny\n\n@nope ${PKG}\n\n",
+    )
+    assert result.exit_code == 1
+    panel = _flat_panel(result)
+    assert "Refused 1 requirement entry" in panel
+    assert "Missing bundle" not in panel
+    assert not ConfigRoot(root).env_stack_path("main").exists()
+
+
+def test_create_bundle_accepts_an_admitted_reference(config_tree: ConfigRoot):
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root", str(config_tree.root),
+            "create", "bundle", "dev", "--", "-e ${DEV}/pkg",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "${DEV}" in config_tree.bundle_path("dev").read_text()
+
+
+def test_create_env_accepts_an_admitted_reference(config_tree: ConfigRoot, monkeypatch):
+    monkeypatch.setattr("uv_stack.cli.create._run_upgrade", lambda *a, **kw: None)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "--root", str(config_tree.root),
+            "create", "env", "new", "--", "-e ${DEV}/pkg",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "${DEV}" in config_tree.env_stack_path("new").read_text()
+
+
+def test_init_refuses_a_misplaced_reference_before_writing(tmp_path: Path, monkeypatch):
+    # 'stack init' takes its tokens from a prompt and calls write_env_sources
+    # directly, so it needs its own guard and its own proof.
+    from uv_stack.config import ConfigRoot
+
+    root = tmp_path / "python-envs"
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    runner = CliRunner()
+    expected = str(ConfigRoot(root).env_stack_path("main"))
+    # Prompts: seed starter? y | create env? y | name [main] | tokens: ${PKG}
+    # | python [3.12] — the command errors before the env's stack.txt is written.
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "init"],
+        env={"COLUMNS": str(len(expected) + 60)},
+        input="y\ny\n\n${PKG}\n\n",
+    )
+    assert result.exit_code == 1
+    assert not ConfigRoot(root).env_stack_path("main").exists()
+    assert expected in _flat_panel(result)
+
+
+def test_init_accepts_an_admitted_reference(tmp_path: Path, monkeypatch):
+    from uv_stack.config import ConfigRoot
+
+    root = tmp_path / "python-envs"
+    monkeypatch.setattr("uv_stack.cli.init_cmd._run_upgrade", lambda *a, **kw: None)
+    runner = CliRunner()
+    # Tokens are split on whitespace by 'stack init', so an editable entry
+    # cannot be typed at this prompt; a path operand is the admitted form
+    # that survives the split.
+    result = runner.invoke(
+        cli,
+        ["--root", str(root), "init"],
+        input="y\ny\n\n${DEV}/pkg\n\nn\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "${DEV}/pkg" in ConfigRoot(root).env_stack_path("main").read_text()
+
+
+def test_config_portable_writes_the_block_and_prints_next_steps(
+    config_tree: ConfigRoot,
+):
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable"]
+    )
+    assert result.exit_code == 0, result.output
+    assert (config_tree.root / ".gitignore").is_file()
+    assert "variables.local.txt" in result.output
+    assert "git -C" in result.output
+    assert "init" in result.output
+
+
+def test_config_portable_dry_run_writes_nothing(config_tree: ConfigRoot):
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert not (config_tree.root / ".gitignore").exists()
+    assert "dry run" in result.output
+    # The steps are still shown -- seeing the workflow is why one asks -- but
+    # pasting them would run the untracking step against a block that was
+    # never written, so the caution comes before them.
+    assert "Re-run without --dry-run first" in result.output
+    assert result.output.index("Re-run without") < result.output.index("git -C")
+
+
+def test_config_portable_does_not_caution_when_it_wrote_the_block(
+    config_tree: ConfigRoot,
+):
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Re-run without --dry-run" not in result.output
+
+
+def test_config_portable_reports_a_malformed_block(config_tree: ConfigRoot):
+    (config_tree.root / ".gitignore").write_text(
+        "# BEGIN uv-stack — managed block, do not edit by hand.\na\n"
+    )
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable"]
+    )
+    assert result.exit_code != 0
+    assert "Malformed" in result.output
+
+
+def test_repeated_environment_names_are_upgraded_once(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "alpha", "alpha"])
+    assert result.exit_code == 1
+    summary = result.output.split("Summary", 1)[1]
+    assert summary.count("alpha") == 1
+    assert "1 of 1 environment(s) failed." in summary
+
+
+def test_stop_on_error_accounting_survives_repeated_names(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(
+        cli,
+        ["--root", str(root), "upgrade", "--stop-on-error", "alpha", "beta", "alpha"],
+    )
+    assert result.exit_code == 1
+    summary = result.output.split("Summary", 1)[1]
+    # Two distinct targets after dedup: alpha fails, beta is never reached.
+    assert summary.count("alpha") == 1
+    assert "0 succeeded, 1 failed, 1 skipped." in summary
+    assert "skipped after an earlier failure" in summary
+    # The phantom this fix exists to kill: before dedup the count line read
+    # "1 succeeded" with no success row anywhere in the summary.
+    assert "1 succeeded" not in summary
+
+
+def test_dedup_preserves_request_order(tmp_path: Path):
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "upgrade", "beta", "alpha", "beta"]
+    )
+    assert result.exit_code == 1
+    summary = result.output.split("Summary", 1)[1]
+    assert summary.index("beta") < summary.index("alpha")
+    assert "2 of 2 environment(s) failed." in summary
+
+
+def test_converge_runs_every_declared_environment_without_prompting(
+    tmp_path: Path, monkeypatch
+):
+    root = _two_failing_envs_root(tmp_path)
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.converge._run_upgrade",
+        lambda config, names, options, **kw: calls.append((list(names), options)),
+    )
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    assert result.exit_code == 0, result.output
+    names, options = calls[0]
+    assert names == ["alpha", "beta"]
+    assert options.create is True
+    assert options.no_upgrade is True
+    assert options.dry_run is False
+    assert "Upgrade all of these?" not in result.output
+
+
+def test_converge_accepts_explicit_names(tmp_path: Path, monkeypatch):
+    root = _two_failing_envs_root(tmp_path)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.converge._run_upgrade",
+        lambda config, names, options, **kw: calls.append(list(names)),
+    )
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge", "beta"])
+    assert result.exit_code == 0, result.output
+    assert calls == [["beta"]]
+
+
+def test_converge_upgrade_flag_turns_off_no_upgrade(tmp_path: Path, monkeypatch):
+    root = _two_failing_envs_root(tmp_path)
+    captured: list[object] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.converge._run_upgrade",
+        lambda config, names, options, **kw: captured.append(options),
+    )
+    CliRunner().invoke(cli, ["--root", str(root), "converge", "--upgrade"])
+    assert captured[0].no_upgrade is False
+
+
+def test_converge_passes_its_own_wording(tmp_path: Path, monkeypatch):
+    root = _two_failing_envs_root(tmp_path)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        "uv_stack.cli.converge._run_upgrade",
+        lambda config, names, options, **kw: captured.update(kw),
+    )
+    CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    assert captured["rule_verb"] == "Converging"
+    assert captured["all_succeeded"] == "All requested environments converged."
+
+
+def test_converge_passes_its_flags_through(tmp_path: Path, monkeypatch):
+    # --strict and --stop-on-error are pure pass-throughs, and a pass-through
+    # that is silently dropped looks exactly like one that works.
+    root = _two_failing_envs_root(tmp_path)
+    captured: dict[str, object] = {}
+
+    def _record(config, names, options, **kw):
+        captured["options"] = options
+        captured.update(kw)
+
+    monkeypatch.setattr("uv_stack.cli.converge._run_upgrade", _record)
+    CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--strict", "--stop-on-error"]
+    )
+    assert captured["stop_on_error"] is True
+    assert captured["options"].strict is True
+
+
+def test_converge_on_a_root_with_no_environments_says_so(tmp_path: Path):
+    root = _seeded_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    assert result.exit_code == 0
+    assert "No environments" in result.output
+
+
+def test_converge_help_states_it_does_not_prompt():
+    result = CliRunner().invoke(cli, ["converge", "--help"])
+    assert "never prompts" in result.output
+    # A dry run refreshes two generated files, so the old claim was false. The
+    # assertion is negative because rich wraps help text at the terminal width
+    # and a positive phrase can be split across lines; its absence cannot.
+    assert "change nothing" not in result.output
+
+
+def test_upgrade_help_points_at_converge():
+    result = CliRunner().invoke(cli, ["upgrade", "--help"])
+    assert "converge" in result.output
+    assert "change nothing" not in result.output
+
+
+def test_converge_dry_run_probes_and_mutates_nothing(tmp_path: Path, monkeypatch):
+    """Pin the dry-run boundary: one read-only probe, two files, no mutation."""
+    from uv_stack.commands import micromamba_python_info
+    from uv_stack.config import ConfigRoot
+    from uv_stack.runner import CommandResult, RecordingRunner
+
+    def _probe_responder(cmd):
+        if "run" in cmd.args:
+            return CommandResult(returncode=0, stdout="/envs/main/bin/python\n3.12.7\n")
+        return CommandResult(returncode=0, stdout="")
+
+    root = _env_root(tmp_path)
+    config = ConfigRoot(root)
+    runner = RecordingRunner(responder=_probe_responder)
+    # _run_upgrade builds its own runner; patch the name in the module whose
+    # globals that call resolves against, which is cli.upgrade even though the
+    # command lives in cli.converge.
+    monkeypatch.setattr("uv_stack.cli.upgrade.SubprocessRunner", lambda: runner)
+
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert [c.args for c in runner.commands] == [micromamba_python_info("main").args]
+    # The section rule carries converge's own verb, and the summary under a
+    # dry run reports the plan without claiming anything was converged.
+    assert "Converging main" in result.output
+    assert "All requested environments planned." in result.output
+    # The two generated files are refreshed; nothing else is written.
+    assert config.env_requirements_in("main").is_file()
+    assert config.env_environment_yml("main").is_file()
+    assert not config.env_requirements_lock("main").exists()
+
+
+def test_converge_success_summary_uses_its_own_line(tmp_path: Path, monkeypatch):
+    """The success line is converge's, not upgrade's.
+
+    Stubbing ``upgrade_env`` is what makes a successful batch reachable without
+    micromamba or uv, exactly as
+    ``test_upgrade_success_summary_preserves_bracketed_env_name`` does for the
+    ``stack upgrade`` side. It is patched at ``uv_stack.cli.upgrade`` because
+    that is the module whose globals ``_run_upgrade``'s call resolves against.
+    """
+    from uv_stack.operations.upgrade import UpgradeResult
+
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env",
+        lambda config, runner, name, options: UpgradeResult(env_name=name),
+    )
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    assert result.exit_code == 0, result.output
+    assert "All requested environments converged." in result.output
+    assert "All requested environments upgraded." not in result.output
+
+@pytest.mark.parametrize("command", ["upgrade", "converge"])
+def test_a_dry_run_success_line_claims_a_plan_and_nothing_more(
+    tmp_path: Path, monkeypatch, command: str
+):
+    """Neither command may report work a dry run did not do.
+
+    Both call sites supply their own past-tense line — 'upgraded', 'converged'
+    — and under --dry-run neither is true, so the two share one that is.
+    """
+    from uv_stack.operations.upgrade import UpgradeResult
+
+    root = _env_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env",
+        lambda config, runner, name, options: UpgradeResult(env_name=name),
+    )
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), command, "--dry-run", "main"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "All requested environments planned." in result.output
+    assert "upgraded." not in result.output
+    assert "converged." not in result.output
+
+
+def _three_envs_root(tmp_path: Path) -> Path:
+    """A config root declaring three environments, for batch-behavior tests.
+
+    ``_env_root`` supplies ``main``; the other two need only a ``stack.txt``,
+    since that is the file ``list_envs`` keys on and every test below patches
+    ``upgrade_env`` out before it could read anything else.
+    """
+    root = _env_root(tmp_path)
+    for name in ("beta", "gamma"):
+        env_dir = root / "envs" / name
+        env_dir.mkdir()
+        (env_dir / "stack.txt").write_text("@standard\n")
+    return root
+
+
+def _upgrade_env_raising(attempted: list[str], error: BaseException):
+    """A stand-in for ``upgrade_env`` that fails one environment of three.
+
+    The batch-behavior tests below differ only in which exception the failing
+    environment raises and in the flags the command is given, so the stand-in
+    is shared rather than restated four times.
+
+    :param attempted: Appended to with every name the batch reaches, in order.
+    :param error: Raised for ``beta``, which sorts first of the three.
+    :returns: A callable with ``upgrade_env``'s signature.
+    """
+    from uv_stack.operations.upgrade import UpgradeResult
+
+    def fake_upgrade(config, runner, name, options):
+        attempted.append(name)
+        if name == "beta":
+            raise error
+        return UpgradeResult(env_name=name)
+
+    return fake_upgrade
+
+
+def _eisdir() -> OSError:
+    """The filesystem failure the tests below inject, with a plausible path."""
+    return OSError(errno.EISDIR, "Is a directory", "envs/beta/requirements.in")
+
+
+def test_converge_continues_past_an_os_error_and_accounts_for_it(
+    tmp_path: Path, monkeypatch
+):
+    """A filesystem error from one environment must not abort the batch.
+
+    The shared loop catches OSError alongside UvStackError so a permission
+    error or ENOSPC from one environment is recorded as that environment's
+    failure rather than aborting the whole batch.
+    """
+    root = _three_envs_root(tmp_path)
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_raising(attempted, _eisdir())
+    )
+
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+
+    assert result.exit_code == 1, result.output
+    assert attempted == ["beta", "gamma", "main"]
+    assert "Summary" in result.output
+    summary = result.output.split("Summary", 1)[1]
+    assert "✗ beta" in summary
+    assert "Is a directory" in summary
+    assert "✓ gamma" in summary
+    assert "✓ main" in summary
+    assert "1 of 3 environment(s) failed." in summary
+
+
+def test_upgrade_continues_past_an_os_error_and_accounts_for_it(
+    tmp_path: Path, monkeypatch
+):
+    """The fix is in the shared loop, so pin it from both entry points."""
+    root = _three_envs_root(tmp_path)
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_raising(attempted, _eisdir())
+    )
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "upgrade", "beta", "gamma", "main"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert attempted == ["beta", "gamma", "main"]
+    summary = result.output.split("Summary", 1)[1]
+    assert "1 of 3 environment(s) failed." in summary
+
+
+@pytest.mark.parametrize("command", ["upgrade", "converge"])
+def test_a_dry_run_batch_rolls_its_failures_up_too(
+    tmp_path: Path, monkeypatch, command: str
+):
+    """A plan over a whole root gets the same roll-up an execution gets.
+
+    Without it a dozen-environment dry run with two failures left the user an
+    error panel somewhere in the scroll-back for each, a non-zero status, and
+    nothing that named which two — on the command whose entire purpose is the
+    whole-root batch.
+    """
+    root = _three_envs_root(tmp_path)
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_raising(attempted, _eisdir())
+    )
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), command, "--dry-run", "beta", "gamma", "main"]
+    )
+
+    assert result.exit_code == 1, result.output
+    summary = result.output.split("Summary", 1)[1]
+    assert "✗ beta" in summary
+    assert "Is a directory" in summary
+    assert "✓ gamma" in summary
+    assert "✓ main" in summary
+    assert "1 of 3 environment(s) failed." in summary
+
+
+def test_a_dry_run_with_stop_on_error_still_reports_the_skipped(
+    tmp_path: Path, monkeypatch
+):
+    """The third outcome describes a plan as well as it describes a run."""
+    root = _three_envs_root(tmp_path)
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_raising(attempted, _eisdir())
+    )
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--dry-run", "--stop-on-error"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert attempted == ["beta"]
+    summary = result.output.split("Summary", 1)[1]
+    assert "– gamma" in summary
+    assert "– main" in summary
+
+
+def test_os_error_with_stop_on_error_skips_remaining_environments(
+    tmp_path: Path, monkeypatch
+):
+    """--stop-on-error still stops, and the unreached envs read as skipped.
+
+    An OSError must not become the one failure kind that lets a name the batch
+    never reached render as a success.
+    """
+    root = _three_envs_root(tmp_path)
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_raising(attempted, _eisdir())
+    )
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--stop-on-error"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert attempted == ["beta"]
+    summary = result.output.split("Summary", 1)[1]
+    assert "✗ beta" in summary
+    assert "– gamma" in summary
+    assert "– main" in summary
+    assert "skipped after an earlier failure" in summary
+
+
+def test_broken_pipe_error_is_not_recorded_as_an_environment_failure(
+    tmp_path: Path, monkeypatch
+):
+    """A BrokenPipeError must not be caught as one environment's OSError.
+
+    BrokenPipeError subclasses OSError, so the loop's new arm would swallow it
+    without the re-raising arm above: the summary and every remaining panel
+    would go to the same dead pipe, and the conventional signal status would
+    become a plain exit 1.
+    """
+    root = _three_envs_root(tmp_path)
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.upgrade.upgrade_env",
+        _upgrade_env_raising(attempted, BrokenPipeError()),
+    )
+
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+
+    assert result.exit_code == 128 + int(signal.SIGPIPE)
+    assert attempted == ["beta"]
+    assert "Summary" not in result.output
+
+
+def _escape_victim(tmp_path: Path) -> Path:
+    """A directory outside the config root that a traversal would overwrite.
+
+    It carries the sources the pipeline keys on, so an unguarded NAME really
+    does reach it: without the guard the run exits 0 and replaces
+    ``requirements.in`` with generated content. A victim missing those files
+    would make the test pass for the wrong reason.
+
+    :param tmp_path: The test's temporary directory.
+    :returns: The victim directory.
+    """
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "stack.txt").write_text("@standard\n")
+    (victim / "python.txt").write_text("3.12\n")
+    (victim / "requirements.in").write_text("DO NOT TOUCH\n")
+    return victim
+
+
+def _assert_untouched(victim: Path) -> None:
+    """Pin that nothing outside the config root was written.
+
+    Asserted before the exit status so a regression names the damage rather
+    than a proxy for it.
+
+    :param victim: The directory built by :func:`_escape_victim`.
+    """
+    assert (victim / "requirements.in").read_text() == "DO NOT TOUCH\n"
+    assert not (victim / "environment.yml").exists()
+
+
+def test_converge_rejects_an_absolute_environment_name(tmp_path: Path):
+    """An absolute NAME must not escape the config root.
+
+    ``ConfigRoot.env_dir`` joins the name onto ``<root>/envs``, and an
+    absolute name discards the left operand and lands outside the root, where
+    the pipeline would overwrite generated files. ``--dry-run`` runs no
+    subprocess but still refreshes those files, so it is the arm that isolates
+    the write from the tooling.
+    """
+    root = _seeded_root(tmp_path)
+    victim = _escape_victim(tmp_path)
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--dry-run", str(victim)]
+    )
+
+    _assert_untouched(victim)
+    assert result.exit_code == 1
+    assert "Invalid environment name" in result.output
+
+
+def test_upgrade_rejects_an_absolute_environment_name(tmp_path: Path):
+    """The upgrade command's side of the same guard."""
+    root = _seeded_root(tmp_path)
+    victim = _escape_victim(tmp_path)
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "upgrade", "--dry-run", str(victim)]
+    )
+
+    _assert_untouched(victim)
+    assert result.exit_code == 1
+    assert "Invalid environment name" in result.output
+
+
+def test_converge_rejects_a_dotdot_bearing_environment_name(tmp_path: Path):
+    """A '../'-bearing NAME must not escape the config root either."""
+    root = _seeded_root(tmp_path)
+    victim = _escape_victim(tmp_path)
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--dry-run", "../../victim"]
+    )
+
+    _assert_untouched(victim)
+    assert result.exit_code == 1
+    assert "Invalid environment name" in result.output
+
+
+def test_converge_refuses_the_whole_batch_before_any_environment_runs(tmp_path: Path):
+    """One bad NAME stops the batch; the good ones must not have run first.
+
+    Validating inside the per-environment loop would pass every test above,
+    since each passes a single name — but it would converge 'main' and only
+    then refuse, leaving half a batch applied for a request that was refused.
+    """
+    root = _env_root(tmp_path)
+    victim = _escape_victim(tmp_path)
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "converge", "--dry-run", "main", str(victim)]
+    )
+
+    # The section rule is the batch's first visible act, and it precedes any
+    # per-environment failure, so it is the signal that survives whatever
+    # 'main' would have gone on to do.
+    assert "Converging main" not in result.output
+    assert not (root / "envs" / "main" / "requirements.in").exists()
+    assert not (root / "envs" / "main" / "environment.yml").exists()
+    _assert_untouched(victim)
+    assert result.exit_code == 1

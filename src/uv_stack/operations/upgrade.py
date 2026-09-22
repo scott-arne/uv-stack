@@ -8,6 +8,7 @@ the command plan, and returns without touching the env or the lock.
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,7 +24,7 @@ from uv_stack.commands import (
     uv_pip_sync,
 )
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError, EnvError, UvStackError
+from uv_stack.errors import ConfigError, EnvError, ToolError, UvStackError
 from uv_stack.fsutil import atomic_write
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.create import ensure_env
@@ -33,6 +34,13 @@ from uv_stack.resolver import Resolver
 from uv_stack.runner import Command, Runner
 
 _DRY_RUN_PYTHON = "<env-python>"
+
+#: Kept local rather than imported from fsutil, whose flags are bundled with
+#: O_NOFOLLOW; seeding deliberately follows a symlinked lock. Where the
+#: platform lacks the flag getattr yields 0, which removes the FIFO guard
+#: rather than weakening it — the fstat afterwards can still refuse a FIFO,
+#: but only once the open it would have hung on has already returned.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 
 
 @dataclass
@@ -73,17 +81,114 @@ def _should_upgrade_all(options: UpgradeOptions) -> bool:
     return not options.no_upgrade and not options.upgrade_packages
 
 
-def _new_candidate_lock(lock: Path) -> Path:
-    """Create an empty sibling file to compile a candidate lock into.
+def _new_candidate_lock(lock: Path, *, seed: bool) -> Path:
+    """Create a sibling file to compile a candidate lock into.
+
+    The candidate is seeded from the published lock when one exists. ``uv pip
+    compile`` reads prior pins out of its *output* file, so compiling into an
+    empty file re-resolves everything: ``--no-upgrade`` would have nothing to
+    preserve and ``--upgrade-package X`` would upgrade far more than ``X``.
+    Seeding is what gives both flags their documented meaning. A full
+    ``--upgrade`` is not seeded at all: uv ignores those pins, so reading the
+    lock would only introduce a failure mode that buys nothing.
+
+    Compiling into a copy rather than into the lock itself is what keeps the
+    published lock intact when the compile fails; the caller's unwind path
+    deletes the candidate and leaves the original untouched.
 
     :param lock: The lock the candidate will replace once it is complete.
+    :param seed: Whether to seed the candidate from the published lock. Pass
+        False for a full upgrade, where uv ignores the output file.
     :returns: Path to the newly created temp file.
     """
     tmp_fd, tmp_name = tempfile.mkstemp(
         dir=lock.parent, prefix=lock.name + ".", suffix=".tmp"
     )
     os.close(tmp_fd)
-    return Path(tmp_name)
+    candidate = Path(tmp_name)
+    if not seed:
+        return candidate
+    try:
+        # One lookup, not two. Checking the pathname and then opening it lets a
+        # FIFO swapped in between park the open with no timeout and no unwind,
+        # so what gets interrogated is the descriptor actually obtained.
+        # O_NONBLOCK without O_NOFOLLOW: a symlinked lock is a topology this
+        # project tolerates -- require_regular_file accepts one resolving to a
+        # regular file -- and the flag still applies once the link has been
+        # followed, so a FIFO is refused through a symlink just as directly.
+        try:
+            fd = os.open(lock, os.O_RDONLY | _O_NONBLOCK)
+        except FileNotFoundError:
+            # Covers both a lock never published and one removed between the
+            # caller's decision to seed and this open.
+            return candidate
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                with os.fdopen(fd, "rb") as handle:
+                    fd = -1  # ownership transferred to the file object
+                    pins = handle.read()
+                candidate.write_bytes(pins)
+        finally:
+            if fd != -1:
+                os.close(fd)
+    except BaseException:
+        candidate.unlink(missing_ok=True)
+        raise
+    return candidate
+
+
+def _explain_candidate_lock(error: BaseException, lock: Path, *, seeded: bool) -> None:
+    """Point a failed compile at the published lock behind the temp file.
+
+    uv compiles into a ``.tmp`` sibling of the lock that the unwind deletes on
+    the way out, so its diagnostics name a path that no longer exists and never
+    mention the lock. What that path *was* depends on the mode: a seeded copy
+    of the lock, or a new empty file that a full upgrade resolves into from
+    scratch. Calling the latter a copy would describe a read that never
+    happened, and the recovery advice only helps when a full upgrade is still
+    an escape route rather than the mode that just failed. Two CLI commands now
+    reach this code and the spelling that escapes a seeded compile differs
+    between them, so the hint names both.
+
+    :param error: The exception about to be re-raised. Anything that is not a
+        :class:`ToolError`, any error that already carries a hint, and any
+        error from a command other than the compile, is left alone.
+    :param lock: The published lock the candidate stands in for.
+    :param seeded: Whether seeding was REQUESTED — the same value the caller
+        passed as ``seed`` to :func:`_new_candidate_lock`, not whether a copy
+        was made. The two differ when the lock is absent or is not a regular
+        file, where that function returns an empty candidate anyway; the
+        seeded wording then names a copy that did not happen. Narrow enough to
+        leave alone, but it is why this parameter is the request, not the
+        outcome.
+    """
+    # The argv PREFIX, not membership: micromamba_remove and
+    # micromamba_python_path both place the env name in argv as a bare element,
+    # so an environment called "compile" would otherwise claim this hint for
+    # every failure on the recreate path. _compile_args emits this exact prefix
+    # for both compile builders and nothing else emits it.
+    if (
+        isinstance(error, ToolError)
+        and error.hint is None
+        and error.command[:3] == ["uv", "pip", "compile"]
+    ):
+        if seeded:
+            error.hint = (
+                f"uv compiles into a copy of {lock}, so a '.tmp' path above "
+                f"names that copy, not a file you are missing. If {lock.name} "
+                "itself cannot be parsed, re-run as a full upgrade, which "
+                "ignores the existing pins and rewrites it: repeat the "
+                "command you ran, keeping the same environment names, and "
+                "either drop --no-upgrade/--upgrade-package from "
+                "'stack upgrade' or add --upgrade to 'stack converge'."
+            )
+        else:
+            error.hint = (
+                f"uv compiles into a new empty file beside {lock}, so a '.tmp' "
+                "path above names that file, not one you are missing. "
+                f"{lock.name} itself was not read: a full upgrade ignores the "
+                "existing pins."
+            )
 
 
 def _env_python(runner: Runner, env_name: str, *, probed: str | None = None) -> str:
@@ -203,7 +308,7 @@ def upgrade_env(
 
     atomic_write(
         config.env_requirements_in(env_name),
-        render_requirements_in(stack, config, env_name),
+        render_requirements_in(stack, config, env_name, config.load_variables()),
     )
     atomic_write(
         config.env_environment_yml(env_name),
@@ -211,6 +316,11 @@ def upgrade_env(
     )
 
     upgrade_all = _should_upgrade_all(options)
+    # Decided once for all four uses below. Seeding is what gives --no-upgrade
+    # and --upgrade-package their meaning, and it is equally what makes the
+    # failure hint true; a second spelling of this predicate would let the
+    # candidate's contents and the explanation of them drift apart.
+    seeded = not upgrade_all
     requirements_in = config.env_requirements_in(env_name)
     lock = config.env_requirements_lock(env_name)
 
@@ -257,7 +367,7 @@ def upgrade_env(
             # still standing. This narrows the window; it does not close it —
             # micromamba create or uv pip sync can still fail once the old
             # environment is gone.
-            tmp_lock = _new_candidate_lock(lock)
+            tmp_lock = _new_candidate_lock(lock, seed=seeded)
             try:
                 runner.run(
                     uv_pip_compile_for_version(
@@ -279,9 +389,10 @@ def upgrade_env(
                 # handler below, which discards the candidate and leaves the
                 # published lock untouched.
                 tmp_lock.replace(lock)
-            except BaseException:
+            except BaseException as error:
                 if tmp_lock.exists():
                     tmp_lock.unlink()
+                _explain_candidate_lock(error, lock, seeded=seeded)
                 raise
         else:
             ensure_env(
@@ -293,7 +404,7 @@ def upgrade_env(
 
             # Compile to a temp lock, then atomically replace, so a failed compile never
             # corrupts an existing lockfile.
-            tmp_lock = _new_candidate_lock(lock)
+            tmp_lock = _new_candidate_lock(lock, seed=seeded)
             try:
                 runner.run(
                     uv_pip_compile(
@@ -305,9 +416,10 @@ def upgrade_env(
                     )
                 )
                 tmp_lock.replace(lock)
-            except BaseException:
+            except BaseException as error:
                 if tmp_lock.exists():
                     tmp_lock.unlink()
+                _explain_candidate_lock(error, lock, seeded=seeded)
                 raise
 
         runner.run(uv_pip_sync(python, lock))

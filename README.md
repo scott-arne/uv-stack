@@ -90,8 +90,9 @@ create the `main` environment (Python 3.12 by default), compiled a pinned
 `requirements.lock.txt` with `uv pip compile`, installed it exactly with
 `uv pip sync`, and verified consistency with `uv pip check`.
 
-From now on, changing what's installed is always the same two steps: edit a
-source file (a profile, a bundle, or stack.txt), then run stack upgrade main.
+From now on, changing what's installed is the same two steps: edit a source
+file (a profile, a bundle, or stack.txt), then run stack upgrade main. For a
+freshly cloned config root, use stack converge to build the environments first.
 Check what needs rebuilding at any time with stack status.
 
 ## What you define
@@ -108,6 +109,35 @@ includes:                              # required: literal pip requirements
   - numpy>=2
   - pandas
 ```
+
+`includes` entries may reference a variable the config root declares, written
+`${NAME}`. This is what lets one set of profiles describe editable checkouts
+that live in different places on different machines:
+
+```yaml
+includes:
+  - numpy>=2
+  - -e ${DEV}/mytool
+```
+
+Three rules govern where a reference may appear:
+
+1. **Every entry is a single line.** One requirement per line, always.
+2. **The name must be declared** in `variables.txt`. A name the environment
+   happens to export but the root does not declare is an error, because the
+   declaration is what makes the reference part of the root's portable
+   contract.
+3. **A reference may appear only** in an editable (`-e ${DEV}/pkg`), in another
+   option line (`--find-links ${WHEELS}`), or in an entry whose first token is
+   a path (`${DEV}/pkg`) — and **never** in a `-r`/`--requirement` or
+   `-c`/`--constraint` include.
+
+Rule 3 is not stylistic. A reference in the distribution-name position
+(`${PKG}>=2`) would make the same entry mean different packages on different
+machines, which corrupts the dependency ownership a tracked project records in
+its `pyproject.toml`. A reference inside an included file would pull in
+dependencies the config root cannot see. `stack doctor` reports every entry
+that breaks one of these rules, naming the file, the entry, and the rule.
 
 ### Bundles
 
@@ -247,6 +277,7 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack create bundle NAME TOKEN...` | Write a new bundle YAML (`--description`, `--tag`) |
 | `stack edit KIND [NAME]` | Open a profile, bundle, env source, or project file in your editor and validate it when the editor exits |
 | `stack upgrade [NAMES]...` | Re-render, re-lock, and sync shared environments |
+| `stack converge [NAMES]...` | Create, build, and recompile every environment the root declares (no prompt, keeps existing pins) |
 | `stack refresh` | Re-resolve a tracked project against current profiles/bundles |
 | `stack status [NAMES]...` | Shared-env build state: drift, lock freshness, existence |
 | `stack list env\|profile\|bundle` | Tables of what exists (`--tag` filters, `--json` for scripts) |
@@ -256,6 +287,7 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack doctor [--fix]` | Detect problems; `--fix` applies the safe repairs |
 | `stack completion bash\|zsh\|fish` | Print the shell-completion script |
 | `stack config init` | Create missing config directories (bare primitive) |
+| `stack config portable` | Write the managed `.gitignore` block so the config root can be committed |
 
 ### Editing configuration
 
@@ -349,6 +381,25 @@ exactly — packages you removed from a profile are uninstalled. A batch keeps
 going past a failing environment and ends with a `✓`/`✗` summary
 (`--stop-on-error` aborts at the first failure).
 
+Under `--stop-on-error` the summary gains a third marker: `–` for an
+environment the batch never reached. Those appear only in that mode — without
+it every requested environment is attempted, so nothing is ever skipped.
+
+To bring up a whole config root instead of named environments — creating the
+missing ones, without a prompt — use `stack converge`:
+
+```bash
+stack converge                  # every environment the root declares
+stack converge main scratch     # only these
+stack converge --upgrade        # force new pins (the default preserves them)
+```
+
+> **Changed behavior.** `--no-upgrade` and `--upgrade-package` now genuinely
+> preserve the pins the existing lock already holds. Previously both compiled
+> into an empty file, so uv had no prior pins to keep and re-resolved
+> everything. The first run after this change may therefore move pins that
+> should have stayed put under the old behavior.
+
 `stack upgrade` refuses a non-recreate upgrade when the running interpreter does
 not match `python.txt` — use `stack create env NAME --recreate` to resolve
 the mismatch first.
@@ -394,9 +445,13 @@ $ stack show env main                 # python, tokens, channels, resolved packa
 stack doctor
 ```
 
-`doctor` never changes anything — it reports problems (missing directories,
-legacy file formats, environments in the wrong place) with a suggested `fix:`
-line for each.
+`doctor` never changes anything — it reports problems with a suggested `fix:`
+line for each. It covers the shape of the tree (missing directories, legacy
+file formats, environments in the wrong place) and its portability: declared
+variables with no value on this machine, references that are undeclared,
+malformed, or in an entry that may not hold one, editable checkouts that are
+absent, a `project-python.txt` value that will not travel, and a missing or
+stale managed `.gitignore` block in a root that sits inside a git repository.
 
 ### Watching for drift
 
@@ -443,6 +498,9 @@ All state lives under one directory, resolved in this order:
 
 ```text
 ~/.config/python-envs/
+├── variables.txt             # optional: declares the names profiles may reference
+├── variables.local.txt       # optional: this machine's values — do not commit
+├── .gitignore                # written by `stack config portable`
 ├── project-python.txt        # optional: default --python for `create project`
 ├── editor.txt                # optional: editor command for `stack edit`
 ├── profiles/
@@ -473,6 +531,131 @@ All state lives under one directory, resolved in this order:
 | `VISUAL` | Standard fallback editor for `stack edit`, below `editor.txt` |
 | `EDITOR` | Standard fallback editor for `stack edit`, consulted last |
 | `MAMBA_EXE` | Path to the micromamba binary; set by `micromamba shell init` and preferred over `PATH` lookup |
+
+## Portable config roots
+
+A config root is a directory of text files, so it can live in git and be
+cloned onto another machine. Two things make that work: a managed `.gitignore`
+block that keeps generated files out of the repository, and variables that let
+one profile describe paths that differ per machine.
+
+### What travels
+
+| Travels | Does not travel |
+| --- | --- |
+| `profiles/`, `bundles/`, `envs/*/stack.txt`, `python.txt`, `micromamba.txt`, `channels.txt` | `requirements.in`, `environment.yml`, `requirements.lock.txt` (all generated) |
+| `variables.txt` — the declared names | `variables.local.txt` — this machine's values |
+| `project-python.txt`, when it holds a portable selector | `envs/*/requirements.local.in` — one machine's extra packages |
+| | `editor.txt` — this machine's editor |
+| | `.locks/`, `.DS_Store` |
+
+**Compiled locks deliberately do not travel.** A lock is resolved for one
+platform and one interpreter, and uv-stack compiles per machine rather than
+committing a lock that is only correct where it was produced. The consequence
+is worth stating plainly: two machines converged from the same sources will
+have compatible environments, not identical pins, and nothing reports the
+difference. `stack status` is a single-machine command.
+
+### Bring-up on a new machine
+
+```bash
+git clone <url> ~/.config/python-envs
+stack doctor                                    # names the variables with no value
+$EDITOR ~/.config/python-envs/variables.local.txt
+stack converge                                  # builds every environment
+```
+
+Step two is what makes this work on a machine you have never set up: doctor
+reads the declared list and reports what is missing before anything tries to
+build.
+
+### Making a root committable
+
+```bash
+stack config portable
+```
+
+This writes a managed block into `<root>/.gitignore`, delimited by markers:
+
+```text
+# BEGIN uv-stack — managed block, do not edit by hand.
+...
+# END uv-stack
+```
+
+Edit the file freely **outside** the markers — your lines are preserved.
+Anything you write **inside** them is replaced the next time the command runs.
+
+A `.gitignore` that is a *symlink* is refused rather than written or replaced:
+git commits the link itself, so the rules it points at would never reach the
+machine that cloned the root.
+
+The command prints the git commands to follow, and for a root that is already
+a repository those begin with an untracking step: files that are now ignored
+stay tracked until `git rm --cached` removes them from the index. That applies
+to any root that is a repository, including one whose `.gitignore` this command
+is creating for the first time. A root that is a *subdirectory* of a repository
+— `python-envs/` inside a dotfiles repo — counts as one: every command is
+addressed to the config root with `-C`, and git finds the enclosing repository
+by walking up from there.
+
+That sequence stages only the `.gitignore` it just wrote, so nothing else
+sitting in the root is committed on your behalf; a root whose own files have
+never been committed needs a `git add` of your own. Its `commit` records
+everything already staged in the repository, this root or not, which is worth
+a `git status` before you paste it.
+
+uv-stack never invokes git. It writes the ignore file and prints the commands;
+you run them.
+
+### Variables
+
+`variables.txt` declares the names, one per line, comments allowed:
+
+```text
+# Root of the development checkouts this root's editables point into.
+DEV
+WHEELS
+```
+
+`variables.local.txt` supplies this machine's values and is not committed:
+
+```text
+DEV=~/src
+WHEELS=/opt/wheels
+```
+
+An exported environment variable of the same name wins over the file, which is
+what makes a CI runner work without writing a file at all. Only declared names
+are read from the environment.
+
+### Which `project-python.txt` values travel
+
+| Form | Example | Travels |
+| --- | --- | --- |
+| Python version | `3.12` | yes |
+| uv implementation form | `cpython@3.12`, `pypy-3.10` | yes |
+| An environment this root declares | `main` | yes |
+| An environment it does not declare | `scratch` | no |
+| An interpreter path | `/opt/envs/x/bin/python` | no |
+
+A path is the one form that reaches uv unchanged and still fails to travel,
+which is why `stack doctor` warns about it separately. The same check applies
+to `--python` values recorded in a project's `[tool.uv-stack]` table: uv-stack
+records what you gave it, and says so when the value will not travel.
+
+### The limit on tracked projects
+
+uv-stack keeps its own project ledger portable — `[tool.uv-stack]` records
+requirement strings unexpanded, so a committed `pyproject.toml` never holds
+another machine's home directory.
+
+It cannot keep uv's half. `uv add` writes the resolved absolute path of a
+**local source** into the project's own `[tool.uv.sources]` table, and uv
+exposes no flag to keep that symbolic. So a project whose stack resolves to
+ordinary named requirements is portable, and a project whose stack pulls in any
+local source — an editable or a plain path — is machine-bound in that table.
+Closing that gap would mean rewriting uv's output behind its back.
 
 ## Tips and gotchas
 
@@ -506,3 +689,16 @@ All state lives under one directory, resolved in this order:
   also runs `uv remove`/`uv add` under the hood, which edit
   `[project.dependencies]` just as they would if you ran them yourself.
   An interrupted refresh or tracked create may leave a `pending` key in the table; the next successful `stack refresh` (or re-running the tracked create with `--force`) cleans it up.
+- **A value in `variables.local.txt` cannot contain `#`.** The file grammar
+  strips comments, so everything from the first `#` is discarded. An exported
+  environment variable has no such restriction.
+- **A value holding `${...}` is refused, not passed through.** Substitution is
+  single-pass, so a `${OTHER}` inside a value is never itself expanded — and an
+  entry that still holds `${` afterwards is rejected rather than written out,
+  because uv expands environment variables in a requirements file and would
+  resolve the leftover reference behind uv-stack's back. `DEV=/a/${OTHER}/b`
+  turns every entry that references `DEV` into an error: `stack doctor` reports
+  it and `stack converge` refuses.
+- **No value may contain whitespace.** That rules out a path containing a
+  space, and it is what keeps expansion from splitting an already-validated
+  entry into a new token. Use a symlink or move the checkout.
