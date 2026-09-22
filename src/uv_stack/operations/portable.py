@@ -376,6 +376,16 @@ def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:
         return [
             f"git -C {root} init",
             f"git -C {root} add .",
+            # No repository sits above a root being bootstrapped, so no parent
+            # .gitignore can reach it — but core.excludesFile still does, and a
+            # developer who wrote '.gitignore' into theirs has told git to skip
+            # every generated ignore file on the machine. 'add .' honours that
+            # silently, and the commit and push below then publish a root whose
+            # block never travels. Forcing is safe for the same reason it is in
+            # the untracking sequence: the path is this module's own constant
+            # naming the file uv-stack just wrote. It is an addition to 'add .',
+            # not a replacement — the whole root is staged here on purpose.
+            f"git -C {root} add -f .gitignore",
             f'git -C {root} commit -m "Initial config root"',
             f"git -C {root} remote add origin <url>",
             f"git -C {root} push -u origin HEAD",

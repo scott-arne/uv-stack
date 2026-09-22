@@ -433,6 +433,46 @@ def test_the_printed_commands_stage_nothing_the_user_did_not_ask_for(tmp_path: P
     assert "python-envs/variables.txt" in _git("-C", str(top), "ls-files").splitlines()
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="requires a git executable")
+def test_the_bootstrap_sequence_stages_an_ignore_file_the_machine_ignores(tmp_path: Path):
+    """The bootstrap add is forced too, for the same reason the nested one is.
+
+    No repository sits above a root being bootstrapped, so no parent
+    .gitignore can reach it — but ``core.excludesFile`` still does, and a
+    developer who wrote ``.gitignore`` into theirs has told git to skip every
+    generated ignore file on the machine. ``add .`` then honours that, and the
+    commit and push two lines below publish a root whose block never travels.
+    """
+    root = tmp_path / "python-envs"
+    root.mkdir()
+    (root / "keep.txt").write_text("declared\n")
+    (root / "variables.local.txt").write_text("DEV=/srv/src\n")
+    excludes = tmp_path / "global-excludes"
+    excludes.write_text(".gitignore\n")
+
+    config = ConfigRoot(root)
+    result = write_portable_ignore(config)
+    assert result.is_repository is False
+    steps = next_steps(config, result)
+
+    _git(*shlex.split(next(s for s in steps if s.endswith(" init")))[1:])
+    # _GIT_ENV blanks the global config, so the excludes file has to be named
+    # at the one level left. Where git reads it from does not change what it
+    # does with it: 'add' consults core.excludesFile whatever its origin.
+    _git("-C", str(root), "config", "core.excludesFile", str(excludes))
+    for step in [s for s in steps if " add " in s and "remote" not in s]:
+        _git(*shlex.split(step)[1:])
+
+    staged = {
+        line[3:]
+        for line in _git("-C", str(root), "status", "--porcelain").splitlines()
+        if line[0] not in " ?"
+    }
+    # 'keep.txt' is the other half: the bootstrap add stages the whole root on
+    # purpose, and forcing the ignore file must not narrow it to one file.
+    assert staged == {".gitignore", "keep.txt"}
+
+
 def test_the_walk_climbs_past_more_than_one_level(tmp_path: Path):
     # One level up is the easy case to get right by accident. Nothing in the
     # printed commands depends on the distance any more, but doctor's decision
