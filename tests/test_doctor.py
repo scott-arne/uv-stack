@@ -9,7 +9,12 @@ from tests.conftest import _deadline, _lock_held_by_another_process
 from uv_stack.config import ConfigRoot
 from uv_stack.fsutil import _LOCK_AVAILABLE
 from uv_stack.operations.doctor import Finding, diagnose, repair
-from uv_stack.operations.portable import BEGIN_MARKER, END_MARKER, write_portable_ignore
+from uv_stack.operations.portable import (
+    BEGIN_MARKER,
+    END_MARKER,
+    render_block,
+    write_portable_ignore,
+)
 
 _IS_ROOT = getattr(os, "geteuid", lambda: -1)() == 0
 
@@ -1836,6 +1841,31 @@ def test_a_current_ignore_block_is_not_flagged(config_tree: ConfigRoot):
     (config_tree.root / ".git").mkdir()
     write_portable_ignore(config_tree)
     assert not [f for f in diagnose(config_tree) if f.kind == "stale-ignore-block"]
+
+
+def test_a_symlinked_ignore_file_is_reported_not_reported_clean(
+    config_tree: ConfigRoot,
+):
+    # A link whose target already holds the current block reads as up to date
+    # through the link, so the staleness check has nothing to say about it.
+    # What travels is the link, not the rules, and reporting clean on a root
+    # whose ignore rules will not survive a clone is the one answer this scan
+    # may not give. The writer's refusal is what doctor reports.
+    (config_tree.root / ".git").mkdir()
+    destination = config_tree.root / "ignore-target"
+    destination.write_text(render_block(config_tree) + "\n")
+    (config_tree.root / ".gitignore").symlink_to(destination)
+
+    findings = diagnose(config_tree)
+
+    assert not [f for f in findings if f.kind == "stale-ignore-block"]
+    finding = next(
+        f
+        for f in findings
+        if f.kind == "unparseable-source"
+        and f.path == config_tree.root / ".gitignore"
+    )
+    assert "Symlinked ignore file" in finding.message
 
 
 def test_a_non_repository_root_is_never_flagged(config_tree: ConfigRoot):

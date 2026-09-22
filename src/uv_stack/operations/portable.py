@@ -271,19 +271,38 @@ def write_portable_ignore(
 
     That guarantee covers the file's contents, not its identity: a write goes
     through :func:`atomic_write`, which publishes a new inode. Permissions
-    revert to the process default, a hardlinked ignore file is de-linked, and
-    a symlinked one is replaced by a regular file rather than written through.
+    revert to the process default and a hardlinked ignore file is de-linked.
+    A *symlinked* ignore file is refused outright rather than written through
+    or replaced, because git commits the link and not the rules.
 
     :param config: The config root.
     :param dry_run: Compute the outcome but write nothing. Malformed-topology
         refusals still raise, because the point of the dry run is to find out.
     :returns: What happened, or would have.
-    :raises ConfigError: When the existing file has an illegal marker topology,
-        is not valid UTF-8, or is not a regular file.
+    :raises ConfigError: When the existing file is a symlink, has an illegal
+        marker topology, is not valid UTF-8, or is not a regular file.
     """
     path = config.root / ".gitignore"
     block = render_block(config)
     repository_root = enclosing_repository(config.root)
+
+    # The symlink refusal sits above the exists() guard, not inside it,
+    # because a dangling link is not exists(): left to the code below, a
+    # dangling or stale link would be quietly materialised into a regular
+    # file while a link to already-correct content survived untouched. Git
+    # commits a surviving link as a link — mode 120000, the target's path as
+    # its content — so a clone gets a dangling or foreign link carrying none
+    # of these rules and tracks the generated files the block exists to
+    # exclude. Refusing is the only outcome that neither destroys a link the
+    # user made on purpose nor publishes a root whose rules do not travel.
+    if path.is_symlink():
+        raise ConfigError(
+            f"Symlinked ignore file: {path}",
+            hint=(
+                "Replace it with a regular file. Git commits the link itself, "
+                "so the rules it points at would not reach another machine."
+            ),
+        )
 
     original: str | None = None
     if path.exists():

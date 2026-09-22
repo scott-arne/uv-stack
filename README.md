@@ -621,6 +621,11 @@ This writes a managed block into `<root>/.gitignore`, delimited by markers:
 
 Edit the file freely **outside** the markers — your lines are preserved.
 Anything you write **inside** them is replaced the next time the command runs.
+
+A `.gitignore` that is a *symlink* is refused rather than written or replaced:
+git commits the link itself, so the rules it points at would never reach the
+machine that cloned the root.
+
 The command prints the git commands to follow, and for a root that is already
 a repository those begin with an untracking step: files that are now ignored
 stay tracked until `git rm --cached` removes them from the index. That applies

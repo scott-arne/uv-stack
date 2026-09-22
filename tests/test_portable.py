@@ -187,6 +187,55 @@ def test_a_malformed_topology_is_refused_under_dry_run_too(
     assert written == []
 
 
+@pytest.mark.parametrize("target", ["dangling", "stale", "current"])
+def test_a_symlinked_ignore_file_is_refused_and_stays_a_symlink(
+    config_tree: ConfigRoot, target: str, monkeypatch: pytest.MonkeyPatch
+):
+    """Every symlink state refuses, and none of them is quietly rewritten.
+
+    The three states used to diverge. A dangling or stale link took the write
+    path and was materialised into a regular file, destroying a link the user
+    made on purpose; a link whose target already held the current block was
+    reported ``unchanged`` and left alone, so the printed ``git add`` staged
+    the link itself and the clone got ignore rules it could not read. Refusing
+    is the only answer that does neither.
+    """
+    path = config_tree.root / ".gitignore"
+    destination = config_tree.root / "ignore-target"
+    if target == "stale":
+        destination.write_text("unrelated\n")
+    elif target == "current":
+        destination.write_text(render_block(config_tree) + "\n")
+    path.symlink_to(destination)
+    written = _record_writes(monkeypatch)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_portable_ignore(config_tree)
+
+    assert str(path) in excinfo.value.message
+    assert path.is_symlink()
+    assert written == []
+
+
+def test_a_symlinked_ignore_file_is_refused_under_dry_run_too(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    # doctor decides staleness by calling the writer under dry_run, so a
+    # refusal that only fired on the real write would let doctor report a
+    # symlinked root clean while 'stack config portable' refused it.
+    path = config_tree.root / ".gitignore"
+    destination = config_tree.root / "ignore-target"
+    destination.write_text(render_block(config_tree) + "\n")
+    path.symlink_to(destination)
+    written = _record_writes(monkeypatch)
+
+    with pytest.raises(ConfigError):
+        write_portable_ignore(config_tree, dry_run=True)
+
+    assert path.is_symlink()
+    assert written == []
+
+
 def test_dry_run_writes_nothing(
     config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
 ):
