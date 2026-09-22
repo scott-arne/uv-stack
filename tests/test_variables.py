@@ -129,6 +129,27 @@ def test_recursive_includes_fail_only_the_include_condition(entry):
     assert "condition 2" not in explanation
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "--no-index -r ${DEV}/reqs.txt",
+        "--no-index -c ${DEV}/constraints.txt",
+        "--no-index -r${DEV}/reqs.txt",
+        "--no-index --requirement=${DEV}/reqs.txt",
+        "--index-url https://example.invalid/simple -r ${DEV}/reqs.txt",
+        "--pre --no-index -r ${DEV}/reqs.txt",
+    ],
+)
+def test_a_recursive_include_is_caught_behind_a_preceding_option(entry):
+    # Condition 3 is judged over every token, not just the first: uv reads
+    # '--no-index -r <file>' as a boolean option followed by a real include
+    # and does read that file, so a first-token-only test admits exactly the
+    # machine-local second requirements file the condition exists to refuse.
+    problem = placement_problem(entry)
+    assert problem is not None, entry
+    assert "condition 3" in problem[1]
+
+
 def test_multiline_is_refused_even_without_a_reference():
     problem = placement_problem("numpy\npandas")
     assert problem is not None

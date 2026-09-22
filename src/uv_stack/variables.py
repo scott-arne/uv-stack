@@ -122,7 +122,7 @@ def _is_recursive_include(token: str) -> bool:
     Covers the bare (``-r``), attached-short (``-rFILE``), and attached-long
     (``--requirement=FILE``) spellings; pip accepts all three.
 
-    :param token: The entry's first token.
+    :param token: One whitespace-separated token of an entry.
     :returns: ``True`` when the token opens a recursive include.
     """
     if token in RECURSIVE_OPTIONS:
@@ -190,7 +190,15 @@ def placement_problem(entry: str) -> tuple[str, str] | None:
         failed.append(1)
     if not (token.startswith("-") or "/" in token or "\\" in token):
         failed.append(2)
-    if _is_recursive_include(token):
+    # Judged over every token, not just the first. uv reads an option line as
+    # one option, so a value-taking option swallows a trailing '-r' -- but a
+    # BOOLEAN one does not: uv reads '--no-index -r ${DEV}/reqs.txt' as
+    # --no-index followed by a real include, and does read that file. pip is
+    # looser still and accepts a recursive option after any option at all. A
+    # first-token-only test therefore admits exactly the machine-local second
+    # requirements file condition 3 exists to refuse. This is the same
+    # whole-sequence reading expansion_problem already applies.
+    if any(_is_recursive_include(other) for other in entry.split()):
         failed.append(3)
     if not failed:
         return None
