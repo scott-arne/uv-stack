@@ -138,6 +138,37 @@ def _children(directory: Path) -> tuple[list[Path], list[Finding]]:
         return [], [_unparseable(directory, str(error))]
 
 
+def _absent_directory(path: Path) -> bool:
+    """Answer whether no directory is at ``path``, treating "cannot tell" as no.
+
+    ``os.path.isdir`` collapses both answers into ``False``, and stat'ing a
+    directory needs search permission on its *parent* rather than on itself, so
+    a whole config root one ``chmod`` from usable reports every directory under
+    it absent. That answer is not merely imprecise: it is the one thing
+    certainly untrue about a directory the kernel declined to describe, and
+    ``doctor --fix`` acts on it by running a ``mkdir`` that fails for the same
+    reason the stat did.
+
+    The paths this declines to call absent are still reported — the walks and
+    the source scan name them in ``unparseable-source`` warns — so the
+    distinction costs no coverage, only a wrong reason.
+
+    :param path: The directory to probe.
+    :returns: ``True`` when nothing, or something that is not a directory, is at
+        ``path``; ``False`` when it is a directory or when the probe failed for
+        any other reason.
+    """
+    try:
+        return not stat.S_ISDIR(os.stat(path).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        # ENOENT and ENOTDIR are the two errnos that genuinely mean nothing is
+        # there: the last component is missing, or a component above it is not
+        # a directory, so no directory can be at the path either way.
+        return True
+    except OSError:
+        return False
+
+
 def diagnose(config: ConfigRoot) -> list[Finding]:
     """Inspect the config tree and return findings.
 
@@ -150,6 +181,11 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
     # cannot act on with False, rather than the pathlib one, which re-raises
     # anything but a missing path. A directory this user cannot search is a
     # thing to report, not a reason to abort before reporting anything at all.
+    #
+    # The root's own probe keeps that spelling deliberately. Unlike the three
+    # below, nothing else in the run would name an unstattable root: the early
+    # return is there because no later check can say anything useful, so the
+    # imprecise error is the only report there is, and it carries a fix.
     if not os.path.isdir(config.root):
         findings.append(
             Finding(
@@ -167,7 +203,11 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
         ("bundles", config.bundles_dir),
         ("envs", config.envs_dir),
     ):
-        if not os.path.isdir(directory):
+        # _absent_directory, not the isdir spelling: these three sit under a
+        # root that may be listable without being searchable, and calling them
+        # missing then contradicts the unparseable-source warns the same run
+        # emits about the same paths -- with a mkdir that cannot succeed.
+        if _absent_directory(directory):
             findings.append(
                 Finding(
                     "error",

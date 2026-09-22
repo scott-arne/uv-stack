@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -2077,6 +2078,45 @@ def test_an_unsearchable_config_root_reports_instead_of_raising(config_tree: Con
     assert any(
         f.kind == "unparseable-source" and f.path == config_tree.profiles_dir for f in findings
     )
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_an_unsearchable_root_does_not_call_its_directories_missing(config_tree: ConfigRoot):
+    """The same tree as above, asserted on what it must not say.
+
+    Stat'ing profiles/ needs search permission on the root, not on profiles/,
+    so an unsearchable root turns all three fixed-path probes False for
+    directories that are plainly there. The run then contradicted itself: three
+    errors saying they are missing, each offering a mkdir that cannot run, and
+    below them three warns correctly naming the same paths as unreadable.
+    """
+    os.chmod(config_tree.root, 0o400)
+    try:
+        findings = diagnose(config_tree)
+    finally:
+        os.chmod(config_tree.root, 0o700)
+
+    assert [f.message for f in findings if f.kind == "missing-dir"] == []
+    # Suppressing the three errors may not cost the paths their mention: the
+    # warns are what is left saying anything about them at all.
+    unreadable = {f.path for f in findings if f.kind == "unparseable-source"}
+    assert {
+        config_tree.profiles_dir,
+        config_tree.bundles_dir,
+        config_tree.envs_dir,
+    } <= unreadable
+
+
+def test_a_genuinely_absent_directory_under_a_searchable_root_is_still_missing(
+    config_tree: ConfigRoot,
+):
+    # The control for the test above: the suppression is conditioned on the
+    # root being unsearchable, not on the finding being inconvenient.
+    shutil.rmtree(config_tree.bundles_dir)
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-dir"]
+    assert [f.path for f in missing] == [config_tree.bundles_dir]
+    assert missing[0].level == "error"
 
 
 @pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")

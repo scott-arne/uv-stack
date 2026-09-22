@@ -2041,6 +2041,46 @@ def test_doctor_json_lists_findings(tmp_path: Path):
     assert payload[0]["level"] == "error"
 
 
+def test_doctor_json_names_the_offending_and_target_paths(tmp_path: Path):
+    """A JSON consumer gets the paths the human-readable form spells out.
+
+    The message and the fix are prose built for a terminal; ``path`` and
+    ``dest`` are the same two facts in a form a caller can act on. Omitting
+    them left ``--json`` strictly less useful than parsing the printed text,
+    and left ``--fix --json`` self-inconsistent: every entry under ``actions``
+    carries a path while the ``remaining`` entries beside them did not.
+    """
+    import json
+
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    (cfg.bundles_dir / "old.bundle").write_text("ds\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "doctor", "--json"])
+
+    assert result.exit_code == 0
+    finding = next(f for f in json.loads(result.output) if f["kind"] == "legacy-bundle")
+    assert finding["path"] == str(cfg.bundles_dir / "old.bundle")
+    assert finding["dest"] == str(cfg.bundles_dir / "old.yaml")
+
+
+def test_doctor_json_leaves_absent_paths_null(tmp_path: Path):
+    # Not every finding has either path, and a caller distinguishing "no
+    # target" from "the string 'None'" needs the key present and null rather
+    # than stringified or dropped.
+    import json
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(tmp_path / "nope"), "doctor", "--json"])
+
+    finding = json.loads(result.output)[0]
+    assert finding["kind"] == "missing-root"
+    assert finding["path"] == str(tmp_path / "nope")
+    assert finding["dest"] is None
+
+
 def test_doctor_fix_json_shape(tmp_path: Path):
     import json
 

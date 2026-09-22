@@ -14,11 +14,25 @@ from uv_stack.operations.doctor import Finding, RepairAction, diagnose, repair
 
 
 def _finding_dict(finding: Finding) -> dict[str, str | None]:
+    """Render one finding for ``--json``, paths included.
+
+    The message and the fix are prose assembled for a terminal; ``path`` and
+    ``dest`` are the same two facts in a form a caller can act on. Without
+    them ``--json`` says less than the text output it exists to replace, and
+    ``--fix --json`` contradicts itself -- every entry under ``actions``
+    carries its path while the ``remaining`` entries beside them did not.
+
+    :param finding: The finding to render.
+    :returns: Its fields, with both paths stringified and absent ones null so a
+        consumer can tell "no target" from a path that happens to read as one.
+    """
     return {
         "kind": finding.kind,
         "level": finding.level,
         "message": finding.message,
         "fix": finding.fix,
+        "path": str(finding.path) if finding.path else None,
+        "dest": str(finding.dest) if finding.dest else None,
     }
 
 
