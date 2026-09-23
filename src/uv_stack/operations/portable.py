@@ -107,8 +107,8 @@ def enclosing_repository(path: Path) -> Path | None:
     # the walk step through '<repo>/sub/..', find that repository's .git, and
     # name a top level the root is not under at all. realpath normalises '..'
     # away and anchors a relative root to the working directory, like abspath,
-    # and additionally resolves symlinks -- which is what git itself does when
-    # it walks up from a working directory. Classifying a symlinked root by its
+    # and additionally resolves symlinks -- which is what git itself does with
+    # a symlinked working directory. Classifying a symlinked root by its
     # own path instead reads a root linked into a repository as being in none,
     # dropping the very advice this module exists to print.
     #

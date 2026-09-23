@@ -467,6 +467,48 @@ def test_the_printed_commands_stage_nothing_the_user_did_not_ask_for(tmp_path: P
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="requires a git executable")
+def test_the_printed_commands_reach_the_index_through_a_symlinked_root(tmp_path: Path):
+    """Only git can say whether the untracking lands in the enclosing index.
+
+    Classifying a symlinked root by its target is what puts this sequence on
+    screen at all, and the commands it prints name the link rather than the
+    target. Whether the two agree is git's answer to give, not this module's:
+    if ``-C <link>`` discovered a different repository, or none, the sequence
+    would be advice that cannot run against the index it was generated for.
+    """
+    top = tmp_path / "dotfiles"
+    real_root = top / "python-envs"
+    real_root.mkdir(parents=True)
+    _git("init", "-q", str(top))
+    (real_root / "variables.txt").write_text("DEV\n")
+    (real_root / "variables.local.txt").write_text("DEV=/srv/src\n")
+    _git("-C", str(top), "add", "-A")
+    _git("-C", str(top), "commit", "-q", "-m", "initial")
+    link = tmp_path / "linked-root"
+    link.symlink_to(real_root)
+
+    config = ConfigRoot(link)
+    result = write_portable_ignore(config)
+    assert result.is_repository is True
+    steps = next_steps(config, result)
+    # As far as the add, for the reason the exemplar above stops there.
+    _git(*shlex.split(next(s for s in steps if "rm -r --cached" in s))[1:])
+    _git(*shlex.split(next(s for s in steps if " add " in s))[1:])
+
+    staged = {
+        line[3:]
+        for line in _git("-C", str(top), "status", "--porcelain").splitlines()
+        if line[0] not in " ?"
+    }
+    # Named through the top level, which is how the index spells them: the
+    # commands went in through the link and came out in this repository.
+    assert staged == {"python-envs/.gitignore", "python-envs/variables.local.txt"}
+    # The untracking reached the generated files and stopped there, exactly as
+    # it does for a root spelled directly.
+    assert "python-envs/variables.txt" in _git("-C", str(top), "ls-files").splitlines()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="requires a git executable")
 def test_the_bootstrap_sequence_stages_an_ignore_file_the_machine_ignores(tmp_path: Path):
     """The bootstrap add is forced too, for the same reason the nested one is.
 
@@ -616,11 +658,16 @@ def test_a_symlinked_root_pointing_into_a_repository_is_in_that_repository(
 
     assert result.repository_root == repo.resolve()
     assert result.is_repository is True
+    steps = next_steps(config, result)
     # Resolving the classification must not move the printed path: this branch
     # newly emits 'rm -r --cached', and addressing the target rather than the
     # link would untrack through a path the user never spelled.
-    untrack = next(s for s in next_steps(config, result) if "rm -r --cached" in s)
-    assert shlex.split(untrack)[:3] == ["git", "-C", str(link)]
+    untrack = next(s for s in steps if "rm -r --cached" in s)
+    tokens = shlex.split(untrack)
+    assert tokens[:3] == ["git", "-C", str(link)]
+    assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
+    add = next(s for s in steps if " add " in s)
+    assert shlex.split(add) == ["git", "-C", str(link), "add", "-f", ".gitignore"]
 
 
 def test_a_symlinked_root_pointing_out_of_a_repository_is_in_no_repository(
@@ -638,6 +685,53 @@ def test_a_symlinked_root_pointing_out_of_a_repository_is_in_no_repository(
 
     assert result.repository_root is None
     assert any(step.endswith(" init") for step in next_steps(ConfigRoot(link), result))
+
+
+def test_a_symlinked_ancestor_pointing_into_a_repository_is_in_that_repository(
+    tmp_path: Path,
+):
+    """The root need not be the link for its path to lie about where it is.
+
+    A root reached through a symlinked parent -- '~/work/envs' where 'work' is
+    the link -- is the ordinary shape of this, and the lexical answer names a
+    top level that exists nowhere on disk under that spelling. Whoever reads
+    'which working tree already tracks this root' is handed a path they cannot
+    check against 'git -C' output.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "python-envs").mkdir()
+    (tmp_path / "linkin").symlink_to(repo)
+
+    config = ConfigRoot(tmp_path / "linkin" / "python-envs")
+    result = write_portable_ignore(config, dry_run=True)
+
+    # The real directory, not a resolve() of the path the test built: both
+    # implementations answer non-None here, so only naming the canonical top
+    # level tells them apart.
+    assert result.repository_root == repo
+    assert result.is_repository is True
+
+
+def test_a_symlinked_ancestor_pointing_out_of_a_repository_is_in_no_repository(
+    tmp_path: Path,
+):
+    """The same false positive as a linked root, one level up, and destructive.
+
+    A path that only passes through the repository on its way out reads as
+    tracked, so the sequence offers 'rm -r --cached' against an index that
+    holds none of these files.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (tmp_path / "elsewhere" / "python-envs").mkdir(parents=True)
+    (repo / "linkout").symlink_to(tmp_path / "elsewhere")
+
+    config = ConfigRoot(repo / "linkout" / "python-envs")
+    result = write_portable_ignore(config, dry_run=True)
+
+    assert result.repository_root is None
+    assert any(step.endswith(" init") for step in next_steps(config, result))
 
 
 def test_a_relative_root_is_anchored_to_the_working_directory(
