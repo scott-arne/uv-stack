@@ -794,11 +794,12 @@ def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
         with name_lock(config.stem_lock_path(stem), stem):
             return _convert_under_stem_lock(config, finding, description, stem)
     except ConfigError as error:
-        # Nothing inside the block raises ConfigError, so this is the lock
-        # itself: contended past its timeout, or standing on something
-        # name_lock refuses. Skip this one finding and say why. Letting it out
-        # would abort the whole pass — repair() catches only OSError — and cost
-        # every later finding its fix over one unavailable stem. The hint
+        # Either the lock — contended past its timeout, or standing on
+        # something name_lock refuses — or the source read inside, which
+        # refuses bytes that are not UTF-8. Both describe themselves, so this
+        # skips the one finding and says why. Letting it out would abort the
+        # whole pass — repair() catches only OSError — and cost every later
+        # finding its fix over one unavailable stem. The hint
         # carries the actionable half of every one of these — which process to
         # look for, what not to delete — and the skip line is the only place
         # the user ever sees this error, so fold it in rather than drop it.
@@ -854,6 +855,29 @@ def _convert_under_stem_lock(
             reason=f"{finding.path.name}.bak already exists",
         )
     includes = read_clean_lines(finding.path)
+    # A conversion is a durable writer of human-typed entries, so it owes the
+    # same placement rule init, create, and edit enforce on their own writes.
+    # Without it the pass reports a fix and leaves a generated YAML that every
+    # later command refuses -- naming that file, while the legacy one the user
+    # actually wrote sits renamed to '.bak'. Judged with placement_problem
+    # rather than check_placement: a repair pass must not abort because the
+    # thing it diagnoses is broken, so a refused entry skips this one finding.
+    refused = [
+        (entry, problem[1])
+        for entry in includes
+        if (problem := placement_problem(entry)) is not None
+    ]
+    if refused:
+        entry, explanation = refused[0]
+        noun = "entry" if len(refused) == 1 else "entries"
+        return RepairAction(
+            finding, description, applied=False,
+            reason=(
+                f"{finding.path.name} holds {len(refused)} {noun} uv-stack will "
+                f"not write, starting with {entry!r}: {explanation}. Fix them "
+                "there, then re-run"
+            ),
+        )
     # Publish the YAML with atomic_write_new; capture stat for identity check.
     try:
         dest_stat = atomic_write_new(

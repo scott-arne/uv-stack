@@ -312,6 +312,37 @@ def test_repair_converts_legacy_bundle(config_tree: ConfigRoot):
     assert (config_tree.bundles_dir / "oldb.bundle.bak").is_file()
 
 
+@pytest.mark.parametrize(
+    ("directory", "filename", "kind"),
+    [
+        ("profiles_dir", "old.in", "legacy-profile"),
+        ("bundles_dir", "oldb.bundle", "legacy-bundle"),
+    ],
+)
+def test_repair_skips_converting_an_entry_uv_stack_would_not_write(
+    config_tree: ConfigRoot, directory: str, filename: str, kind: str
+):
+    """The conversion is a durable writer of human-typed entries like any other.
+
+    ``init``, ``create``, and ``edit`` all refuse this entry, so publishing it
+    as YAML would leave behind a generated file every later command rejects --
+    and the refusal would name that file rather than the legacy one the user
+    actually wrote, which the conversion has by then hidden as a ``.bak``.
+    """
+    legacy = getattr(config_tree, directory) / filename
+    legacy.write_text("numpy\n-r ${DEV}/extra.txt\n")
+    actions = repair(config_tree, diagnose(config_tree))
+    skipped = [a for a in actions if a.finding.kind == kind]
+    assert skipped and not skipped[0].applied
+    assert skipped[0].reason is not None
+    assert "uv-stack will not write" in skipped[0].reason
+    assert "-r ${DEV}/extra.txt" in skipped[0].reason
+    # Nothing published and nothing moved, so the file to fix is where it was.
+    assert legacy.read_text() == "numpy\n-r ${DEV}/extra.txt\n"
+    assert not legacy.with_suffix(".yaml").exists()
+    assert not legacy.with_name(legacy.name + ".bak").exists()
+
+
 def test_repair_skips_legacy_profile_when_bundle_exists_for_stem(config_tree: ConfigRoot):
     """Legacy profiles/old.in skipped when bundles/old.yaml exists (shadow guard)."""
     # Create existing bundle.
