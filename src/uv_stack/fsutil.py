@@ -117,9 +117,15 @@ def nofollow_read_flags() -> int | None:
     """Open flags for a read that must not follow a symlink or block.
 
     ``O_NOFOLLOW`` refuses a symlink at the path and ``O_NONBLOCK`` keeps the
-    open from blocking on a FIFO. Both are required for the read to be safe,
-    so a platform missing either gets ``None`` rather than a weaker flag set —
-    the caller declines the read instead of making an unsafe one.
+    open from blocking on a FIFO. Both are required for the read to be safe, so
+    a platform missing either gets ``None`` rather than a weaker flag set.
+
+    ``None`` says that the guarantee is unavailable and nothing more. What to do
+    about it is the caller's to decide, and the callers do not all decide the
+    same way: most decline the read, either raising or skipping an optional
+    check and taking the safe alternative. :func:`read_text_utf8_nofollow` is
+    the exception — it has nothing else to return, so it degrades to the
+    name-based check that preceded it and simply does not get the guarantee.
 
     :returns: Flags for :func:`os.open`, or ``None`` where this platform lacks
         the guards the read needs.
