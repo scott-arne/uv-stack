@@ -1195,9 +1195,12 @@ def _editable_target(entry: str) -> str | None:
     ``=``, and the value carries no URL scheme. Anything else is a remote
     install with no path to check.
 
-    In the separated form the remaining tokens are rejoined, because uv reads
-    them as one path — ``-e ./my pkg`` installs from ``my pkg``. The rejoin
-    stops at the first token that could be an option of its own, so an entry
+    The operand is extracted verbatim from the original entry to preserve
+    interior whitespace exactly as written — uv reads ``-e ./my  pkg`` as the
+    single path ``my  pkg`` with two spaces, and ``split()`` would discard the
+    run length. In both the attached (``-e=PATH``) and separated (``-e PATH``)
+    forms, the operand runs to the end of the entry, except that it stops at
+    the first whitespace run preceding a token that begins with ``-``. An entry
     carrying both a spaced path and a trailing flag reads the whole path and
     none of the flag.
 
@@ -1206,44 +1209,52 @@ def _editable_target(entry: str) -> str | None:
     :param entry: One expanded requirement entry.
     :returns: The path operand, or ``None``.
     """
-    parts = entry.split()
-    if not parts:
+    stripped = entry.strip()
+    if not stripped:
         return None
+    parts = stripped.split()
     # uv is what consumes these entries, so its parser sets the boundary: it
     # accepts '-e=PATH' and '--editable=PATH' as readily as the separated
     # forms, but refuses '-ePATH' with "Expected '=' or whitespace". Reading a
     # path out of the glued form would report a missing checkout for an entry
     # that cannot install for an entirely different reason.
-    flag, attached, operand = parts[0].partition("=")
+    flag, attached, operand_start = parts[0].partition("=")
     if flag not in ("-e", "--editable"):
         return None
     # An attached '=' with nothing after it is still a separator to uv, which
     # reads '-e= PATH' exactly as '-e PATH'. Treating the empty operand as the
     # value would drop a checkout doctor is supposed to be watching.
-    if attached and operand:
-        target = operand
+    if attached and operand_start:
+        # The attached form: everything after the '=' in the original entry.
+        # The operand_start from partition is only what sat in the first
+        # token, so we slice the stripped entry to get the whole remainder.
+        remainder = stripped[len(flag) + 1 :]
     elif len(parts) >= 2:
-        # uv reads everything after the flag as one path: '-e ./my pkg'
-        # installs from 'my pkg'. Taking parts[1] alone reports a missing
-        # checkout for a directory that is there under its real name -- a
-        # false positive, which is the worse direction for a diagnosis.
-        #
-        # The path runs up to the first token that could be an option of its
-        # own, so an entry carrying both -- a spaced path and a trailing flag
-        # -- still reads the whole path and none of the flag. Giving up on the
-        # rejoin entirely when a later option appears would get that case
-        # wrong in the original direction. An option cannot be part of a path
-        # uv would accept here, and a path that genuinely begins with '-' is
-        # unreachable through this parser anyway.
-        rest = parts[1:]
-        end = len(rest)
-        for offset, token in enumerate(rest[1:], start=1):
-            if token.startswith("-"):
-                end = offset
-                break
-        target = " ".join(rest[:end])
+        # The separated form: everything after the flag and its trailing
+        # whitespace. We slice from the original entry rather than rejoining
+        # split() to preserve interior whitespace exactly as written.
+        flag_text = parts[0]
+        remainder = stripped[len(flag_text) :].lstrip()
     else:
         return None
+    # uv reads everything after the flag as one path, but '-e ./my pkg --opt'
+    # stops the path at the option. We scan the remainder for the first
+    # whitespace run followed by a token starting with '-', and cut there. An
+    # option cannot be part of a path uv would accept here, and a path that
+    # genuinely begins with '-' is the first token, so this rule applies only
+    # to later tokens.
+    target = remainder
+    for i, char in enumerate(remainder):
+        if char.isspace():
+            # Found whitespace. Scan forward through the run to find the next
+            # non-whitespace character.
+            j = i
+            while j < len(remainder) and remainder[j].isspace():
+                j += 1
+            # If the next token starts with '-', cut before the whitespace run.
+            if j < len(remainder) and remainder[j] == "-":
+                target = remainder[:i]
+                break
     if "://" in target or target.startswith("git+"):
         return None
     # pip reads '-e ./pkg[dev]' as the path './pkg' carrying extras, so probing

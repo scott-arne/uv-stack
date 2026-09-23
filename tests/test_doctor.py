@@ -1736,6 +1736,21 @@ def test_an_editable_path_holding_a_space_is_read_whole(config_tree: ConfigRoot)
     assert not [f for f in findings if f.kind == "missing-checkout"]
 
 
+def test_an_editable_path_holding_a_space_is_read_whole_when_absent(
+    config_tree: ConfigRoot,
+):
+    """The complete path must appear in the message for an absent checkout.
+
+    Strengthens the positive test: a parser that truncated the path would fail
+    here, while both would pass if only the presence of the finding mattered.
+    """
+    config_tree.profile_path("ds").write_text("includes:\n  - -e my pkg\n")
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert str(config_tree.root / "my pkg") in missing[0].message
+
+
 def test_an_editable_entry_with_a_trailing_option_keeps_its_path_token(
     config_tree: ConfigRoot,
 ):
@@ -1751,6 +1766,7 @@ def test_an_editable_entry_with_a_trailing_option_keeps_its_path_token(
     missing = [f for f in findings if f.kind == "missing-checkout"]
     assert len(missing) == 1
     assert "--config-settings" not in missing[0].message
+    assert str(config_tree.root / "absent") in missing[0].message
 
 
 def test_an_editable_path_holding_a_space_survives_a_trailing_option(
@@ -1769,6 +1785,54 @@ def test_an_editable_path_holding_a_space_survives_a_trailing_option(
     )
     findings = diagnose(config_tree)
     assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_path_with_attached_equals_reads_the_whole_spaced_path(
+    config_tree: ConfigRoot,
+):
+    """The attached form must read the operand verbatim, not from split().
+
+    '-e=./my pkg' partitions parts[0] to ('e', '=', './my'), but the path
+    is 'my pkg' and the rest sits in parts[1:]. Stopping at the attached
+    operand truncates exactly as the separated form did before the rejoin.
+    """
+    checkout = config_tree.root / "my pkg"
+    checkout.mkdir()
+    config_tree.profile_path("ds").write_text("includes:\n  - -e=my pkg\n")
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_path_with_long_flag_attached_names_the_whole_path_when_absent(
+    config_tree: ConfigRoot,
+):
+    """The --editable= spelling must report the complete path when absent.
+
+    Covers the long-flag attached form and asserts on message content so a
+    truncating parser would fail.
+    """
+    config_tree.profile_path("ds").write_text("includes:\n  - --editable=my pkg\n")
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert str(config_tree.root / "my pkg") in missing[0].message
+
+
+def test_an_editable_path_with_repeated_whitespace_preserves_the_run_length(
+    config_tree: ConfigRoot,
+):
+    """Interior whitespace must be preserved exactly as written.
+
+    split() discards run length and rejoin cannot restore it, so a directory
+    whose real name holds two spaces is reported missing while it sits there.
+    The parser must extract the operand from the original entry, not from
+    the split tokens.
+    """
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ./my  pkg\n")
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert str(config_tree.root / "my  pkg") in missing[0].message
 
 
 def test_the_checkout_check_is_skipped_when_a_variable_is_undefined(
