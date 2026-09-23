@@ -113,6 +113,17 @@ def _show_env(config: ConfigRoot, name: str, as_json: bool) -> None:
         render_requirements_in(stack, config, name, config.load_variables())
     except UvStackError as error:
         render_warnings([f"Cannot render requirements.in: {error.message}"])
+    except OSError as error:
+        # An unreadable variables.txt is a regular file, so require_regular_file
+        # passes it and no layer converts the PermissionError. Left to the group
+        # handler it would exit 1 and reinstate the very asymmetry above. There
+        # is no .message to reuse, so this borrows render_os_error's shape:
+        # strerror leads, and the file is named separately because the errno
+        # text alone does not say which of the root's files could not be read.
+        reason = error.strerror or str(error)
+        if error.filename:
+            reason = f"{reason}: {error.filename}"
+        render_warnings([f"Cannot render requirements.in: {reason}"])
 
 
 def _show_project(as_json: bool) -> None:

@@ -603,6 +603,41 @@ def test_show_env_json_agrees_with_the_text_form_on_an_undefined_variable(tmp_pa
     assert json.loads(result.output)["name"] == "main"
 
 
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="root ignores file permissions",
+)
+def test_show_env_notes_an_unreadable_variables_file_without_failing(tmp_path: Path):
+    """The same asymmetry the test above pins, reached by a bare OSError instead.
+
+    An unreadable variables.txt is still a regular file, so require_regular_file
+    passes it and nothing converts the PermissionError into a UvStackError. The
+    render arm has to warn on it for the same reason it warns on an undefined
+    variable: every descriptive line is already printed and correct, and --json
+    never reaches the render at all.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = _env_root(tmp_path)
+    variables = ConfigRoot(root).variables_path()
+    variables.write_text("DEV\n")
+    variables.chmod(0o000)
+    try:
+        result = CliRunner().invoke(
+            cli, ["--root", str(root), "show", "env", "main"], env={"COLUMNS": "400"}
+        )
+    finally:
+        # Restore, or tmp_path teardown cannot remove the file.
+        variables.chmod(0o644)
+    assert result.exit_code == 0
+    output = _combined_output(result)
+    assert "Environment: main" in output
+    assert "Cannot render requirements.in" in output
+    # Naming the file is the point: "Permission denied" alone leaves the reader
+    # to guess which of the root's files they cannot read.
+    assert str(variables) in output
+
+
 @pytest.mark.parametrize(
     "break_it,expected,hint",
     [
