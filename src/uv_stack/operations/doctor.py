@@ -160,13 +160,14 @@ def _scaffold_directory_problem(name: str, path: Path) -> Finding | None:
     The warn describes a directory rather than a file, which is what
     :func:`_children` already does with the same helper.
 
-    One overlap is accepted rather than engineered away: an unsearchable root
-    fails this stat *and* the listings :func:`_scan_sources` does, so each of
-    the three paths is warned about twice, in identical words. Suppressing the
-    second would mean either deduplicating the whole finding list or coupling
-    this probe to whether ``glob`` happens to raise — and the scan's warn is not
-    redundant in general, since a directory that stats but cannot be opened
-    reaches only that one.
+    This warn overlaps the scan's on an unsearchable root, which fails this stat
+    *and* the listings :func:`_scan_sources` does, rendering the same errno for
+    the same path both times. :func:`_without_repeats` collapses the pair, which
+    is the right place for it: the scan's warn is not redundant in general —
+    a directory that stats but cannot be opened reaches only that one — so
+    neither probe may be silenced, and conditioning either on what the other
+    found would couple two checks that have no business knowing about each
+    other.
 
     :param name: The directory's short name, for the missing-directory message.
     :param path: The directory to probe.
@@ -233,11 +234,44 @@ def _same_directory(left: Path, right: Path) -> bool:
         return False
 
 
+def _without_repeats(findings: list[Finding]) -> list[Finding]:
+    """Drop any finding exactly equal to one already reported.
+
+    Two findings agreeing on level, message, fix, kind, path and dest are
+    indistinguishable by construction: the CLI renders them as the same line,
+    so the second tells a reader nothing except that something went wrong
+    twice — which it did not. :func:`repair` would also act on both, attempting
+    the same move or write a second time on a tree the first one changed.
+
+    A general guard, not a patch for one pair. The pair that motivated it is an
+    unsearchable root, where the scaffold-directory stat and the listing
+    :func:`_scan_sources` does both fail with the same errno on the same path
+    and both render it through :func:`_unparseable`; independent probes reaching
+    one conclusion is the shape, and nothing stops another pair from taking it.
+
+    Comparison is by ``==`` over a list rather than through a ``set`` or
+    ``dict.fromkeys``, because :class:`Finding` is a plain mutable dataclass: it
+    has ``__eq__`` and no ``__hash__``. The list scan is quadratic in a sequence
+    that is a handful of items long on any tree worth diagnosing.
+
+    :param findings: The findings collected, in the order they were produced.
+    :returns: The same findings with later exact repeats removed, first
+        occurrence kept, order otherwise untouched.
+    """
+    unique: list[Finding] = []
+    for finding in findings:
+        if finding not in unique:
+            unique.append(finding)
+    return unique
+
+
 def diagnose(config: ConfigRoot) -> list[Finding]:
     """Inspect the config tree and return findings.
 
     :param config: The configuration root to inspect.
-    :returns: A list of :class:`Finding` (empty if everything looks correct).
+    :returns: A list of :class:`Finding` (empty if everything looks correct),
+        in the order the probes ran, with exact repeats dropped by
+        :func:`_without_repeats`.
     """
     findings: list[Finding] = []
 
@@ -432,7 +466,7 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
 
     findings.extend(_portability_findings(config))
 
-    return findings
+    return _without_repeats(findings)
 
 
 @dataclass

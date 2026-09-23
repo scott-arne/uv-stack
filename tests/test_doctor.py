@@ -2481,6 +2481,32 @@ def test_an_unsearchable_root_does_not_call_its_directories_missing(config_tree:
     } <= unreadable
 
 
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_an_unsearchable_root_names_each_directory_once(config_tree: ConfigRoot):
+    """The same tree again, asserted on how many times it says it.
+
+    Two independent probes reach the same conclusion here: the scaffold-directory
+    stat fails EACCES, and so does the listing _scan_sources does for the same
+    path. Both render the errno through _unparseable, so the findings come out
+    byte-identical. Printed twice they read as two distinct problems.
+    """
+    os.chmod(config_tree.root, 0o400)
+    try:
+        findings = diagnose(config_tree)
+    finally:
+        os.chmod(config_tree.root, 0o700)
+
+    for directory in (
+        config_tree.profiles_dir,
+        config_tree.bundles_dir,
+        config_tree.envs_dir,
+    ):
+        named = [
+            f for f in findings if f.kind == "unparseable-source" and f.path == directory
+        ]
+        assert len(named) == 1, named
+
+
 def test_a_genuinely_absent_directory_under_a_searchable_root_is_still_missing(
     config_tree: ConfigRoot,
 ):
