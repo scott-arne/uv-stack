@@ -1792,9 +1792,9 @@ def test_an_editable_path_with_attached_equals_reads_the_whole_spaced_path(
 ):
     """The attached form must read the operand verbatim, not from split().
 
-    '-e=./my pkg' partitions parts[0] to ('e', '=', './my'), but the path
-    is 'my pkg' and the rest sits in parts[1:]. Stopping at the attached
-    operand truncates exactly as the separated form did before the rejoin.
+    '-e=my pkg' partitions parts[0] into ('-e', '=', 'my'), leaving 'pkg' in
+    parts[1:]. Stopping at that attached operand truncates the path exactly as
+    taking the first token alone did before the separated form was fixed.
     """
     checkout = config_tree.root / "my pkg"
     checkout.mkdir()

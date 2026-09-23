@@ -1244,16 +1244,16 @@ def _editable_target(entry: str) -> str | None:
     # genuinely begins with '-' is the first token, so this rule applies only
     # to later tokens.
     target = remainder
-    for i, char in enumerate(remainder):
+    for index, char in enumerate(remainder):
         if char.isspace():
-            # Found whitespace. Scan forward through the run to find the next
-            # non-whitespace character.
-            j = i
-            while j < len(remainder) and remainder[j].isspace():
-                j += 1
-            # If the next token starts with '-', cut before the whitespace run.
-            if j < len(remainder) and remainder[j] == "-":
-                target = remainder[:i]
+            after = index
+            while after < len(remainder) and remainder[after].isspace():
+                after += 1
+            # The cut lands before the whitespace run rather than before the
+            # '-': the run separates the two tokens and belongs to neither, so
+            # keeping it would leave the path with a trailing space.
+            if after < len(remainder) and remainder[after] == "-":
+                target = remainder[:index]
                 break
     if "://" in target or target.startswith("git+"):
         return None
