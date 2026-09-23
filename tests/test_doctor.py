@@ -1835,6 +1835,88 @@ def test_an_editable_path_with_repeated_whitespace_preserves_the_run_length(
     assert str(config_tree.root / "my  pkg") in missing[0].message
 
 
+def test_an_editable_path_with_a_trailing_comment_is_read_without_the_comment(
+    config_tree: ConfigRoot,
+):
+    """A comment marker after whitespace terminates the operand.
+
+    uv treats '#' as a comment marker at the start of a line or after
+    whitespace. The entry must be quoted in YAML — an unquoted
+    '- -e ./pkg # note' has its comment eaten by the YAML parser before
+    doctor sees it.
+    """
+    checkout = config_tree.root / "pkg"
+    checkout.mkdir()
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e ./pkg # local checkout"\n')
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_path_with_a_trailing_comment_names_the_path_when_absent(
+    config_tree: ConfigRoot,
+):
+    """The message must name the path without the comment text.
+
+    Proves the parser cut before the comment rather than merely accepting
+    it as part of the path.
+    """
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e ./pkg # local"\n')
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert str(config_tree.root / "pkg") in missing[0].message
+    assert "# local" not in missing[0].message
+
+
+def test_an_editable_spaced_path_with_a_trailing_comment_reads_both_rules(
+    config_tree: ConfigRoot,
+):
+    """Whitespace preservation and comment termination in one entry.
+
+    A spaced path plus a trailing comment exercises both rules: rejoin the
+    path tokens, then stop before the comment.
+    """
+    checkout = config_tree.root / "my pkg"
+    checkout.mkdir()
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e my pkg # note"\n')
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_path_containing_a_hash_preserves_the_character(
+    config_tree: ConfigRoot,
+):
+    """A '#' with no whitespace before it is part of the operand.
+
+    uv treats '#' as a comment marker only at the start of a line or after
+    whitespace. A '#' inside a token is ordinary text.
+    """
+    checkout = config_tree.root / "pkg#1"
+    checkout.mkdir()
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ./pkg#1\n")
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_path_with_attached_equals_and_comment_cuts_at_the_comment(
+    config_tree: ConfigRoot,
+):
+    """The attached spelling must also terminate at a comment marker.
+
+    The two spellings must read alike, so '-e=./pkg # note' must cut at the
+    comment just as '-e ./pkg # note' does.
+    """
+    checkout = config_tree.root / "pkg"
+    checkout.mkdir()
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e=./pkg # note"\n')
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
 def test_the_checkout_check_is_skipped_when_a_variable_is_undefined(
     config_tree: ConfigRoot,
 ):

@@ -1200,9 +1200,11 @@ def _editable_target(entry: str) -> str | None:
     single path ``my  pkg`` with two spaces, and ``split()`` would discard the
     run length. In both the attached (``-e=PATH``) and separated (``-e PATH``)
     forms, the operand runs to the end of the entry, except that it stops at
-    the first whitespace run preceding a token that begins with ``-``. An entry
-    carrying both a spaced path and a trailing flag reads the whole path and
-    none of the flag.
+    the first whitespace run preceding a token that begins with ``-`` or ``#``.
+    A requirements file treats ``#`` as a comment marker at the start of a line
+    or after whitespace, so ``-e ./pkg # note`` installs from ``./pkg``, while
+    a ``#`` inside a token is ordinary text and ``-e ./pkg#1`` installs from
+    ``./pkg#1``.
 
     A trailing PEP 508 extras suffix is dropped from the operand.
 
@@ -1237,12 +1239,19 @@ def _editable_target(entry: str) -> str | None:
         remainder = stripped[len(flag_text) :].lstrip()
     else:
         return None
+    # When the remainder begins with a comment, the operand is empty. uv sees
+    # a bare '-e' there, which is a malformed entry, not a checkout.
+    if remainder.startswith("#"):
+        return None
     # uv reads everything after the flag as one path, but '-e ./my pkg --opt'
-    # stops the path at the option. We scan the remainder for the first
-    # whitespace run followed by a token starting with '-', and cut there. An
-    # option cannot be part of a path uv would accept here, and a path that
-    # genuinely begins with '-' is the first token, so this rule applies only
-    # to later tokens.
+    # stops the path at the option, and '-e ./pkg # note' stops the path at the
+    # comment. We scan the remainder for the first whitespace run followed by
+    # a token starting with '-' or '#', and cut there. A requirements file
+    # treats '#' as a comment marker at the start of a line or after whitespace,
+    # not inside a token, so './pkg#1' keeps its '#'. An option or comment
+    # cannot be part of a path uv would accept here, and a path that genuinely
+    # begins with '-' is the first token, so this rule applies only to later
+    # tokens.
     target = remainder
     for index, char in enumerate(remainder):
         if char.isspace():
@@ -1250,9 +1259,9 @@ def _editable_target(entry: str) -> str | None:
             while after < len(remainder) and remainder[after].isspace():
                 after += 1
             # The cut lands before the whitespace run rather than before the
-            # '-': the run separates the two tokens and belongs to neither, so
-            # keeping it would leave the path with a trailing space.
-            if after < len(remainder) and remainder[after] == "-":
+            # '-' or '#': the run separates the two tokens and belongs to
+            # neither, so keeping it would leave the path with a trailing space.
+            if after < len(remainder) and remainder[after] in ("-", "#"):
                 target = remainder[:index]
                 break
     if "://" in target or target.startswith("git+"):
