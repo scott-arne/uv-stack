@@ -3079,12 +3079,14 @@ def test_candidate_lock_is_seeded_from_the_published_lock(config_tree: ConfigRoo
 
 
 def test_candidate_lock_carries_the_conventional_file_mode(config_tree: ConfigRoot):
-    """mkstemp creates 0600, and Path.replace publishes that inode as the lock.
+    """The candidate comes back at 0o666 & ~umask, not at mkstemp's 0600.
 
-    The requirements.in written in the same operation goes through
-    atomic_write, which relaxes the temporary file to the umask default, so
-    without the same relax here one upgrade leaves a pair of generated files
-    with different permissions and a lock only its writer can read.
+    That is _new_candidate_lock's own contract and the whole of what this
+    asserts. It is not a check on the published lock's mode: uv pip compile
+    replaces its output file rather than writing into this inode, so the mode
+    that reaches the user is uv's to set. The relax guards the case where that
+    stops holding -- a uv that wrote in place would publish 0600 onto a root
+    whose every other generated file is readable.
     """
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)

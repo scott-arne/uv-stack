@@ -110,11 +110,14 @@ def _new_candidate_lock(lock: Path, *, seed: bool) -> tuple[Path, bool]:
     )
     os.close(tmp_fd)
     candidate = Path(tmp_name)
-    # This inode is what Path.replace publishes as the lock, so it carries
-    # mkstemp's 0600 all the way onto the user's config root unless it is
-    # relaxed here. The requirements.in written in the same operation goes
-    # through atomic_write and lands 0o666 & ~umask; the lock is not a secret
-    # and must not be the one generated file a second account cannot read.
+    # mkstemp creates the candidate 0600, and the lock is not a secret: it must
+    # not be the one generated file a second account cannot read, where the
+    # requirements.in written in the same operation lands 0o666 & ~umask
+    # through atomic_write. The relax is defensive rather than load-bearing --
+    # uv pip compile replaces its output file rather than writing into this
+    # inode, so the mode Path.replace publishes is uv's own. Setting it here
+    # keeps the invariant local instead of resting on an undocumented uv
+    # detail: a uv that wrote in place would put 0600 on the user's root.
     relax_to_conventional_mode(candidate)
     if not seed:
         return candidate, False
