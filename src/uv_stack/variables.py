@@ -224,10 +224,14 @@ def check_placement(
         flattened sequence keep per-entry blame while still reporting every
         offender in one error.
     :raises ConfigError: When any entry is refused.
-    :raises ValueError: When ``sources`` is given and is not the same length as
-        ``entries`` — a misalignment would attach the wrong file to a refusal,
-        which is worse than attaching none.
+    :raises ValueError: When both ``source`` and ``sources`` are given — the
+        header would name one file and the offender lines another. Also when
+        ``sources`` is given and is not the same length as ``entries`` — a
+        misalignment would attach the wrong file to a refusal, which is worse
+        than attaching none.
     """
+    if source is not None and sources is not None:
+        raise ValueError("cannot pass both source and sources")
     if sources is not None and len(sources) != len(entries):
         raise ValueError(
             f"sources has {len(sources)} items for {len(entries)} entries"

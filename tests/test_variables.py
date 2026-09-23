@@ -480,8 +480,8 @@ def test_check_placement_names_each_offenders_own_file():
         )
     message = excinfo.value.message
     assert "Refused 2 requirement entries" in message
-    assert "/cfg/profiles/ds.yaml" in message
-    assert "/cfg/profiles/chem.yaml" in message
+    assert "'-r ${DEV}/a.txt' (in /cfg/profiles/ds.yaml):" in message
+    assert "'${DEV}' (in /cfg/profiles/chem.yaml):" in message
 
 
 def test_check_placement_refuses_misaligned_sources():
@@ -494,3 +494,15 @@ def test_check_placement_refuses_misaligned_sources():
     with pytest.raises(ValueError) as excinfo:
         check_placement(["pkg-a", "pkg-b", "pkg-c"], sources=["a.yaml", "b.yaml"])
     assert "sources has 2 items for 3 entries" in str(excinfo.value)
+
+
+def test_check_placement_refuses_both_source_and_sources():
+    """Passing both source and sources would give contradictory blame.
+
+    The header composes from source and each offender line from sources, so
+    accepting both would name two different files for one refusal. The source
+    docstring already tells multi-file callers to use sources instead.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        check_placement(["pkg"], source="whole.yaml", sources=["entry.yaml"])
+    assert "both source and sources" in str(excinfo.value)

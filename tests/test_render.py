@@ -160,7 +160,9 @@ def test_a_refusal_across_profiles_names_the_profile_each_entry_came_from(
     """
     config_tree.variables_path().write_text("DEV\n")
     config_tree.variables_local_path().write_text("DEV=/home/me/code\n")
-    config_tree.profile_path("ds").write_text("includes:\n  - -r ${DEV}/a.txt\n")
+    config_tree.profile_path("ds").write_text(
+        "includes:\n  - -r ${DEV}/a.txt\n  - -c ${DEV}/c.txt\n"
+    )
     config_tree.profile_path("chem").write_text("includes:\n  - -c ${DEV}/b.txt\n")
     stack = ResolvedStack(profiles=["ds", "chem"], inline=[])
     with pytest.raises(ConfigError) as excinfo:
@@ -168,6 +170,9 @@ def test_a_refusal_across_profiles_names_the_profile_each_entry_came_from(
             stack, config_tree, "main", config_tree.load_variables()
         )
     message = excinfo.value.message
-    assert "Refused 2 requirement entries" in message
-    assert str(config_tree.profile_path("ds")) in message
-    assert str(config_tree.profile_path("chem")) in message
+    ds_path = str(config_tree.profile_path("ds"))
+    chem_path = str(config_tree.profile_path("chem"))
+    assert "Refused 3 requirement entries" in message
+    assert f"'-r ${{DEV}}/a.txt' (in {ds_path}):" in message
+    assert f"'-c ${{DEV}}/c.txt' (in {ds_path}):" in message
+    assert f"'-c ${{DEV}}/b.txt' (in {chem_path}):" in message
