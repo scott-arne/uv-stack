@@ -112,7 +112,7 @@ def enclosing_repository(path: Path) -> Path | None:
     # own path instead reads a root linked into a repository as being in none,
     # dropping the very advice this module exists to print.
     #
-    # It resolves without raising: strict=False is realpath's default, so a
+    # It resolves without raising OSError: strict=False is realpath's default, so a
     # root that does not exist yet still answers, and a symlink loop resolves
     # to the path as far as it got rather than raising OSError.
     #

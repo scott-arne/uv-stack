@@ -610,11 +610,17 @@ def test_a_symlinked_root_pointing_into_a_repository_is_in_that_repository(
     real_root.mkdir()
     link = tmp_path / "linked-root"
     link.symlink_to(real_root)
+    config = ConfigRoot(link)
 
-    result = write_portable_ignore(ConfigRoot(link), dry_run=True)
+    result = write_portable_ignore(config, dry_run=True)
 
     assert result.repository_root == repo.resolve()
     assert result.is_repository is True
+    # Resolving the classification must not move the printed path: this branch
+    # newly emits 'rm -r --cached', and addressing the target rather than the
+    # link would untrack through a path the user never spelled.
+    untrack = next(s for s in next_steps(config, result) if "rm -r --cached" in s)
+    assert shlex.split(untrack)[:3] == ["git", "-C", str(link)]
 
 
 def test_a_symlinked_root_pointing_out_of_a_repository_is_in_no_repository(
