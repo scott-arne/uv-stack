@@ -29,12 +29,16 @@ _LINK_FALLBACK_ERRNOS = frozenset(
 #: absent getattr yields 0, which does not weaken the guard — it removes it,
 #: and an identity recheck afterwards comes too late to make up for it: it can
 #: reject what the open returned, not stop the open from following a symlink
-#: or hanging on a FIFO. Every caller that can decline the open therefore
-#: skips it entirely rather than take it unguarded; what each gives up by
-#: skipping differs, and is stated at the call site. name_lock's create is the
-#: one open that cannot be declined — there is no lock without it — so it
-#: passes both constants for whatever they are worth on the platform and
-#: rejects a non-regular target after the fact.
+#: or hanging on a FIFO. Callers answer that in one of three ways. Most can
+#: decline the open, and skip it entirely rather than take it unguarded; what
+#: each gives up by skipping differs, and is stated at the call site.
+#: read_text_utf8_nofollow could decline only by refusing every config read on
+#: such a platform — a platform-support decision, not a local one — so it takes
+#: the read unguarded instead, falling back to the name-based check and
+#: accepting the window it had before the guarded path existed. name_lock's
+#: create is the one open that cannot be declined at all — there is no lock
+#: without it — so it passes both constants for whatever they are worth on the
+#: platform and rejects a non-regular target after the fact.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _FASTPATH_AVAILABLE = bool(_O_NOFOLLOW) and bool(_O_NONBLOCK)
@@ -192,7 +196,7 @@ def read_text_utf8(path: Path, *, exact_newlines: bool = False) -> str:
 
 
 def read_text_utf8_nofollow(path: Path) -> str | None:
-    """Read ``path`` as UTF-8 verbatim, never through a symlink standing at it.
+    """Read ``path`` as UTF-8 verbatim, refusing a symlink where the guards exist.
 
     Decoding and byte-exact newline handling are :func:`read_text_utf8` with
     ``exact_newlines=True``; the refusal of a non-regular file is
@@ -208,19 +212,35 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
     leaves no window — either the open got something that is not a symlink, or
     it got nothing.
 
+    That holds wherever :func:`nofollow_read_flags` yields flags, which is every
+    POSIX platform. Where either constant is absent it yields ``None`` and this
+    function degrades to a name-based check followed by a separate open — the
+    two-syscall shape above, window included — and a symlink resolving to a
+    regular file is followed rather than refused.
+
     :param path: The file to read.
     :returns: The decoded text, or ``None`` when nothing is at ``path``.
     :raises ConfigError: When a symlink stands at ``path``, when what is there
-        is not a regular file, or when the bytes are not valid UTF-8.
+        is not a regular file, or when the bytes are not valid UTF-8. The
+        symlink refusal holds only where the guard constants exist: without
+        them a symlink to a regular file is followed and its target read, while
+        one that resolves to anything else is still refused, by name.
     """
     flags = nofollow_read_flags()
     if flags is None:
-        # Both guards or none, per nofollow_read_flags. This caller cannot
-        # decline the read — there is nothing else to return — so it degrades
+        # Both guards or none, per nofollow_read_flags. Declining here would
+        # mean refusing every config read on such a platform — a
+        # platform-support decision, not a local one — so it degrades instead
         # to the name-based check every caller made before this function
         # existed: no platform is left worse off, it simply does not get the
-        # guarantee. POSIX requires both constants, so the arm is defensive
-        # rather than reachable; the suite drives it by substituting them.
+        # guarantee. POSIX requires both constants, so no POSIX platform
+        # reaches this arm; where one is absent — Windows has no O_NOFOLLOW —
+        # it is the only arm there is, and the suite drives it by substituting
+        # the constants. require_regular_file is load-bearing here rather than
+        # a name-based echo of the descriptor check below: without O_NONBLOCK a
+        # read-only open of a FIFO standing at path waits for a writer that
+        # never arrives, so refusing by name is what keeps the process from
+        # hanging.
         require_regular_file(path)
         if not path.exists():
             return None
