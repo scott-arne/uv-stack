@@ -205,21 +205,41 @@ def placement_problem(entry: str) -> tuple[str, str] | None:
     return ("misplaced-reference", "; ".join(_CONDITION_TEXT[number] for number in failed))
 
 
-def check_placement(entries: Sequence[str], *, source: str | None = None) -> None:
+def check_placement(
+    entries: Sequence[str],
+    *,
+    source: str | None = None,
+    sources: Sequence[str | None] | None = None,
+) -> None:
     """Refuse a multiline, continuation, malformed, or misplaced entry.
 
     Reports every offender at once, naming the condition each one failed, so a
     caller fixing a profile sees the whole list rather than one item per run.
 
     :param entries: The entries as written, unexpanded.
-    :param source: The file the entries came from, for the message.
+    :param source: The one file the entries came from, for the message. For a
+        caller whose sequence spans several files, use ``sources`` instead.
+    :param sources: The file each entry came from, positionally aligned with
+        ``entries``, or ``None`` for an entry with no single file. Lets a
+        flattened sequence keep per-entry blame while still reporting every
+        offender in one error.
     :raises ConfigError: When any entry is refused.
+    :raises ValueError: When ``sources`` is given and is not the same length as
+        ``entries`` — a misalignment would attach the wrong file to a refusal,
+        which is worse than attaching none.
     """
+    if sources is not None and len(sources) != len(entries):
+        raise ValueError(
+            f"sources has {len(sources)} items for {len(entries)} entries"
+        )
     problems: list[str] = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         problem = placement_problem(entry)
-        if problem is not None:
-            problems.append(f"  {entry!r}: {problem[1]}")
+        if problem is None:
+            continue
+        origin = sources[index] if sources is not None else None
+        held_by = f" (in {origin})" if origin else ""
+        problems.append(f"  {entry!r}{held_by}: {problem[1]}")
     if not problems:
         return
     where = f" in {source}" if source else ""
@@ -349,7 +369,12 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
     return None
 
 
-def expand_all(entries: Sequence[str], variables: Variables) -> list[str]:
+def expand_all(
+    entries: Sequence[str],
+    variables: Variables,
+    *,
+    sources: Sequence[str | None] | None = None,
+) -> list[str]:
     """Substitute every reference in ``entries``.
 
     Three checks run in order over the whole sequence, so one error names every
@@ -365,12 +390,15 @@ def expand_all(entries: Sequence[str], variables: Variables) -> list[str]:
 
     :param entries: The entries as written.
     :param variables: The declared names and this machine's values.
+    :param sources: The file each entry came from, positionally aligned with
+        ``entries``, for the placement message. A caller flattening several
+        files into one sequence passes it so the refusal still names them.
     :returns: The expanded entries, positionally aligned with ``entries``.
     :raises ConfigError: On a refused entry, an undeclared name, a declared
         name with no value on this machine, or a value whose substitution
         would change which options an entry carries.
     """
-    check_placement(entries)
+    check_placement(entries, sources=sources)
 
     undeclared: list[str] = []
     undefined: list[str] = []

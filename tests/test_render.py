@@ -146,3 +146,28 @@ def test_render_refuses_hostile_variable_value(config_tree: ConfigRoot):
     with pytest.raises(ConfigError) as excinfo:
         render_requirements_in(stack, config_tree, "main", variables)
     assert "backslash" in excinfo.value.message
+
+
+def test_a_refusal_across_profiles_names_the_profile_each_entry_came_from(
+    config_tree: ConfigRoot,
+):
+    """The flattened expansion must not cost the user the filename.
+
+    Expanding as one sequence is deliberate -- it reports every offender at
+    once instead of stopping at the first bad profile -- but on its own it
+    leaves a user with three profiles a list of entries and no way to tell
+    which file holds each.
+    """
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=/home/me/code\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -r ${DEV}/a.txt\n")
+    config_tree.profile_path("chem").write_text("includes:\n  - -c ${DEV}/b.txt\n")
+    stack = ResolvedStack(profiles=["ds", "chem"], inline=[])
+    with pytest.raises(ConfigError) as excinfo:
+        render_requirements_in(
+            stack, config_tree, "main", config_tree.load_variables()
+        )
+    message = excinfo.value.message
+    assert "Refused 2 requirement entries" in message
+    assert str(config_tree.profile_path("ds")) in message
+    assert str(config_tree.profile_path("chem")) in message

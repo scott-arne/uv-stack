@@ -50,16 +50,28 @@ def render_requirements_in(
     lines = [_HEADER, _EDIT_HINT, ""]
 
     sections: list[tuple[str, list[str]]] = []
+    # Positionally aligned with the flattened entries below, so a refusal can
+    # name the profile each offender came from. The inline section has no
+    # single file -- its entries arrive from bundles and the env's stack.txt
+    # alike -- so it contributes None rather than a misleading path.
+    origins: list[str | None] = []
     for name in stack.profiles:
         profile = config.load_profile(name)
-        sections.append((f"# Profile: {name}", list(profile.includes)))
+        includes = list(profile.includes)
+        sections.append((f"# Profile: {name}", includes))
+        origins += [str(config.profile_path(name))] * len(includes)
     if stack.inline:
         sections.append(("# Inline requirements from bundles/stack", list(stack.inline)))
+        origins += [None] * len(stack.inline)
 
     if variables is not None:
         # Expanded as one sequence so a single error names every offender in
         # the file rather than only those in the first bad profile.
-        flat = expand_all([entry for _, entries in sections for entry in entries], variables)
+        flat = expand_all(
+            [entry for _, entries in sections for entry in entries],
+            variables,
+            sources=origins,
+        )
         cursor = 0
         expanded: list[tuple[str, list[str]]] = []
         for header, entries in sections:

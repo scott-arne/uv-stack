@@ -464,3 +464,21 @@ def test_expansion_problem_is_none_for_a_safe_substitution():
     # Placement refuses entries ending in a backslash, so expansion_problem
     # deliberately does not re-judge them.
     assert expansion_problem("${DEV}\\", "/home/me/dev\\") is None
+
+
+def test_check_placement_names_each_offenders_own_file():
+    """One error still lists every offender, and now says where each one lives.
+
+    The flattened call in render_requirements_in exists so a user sees the
+    whole list rather than one item per run; without a per-entry source that
+    list names entries and no files.
+    """
+    with pytest.raises(ConfigError) as excinfo:
+        check_placement(
+            ["-r ${DEV}/a.txt", "good-pkg", "${DEV}"],
+            sources=["/cfg/profiles/ds.yaml", None, "/cfg/profiles/chem.yaml"],
+        )
+    message = excinfo.value.message
+    assert "Refused 2 requirement entries" in message
+    assert "/cfg/profiles/ds.yaml" in message
+    assert "/cfg/profiles/chem.yaml" in message
