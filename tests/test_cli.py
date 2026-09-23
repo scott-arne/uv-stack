@@ -525,6 +525,45 @@ def test_show_missing_env_errors(tmp_path: Path):
     assert "ghost" in result.output
 
 
+def _outside_root(tmp_path: Path) -> Path:
+    """A config root beside a directory a traversing NAME would reach.
+
+    Holds both shapes a ``show`` branch would land on: ``secret.yaml`` for the
+    profile and bundle joins, ``secret/`` for the env one.
+    """
+    root = _env_root(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.yaml").write_text("description: leaked\nincludes:\n  - hidden\n")
+    env_dir = outside / "secret"
+    env_dir.mkdir()
+    (env_dir / "stack.txt").write_text("@standard\n")
+    (env_dir / "python.txt").write_text("3.99\n")
+    return root
+
+
+@pytest.mark.parametrize(
+    ("kind", "label"),
+    [("env", "environment"), ("profile", "profile"), ("bundle", "bundle")],
+)
+def test_show_rejects_a_traversing_name(tmp_path: Path, kind, label):
+    """A NAME is a file stem here too, and ``stack edit`` already refuses this one.
+
+    Unguarded, every branch joins the name onto a config directory and reads
+    whatever it lands on, so a ``..``-bearing name describes a file outside the
+    root as though the root declared it.
+    """
+    root = _outside_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "show", kind, "../../outside/secret"]
+    )
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert f"Invalid {label} name" in output
+    assert "leaked" not in output
+    assert "3.99" not in output
+
+
 def _undefined_variable_root(tmp_path: Path) -> Path:
     """An env root whose profile references a declared-but-unset variable."""
     from uv_stack.config import ConfigRoot
@@ -2198,7 +2237,15 @@ def test_show_env_shell_quotes_name_in_hint(tmp_path: Path, monkeypatch):
     assert "stack create env 'bad;touch'" in result.output
 
 
-def test_show_env_prefixes_leading_dash_name_in_hint(tmp_path: Path, monkeypatch):
+# No leading-dash counterpart to the quoting test above: the NAME reaches
+# validate_name, which refuses a leading '-', so this site cannot render that
+# case either. render_positional_arg's dash branch is covered in test_hints.py.
+def test_show_env_refuses_a_dash_named_directory(tmp_path: Path, monkeypatch):
+    """A hand-made envs/ directory the create commands would have refused.
+
+    ``status`` and ``list env`` still show it, because discovered names are not
+    validated; naming it on the command line is what the guard refuses.
+    """
     from uv_stack.config import ConfigRoot
 
     root = _env_root(tmp_path)
@@ -2213,8 +2260,12 @@ def test_show_env_prefixes_leading_dash_name_in_hint(tmp_path: Path, monkeypatch
     )
     runner = CliRunner()
     result = runner.invoke(cli, ["--root", str(root), "show", "env", "--", "--recreate"])
-    assert result.exit_code == 0
-    assert "stack create env -- --recreate" in result.output
+    assert result.exit_code == 1
+    assert "Invalid environment name" in _combined_output(result)
+
+    listed = runner.invoke(cli, ["--root", str(root), "list", "env"])
+    assert listed.exit_code == 0
+    assert "--recreate" in listed.output
 
 
 def test_status_table(tmp_path: Path, monkeypatch):
@@ -2246,6 +2297,27 @@ def test_status_config_error_row_prints_message(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     assert "config error" in result.output
     assert "main: Missing stack file" in result.output
+
+
+def test_status_rejects_a_traversing_name(tmp_path: Path, monkeypatch):
+    """The file-stem rule ``upgrade`` and ``converge`` apply to their own NAMEs.
+
+    Refused up front rather than reported as one more "config error" row: a
+    name that cannot name an environment is a bad argument, and a row would
+    claim a config exists out there and failed to load.
+    """
+    root = _outside_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.status_cmd.SubprocessRunner", lambda: _FakeProbeRunner()
+    )
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "status", "main", "../../outside/secret"]
+    )
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert "Invalid environment name" in output
+    # The batch is refused whole, so the valid name beside it reports nothing.
+    assert "never built" not in output
 
 
 def test_status_json(tmp_path: Path, monkeypatch):

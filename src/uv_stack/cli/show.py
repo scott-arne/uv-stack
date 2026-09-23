@@ -14,6 +14,7 @@ from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.create import env_interpreter
 from uv_stack.operations.pyproject import read_tracking
+from uv_stack.operations.scaffold import validate_name
 from uv_stack.render import render_requirements_in
 from uv_stack.resolver import Resolver
 from uv_stack.runner import SubprocessRunner
@@ -34,7 +35,14 @@ def show(config: ConfigRoot, kind: str, name: str | None, as_json: bool) -> None
     reads the current directory.
     """
     if kind == "env":
-        _show_env(config, name or "main", as_json)
+        env_name = name or "main"
+        # Each branch below joins NAME onto a config directory and reads what
+        # it lands on, so the file-stem rule the create and edit commands apply
+        # holds here too: without it a '..'-bearing NAME describes a file
+        # outside the root as though the root declared it. "environment"
+        # matches the wording `stack create env` uses.
+        validate_name("environment", env_name)
+        _show_env(config, env_name, as_json)
     elif kind == "project":
         if name is not None:
             raise click.UsageError(
@@ -45,8 +53,10 @@ def show(config: ConfigRoot, kind: str, name: str | None, as_json: bool) -> None
     elif name is None:
         raise click.UsageError(f"'show {kind}' requires a NAME.")
     elif kind == "profile":
+        validate_name(kind, name)
         _show_profile(config, name, as_json)
     else:
+        validate_name(kind, name)
         _show_bundle(config, name, as_json)
 
 
