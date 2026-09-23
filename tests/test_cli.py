@@ -5128,7 +5128,13 @@ def test_init_accepts_an_admitted_reference(tmp_path: Path, monkeypatch):
     from uv_stack.config import ConfigRoot
 
     root = tmp_path / "python-envs"
-    monkeypatch.setattr("uv_stack.cli.init_cmd._run_upgrade", lambda *a, **kw: None)
+    # The last answer declines the build, so a stub that returns would be
+    # inert. Throwing instead pins that the entry was admitted by the prompt's
+    # own check rather than by a build this test never wanted to reach.
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
     runner = CliRunner()
     # Tokens are split on whitespace by 'stack init', so an editable entry
     # cannot be typed at this prompt; a path operand is the admitted form
