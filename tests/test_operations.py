@@ -3068,8 +3068,9 @@ def test_candidate_lock_is_seeded_from_the_published_lock(config_tree: ConfigRoo
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("numpy==1.26.0\n")
-    candidate = _new_candidate_lock(lock, seed=True)
+    candidate, copied = _new_candidate_lock(lock, seed=True)
     try:
+        assert copied is True
         assert candidate.read_text() == "numpy==1.26.0\n"
         assert candidate != lock
     finally:
@@ -3080,8 +3081,10 @@ def test_candidate_lock_is_empty_when_no_lock_is_published(config_tree: ConfigRo
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
     assert not lock.exists()
-    candidate = _new_candidate_lock(lock, seed=True)
+    candidate, copied = _new_candidate_lock(lock, seed=True)
     try:
+        # Seeding was requested; the hint wording keys off this, not the mode.
+        assert copied is False
         assert candidate.read_text() == ""
     finally:
         candidate.unlink(missing_ok=True)
@@ -3152,8 +3155,9 @@ def test_candidate_lock_is_empty_when_lock_path_is_a_directory(config_tree: Conf
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.mkdir()  # A directory stands in for any non-regular file.
-    candidate = _new_candidate_lock(lock, seed=True)
+    candidate, copied = _new_candidate_lock(lock, seed=True)
     try:
+        assert copied is False
         assert candidate.read_text() == ""
     finally:
         candidate.unlink(missing_ok=True)
@@ -3176,8 +3180,9 @@ def test_candidate_lock_survives_concurrent_lock_removal(
 
     monkeypatch.setattr(os, "open", open_losing_the_race)
 
-    candidate = _new_candidate_lock(lock, seed=True)
+    candidate, copied = _new_candidate_lock(lock, seed=True)
     try:
+        assert copied is False
         assert candidate.read_text() == ""
     finally:
         candidate.unlink(missing_ok=True)
@@ -3275,6 +3280,48 @@ def test_a_failed_compile_hint_describes_an_unseeded_candidate(
     # bare "copy" could match a tmp_path component rather than the wording.
     assert "copy of" not in hint
     assert "re-run without" not in hint
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_a_failed_compile_hint_does_not_claim_a_copy_that_never_happened(
+    config_tree: ConfigRoot, recreate: bool
+):
+    """Seeding was requested, but there was no published lock to seed from.
+
+    The wording follows what the candidate actually holds, not the mode that
+    asked for it. An absent lock leaves the candidate empty whatever
+    --no-upgrade requested, and the seeded advice would send the user to fix a
+    parse error in a file that is not there.
+    """
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    assert not lock.exists()
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(
+            config_tree,
+            runner,
+            "main",
+            UpgradeOptions(recreate=recreate, no_upgrade=True),
+        )
+    hint = caught.value.hint
+    assert hint is not None
+    assert str(lock) in hint
+    assert "new empty file" in hint
+    assert "copy of" not in hint
+    assert "re-run as a full upgrade" not in hint
+    # Nor the full-upgrade explanation: the pins were not ignored, there were
+    # none. Saying so is the only way the user learns why a --no-upgrade run
+    # came back with everything re-resolved.
+    assert "a full upgrade ignores the existing pins" not in hint
+    assert "nothing to seed" in hint
     assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
 
 
@@ -3384,8 +3431,9 @@ def test_candidate_lock_is_empty_when_lock_path_is_a_fifo(config_tree: ConfigRoo
     os.mkfifo(lock)
     try:
         with _deadline(5.0):
-            candidate = _new_candidate_lock(lock, seed=True)
+            candidate, copied = _new_candidate_lock(lock, seed=True)
         try:
+            assert copied is False
             assert candidate.read_text() == ""
         finally:
             candidate.unlink(missing_ok=True)
