@@ -1949,6 +1949,13 @@ def test_read_text_utf8_nofollow_degrades_without_both_guards(tmp_path, monkeypa
 
     The guarantee is gone — nothing can supply it — but nothing that worked
     before is refused either, which is the whole of what the degrade promises.
+
+    That is why a symlink to a regular file is read rather than refused: the
+    degrade's documented consequence, not an accident. This is the assertion
+    that fails if someone tightens the arm to refuse it — a tightening whose
+    whole cost falls on the platforms that lack the constants, so it is a
+    platform-support decision to take deliberately rather than a local fix.
+    Whatever else a symlink resolves to is still refused, by name.
     """
     from uv_stack import fsutil
 
@@ -1957,6 +1964,19 @@ def test_read_text_utf8_nofollow_degrades_without_both_guards(tmp_path, monkeypa
     assert fsutil.read_text_utf8_nofollow(path) is None
     path.write_bytes(b"a\r\nb\n")
     assert fsutil.read_text_utf8_nofollow(path) == "a\r\nb\n"
+
+    target = tmp_path / "target.txt"
+    target.write_bytes(b"read through the link\n")
+    to_regular = tmp_path / "to-regular.txt"
+    to_regular.symlink_to(target)
+    assert fsutil.read_text_utf8_nofollow(to_regular) == "read through the link\n"
+
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    to_directory = tmp_path / "to-directory.txt"
+    to_directory.symlink_to(directory)
+    with pytest.raises(ConfigError):
+        fsutil.read_text_utf8_nofollow(to_directory)
 
     dangling = tmp_path / "dangling.txt"
     dangling.symlink_to(tmp_path / "nowhere.txt")

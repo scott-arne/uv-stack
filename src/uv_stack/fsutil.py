@@ -128,8 +128,9 @@ def nofollow_read_flags() -> int | None:
     about it is the caller's to decide, and the callers do not all decide the
     same way: most decline the read, either raising or skipping an optional
     check and taking the safe alternative. :func:`read_text_utf8_nofollow` is
-    the exception — it has nothing else to return, so it degrades to the
-    name-based check that preceded it and simply does not get the guarantee.
+    the exception — it could decline only by refusing every config read on such
+    a platform, so it degrades to the name-based check that preceded it and
+    simply does not get the guarantee.
 
     :returns: Flags for :func:`os.open`, or ``None`` where this platform lacks
         the guards the read needs.
@@ -200,9 +201,9 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
 
     Decoding and byte-exact newline handling are :func:`read_text_utf8` with
     ``exact_newlines=True``; the refusal of a non-regular file is
-    :func:`require_regular_file`. What differs is that both are decided on an
-    open descriptor rather than on the name, so neither answer can go stale
-    between the test and the read.
+    :func:`require_regular_file`. What differs, where the guards exist, is that
+    both are decided on an open descriptor rather than on the name, so neither
+    answer can go stale between the test and the read.
 
     That is the whole of its purpose. A caller that tests a path and then opens
     it has made two syscalls, and a symlink planted between them is resolved by
@@ -235,12 +236,15 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
         # existed: no platform is left worse off, it simply does not get the
         # guarantee. POSIX requires both constants, so no POSIX platform
         # reaches this arm; where one is absent — Windows has no O_NOFOLLOW —
-        # it is the only arm there is, and the suite drives it by substituting
-        # the constants. require_regular_file is load-bearing here rather than
-        # a name-based echo of the descriptor check below: without O_NONBLOCK a
-        # read-only open of a FIFO standing at path waits for a writer that
-        # never arrives, so refusing by name is what keeps the process from
-        # hanging.
+        # it is the only arm there is, and the suite drives it by patching the
+        # module-level _FASTPATH_AVAILABLE. Patching the os constants does not
+        # work: availability is decided once at import, so the substitution
+        # arrives too late to change it and the test goes green having
+        # exercised the guarded arm. require_regular_file is load-bearing here
+        # rather than a name-based echo of the descriptor check below: without
+        # O_NONBLOCK a read-only open of a FIFO standing at path waits for a
+        # writer that never arrives, so refusing by name is what keeps the
+        # process from hanging.
         require_regular_file(path)
         if not path.exists():
             return None
