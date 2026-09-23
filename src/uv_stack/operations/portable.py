@@ -328,9 +328,11 @@ def write_portable_ignore(
     platform has both, the read side is race-free — it opens ``O_NOFOLLOW``, so
     a link planted after the check is refused rather than followed to a file
     the invoking user can read and the planter cannot. Where either is absent
-    that window stays open, and only that window: a link planted after the
-    check and before the bytes are read, resolving to a regular file, is
-    followed. The write side is narrowed and not closed: ``os.replace`` never
+    that window stays open: a link planted after the check and before the bytes
+    are read is followed. The fallback's own name check narrows the first half
+    of it to links resolving to a regular file; a link planted past that check
+    is followed to whatever it resolves to, a FIFO included. The write side is
+    narrowed and not closed: ``os.replace`` never
     follows a link, so nothing is written through one, but a link planted in
     the instant before the rename is destroyed rather than refused, and POSIX
     has no rename that declines a symlinked target.
@@ -373,10 +375,13 @@ def write_portable_ignore(
     # user's permissions — reaching a file the planter cannot read themselves —
     # spliced into the block, and written to a .gitignore the printed sequence
     # then tells the user to commit and push. Where a constant is absent the
-    # read is that ordinary open, so what the guards close here is exactly one
-    # window: a link planted after the test above and before the fallback's own
-    # open, resolving to a regular file. Anything already standing at the path
-    # was refused by name, on every platform.
+    # read is that ordinary open, so what the guards close here is the window
+    # between the test above and the fallback's own open. The fallback's name
+    # check narrows the first half of that window to links resolving to a
+    # regular file; past it, a link is followed to whatever it resolves to, a
+    # FIFO included — which blocks the open outright when no writer appears.
+    # Anything already standing at the path was refused by name, on every
+    # platform.
     original = read_text_utf8_nofollow(path)
 
     if original is None:
