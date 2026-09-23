@@ -1917,6 +1917,56 @@ def test_an_editable_path_with_attached_equals_and_comment_cuts_at_the_comment(
     assert not [f for f in findings if f.kind == "missing-checkout"]
 
 
+def test_an_editable_entry_that_is_only_a_comment_is_silent(
+    config_tree: ConfigRoot,
+):
+    """When the operand is nothing but a comment, doctor stays silent.
+
+    uv sees a bare '-e' here, which is a malformed entry, not a checkout.
+    The entry must be quoted so the YAML parser preserves the comment.
+    """
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e # local checkout"\n')
+    findings = diagnose(config_tree)
+    # No missing-checkout and no other findings about this entry.
+    assert not findings
+
+
+def test_an_editable_entry_with_empty_attached_operand_and_comment_is_silent(
+    config_tree: ConfigRoot,
+):
+    """The attached form with empty operand falls through to separated reading.
+
+    '-e= # note' has an empty attached operand, so it falls through to the
+    separated branch where the lstrip()ed remainder begins with '#' and the
+    guard fires. The entry must be quoted so the YAML parser preserves the
+    comment.
+    """
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e= # note"\n')
+    findings = diagnose(config_tree)
+    # No missing-checkout and no other findings about this entry.
+    assert not findings
+
+
+def test_an_editable_entry_with_glued_hash_names_a_path_beginning_with_hash(
+    config_tree: ConfigRoot,
+):
+    """In the attached form, a '#' immediately after '=' is inside the token.
+
+    '-e=#note' has no whitespace before the '#', so the '#' is ordinary text
+    and uv installs from a directory named '#note'. The entry is quoted for
+    consistency with the other hash tests, though the '#' has no space before
+    it and would survive unquoted.
+    """
+    # Quoted for consistency with other hash tests, though not strictly required.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e=#note"\n')
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert str(config_tree.root / "#note") in missing[0].message
+
+
 def test_the_checkout_check_is_skipped_when_a_variable_is_undefined(
     config_tree: ConfigRoot,
 ):

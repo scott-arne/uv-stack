@@ -1237,11 +1237,16 @@ def _editable_target(entry: str) -> str | None:
         # split() to preserve interior whitespace exactly as written.
         flag_text = parts[0]
         remainder = stripped[len(flag_text) :].lstrip()
+        # When the remainder begins with a comment, the operand is empty. The
+        # lstrip() ensures a leading '#' here genuinely followed whitespace, so
+        # it is a comment marker per the requirements file line semantics rather
+        # than ordinary text inside a token. In '-e=#note' the '#' is glued to
+        # the '=' with no space, so the attached branch keeps it as a path. uv
+        # sees a bare '-e' when the separated operand is only a comment, which
+        # is a malformed entry, not a checkout.
+        if remainder.startswith("#"):
+            return None
     else:
-        return None
-    # When the remainder begins with a comment, the operand is empty. uv sees
-    # a bare '-e' there, which is a malformed entry, not a checkout.
-    if remainder.startswith("#"):
         return None
     # uv reads everything after the flag as one path, but '-e ./my pkg --opt'
     # stops the path at the option, and '-e ./pkg # note' stops the path at the
