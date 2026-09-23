@@ -823,6 +823,35 @@ def test_a_begin_marker_ended_by_an_unrestorable_separator_is_refused(
     assert written == []
 
 
+@pytest.mark.parametrize(
+    "prefix",
+    [pytest.param("﻿", id="byte-order-mark"), pytest.param("  ", id="indented")],
+)
+def test_a_marker_that_did_not_count_is_named_in_the_hint(
+    config_tree: ConfigRoot, prefix: str, monkeypatch: pytest.MonkeyPatch
+):
+    """A BEGIN the reader can see, reported as 'none', needs an explanation.
+
+    Refusing is right -- a file this shape is one a rewrite could corrupt --
+    but the message alone sends someone hunting for a marker that is sitting
+    on line 1 in front of them.
+    """
+    path = _write_bytes(
+        config_tree, f"{prefix}{BEGIN_MARKER}\nstale-entry\n{END_MARKER}\n"
+    )
+    before = path.read_bytes()
+    written = _record_writes(monkeypatch)
+    with pytest.raises(ConfigError) as excinfo:
+        write_portable_ignore(config_tree)
+    assert "BEGIN on line(s) none" in excinfo.value.message
+    hint = excinfo.value.hint
+    assert hint is not None
+    assert "marker text that did not count" in hint
+    assert "Line(s) 1" in hint
+    assert path.read_bytes() == before
+    assert written == []
+
+
 def test_a_marker_line_with_trailing_blanks_is_still_matched(config_tree: ConfigRoot):
     path = _write_bytes(
         config_tree,

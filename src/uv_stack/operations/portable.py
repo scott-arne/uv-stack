@@ -203,14 +203,31 @@ def _find_span(lines: list[str], path: Path) -> tuple[int, int] | None:
         return None
     if len(begins) == 1 and len(ends) == 1 and begins[0] < ends[0]:
         return (begins[0], ends[0])
+    hint = (
+        "Leave exactly one BEGIN line followed by one END line, or delete "
+        "both markers and re-run 'stack config portable'. Nothing was written."
+    )
+    # A line carrying marker text that the strip set above did not admit --
+    # indented, behind a byte-order mark, or trailed by something other than
+    # blanks. Reporting "none" for a side the reader can see on screen sends
+    # them hunting for a marker that is sitting in front of them, so name the
+    # lines and the rule they miss.
+    stray = [
+        i
+        for i, line in enumerate(lines)
+        if (BEGIN_MARKER in line or END_MARKER in line)
+        and line.rstrip(" \t\r\n") not in (BEGIN_MARKER, END_MARKER)
+    ]
+    if stray:
+        hint += (
+            f" Line(s) {_line_numbers(stray)} hold marker text that did not "
+            "count: a marker is only recognised on a line holding nothing but "
+            "the marker and trailing blanks."
+        )
     raise ConfigError(
         f"Malformed uv-stack managed block in {path}: BEGIN on line(s) "
         f"{_line_numbers(begins)}, END on line(s) {_line_numbers(ends)}.",
-        hint=(
-            "Leave exactly one BEGIN line followed by one END line, or delete "
-            "both markers and re-run 'stack config portable'. Nothing was "
-            "written."
-        ),
+        hint=hint,
     )
 
 
