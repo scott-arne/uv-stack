@@ -138,35 +138,59 @@ def _children(directory: Path) -> tuple[list[Path], list[Finding]]:
         return [], [_unparseable(directory, str(error))]
 
 
-def _absent_directory(path: Path) -> bool:
-    """Answer whether no directory is at ``path``, treating "cannot tell" as no.
+def _scaffold_directory_problem(name: str, path: Path) -> Finding | None:
+    """Probe one of the root's own directories, distinguishing three answers.
 
-    ``os.path.isdir`` collapses both answers into ``False``, and stat'ing a
-    directory needs search permission on its *parent* rather than on itself, so
-    a whole config root one ``chmod`` from usable reports every directory under
-    it absent. That answer is not merely imprecise: it is the one thing
-    certainly untrue about a directory the kernel declined to describe, and
-    ``doctor --fix`` acts on it by running a ``mkdir`` that fails for the same
-    reason the stat did.
+    Absent and unreadable are not the same finding. ``os.path.isdir`` collapses
+    both into ``False``, and stat'ing a directory needs search permission on its
+    *parent* rather than on itself, so a whole config root one ``chmod`` from
+    usable would report every directory under it absent. That answer is not
+    merely imprecise: it is the one thing certainly untrue about a directory the
+    kernel declined to describe, and ``doctor --fix`` acts on it by running a
+    ``mkdir`` that fails for the same reason the stat did.
 
-    The paths this declines to call absent are still reported — the walks and
-    the source scan name them in ``unparseable-source`` warns — so the
-    distinction costs no coverage, only a wrong reason.
+    So a residual errno gets an ``unparseable-source`` warn, and this probe is
+    where it has to come from. Nothing downstream picks the path up: the scans
+    below are guarded by ``os.path.isdir``, which answers ``False`` for exactly
+    the errno that made the stat fail, so :func:`_children` never runs on it and
+    no walk names it. A root whose ``profiles/`` is a self-referential symlink
+    otherwise produces no findings whatsoever — a clean bill of health for a
+    directory doctor never managed to look at.
 
+    The warn describes a directory rather than a file, which is what
+    :func:`_children` already does with the same helper.
+
+    One overlap is accepted rather than engineered away: an unsearchable root
+    fails this stat *and* the listings :func:`_scan_sources` does, so each of
+    the three paths is warned about twice, in identical words. Suppressing the
+    second would mean either deduplicating the whole finding list or coupling
+    this probe to whether ``glob`` happens to raise — and the scan's warn is not
+    redundant in general, since a directory that stats but cannot be opened
+    reaches only that one.
+
+    :param name: The directory's short name, for the missing-directory message.
     :param path: The directory to probe.
-    :returns: ``True`` when nothing, or something that is not a directory, is at
-        ``path``; ``False`` when it is a directory or when the probe failed for
-        any other reason.
+    :returns: A ``missing-dir`` error when nothing, or something that is not a
+        directory, is at ``path``; an ``unparseable-source`` warn when the probe
+        failed for any other reason; ``None`` when a directory is there.
     """
     try:
-        return not stat.S_ISDIR(os.stat(path).st_mode)
+        if stat.S_ISDIR(os.stat(path).st_mode):
+            return None
     except (FileNotFoundError, NotADirectoryError):
         # ENOENT and ENOTDIR are the two errnos that genuinely mean nothing is
         # there: the last component is missing, or a component above it is not
         # a directory, so no directory can be at the path either way.
-        return True
-    except OSError:
-        return False
+        pass
+    except OSError as error:
+        return _unparseable(path, str(error))
+    return Finding(
+        "error",
+        f"Missing {name} directory: {path}",
+        fix=f"Create {path} (or run 'stack config init').",
+        kind="missing-dir",
+        path=path,
+    )
 
 
 def _is_root_directory(child: Path, config: ConfigRoot) -> bool:
@@ -243,20 +267,14 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
         ("bundles", config.bundles_dir),
         ("envs", config.envs_dir),
     ):
-        # _absent_directory, not the isdir spelling: these three sit under a
-        # root that may be listable without being searchable, and calling them
-        # missing then contradicts the unparseable-source warns the same run
-        # emits about the same paths -- with a mkdir that cannot succeed.
-        if _absent_directory(directory):
-            findings.append(
-                Finding(
-                    "error",
-                    f"Missing {name} directory: {directory}",
-                    fix=f"Create {directory} (or run 'stack config init').",
-                    kind="missing-dir",
-                    path=directory,
-                )
-            )
+        # _scaffold_directory_problem, not the isdir spelling: these three sit
+        # under a root that may be listable without being searchable, and
+        # calling them missing then contradicts the unparseable-source warns
+        # the same run emits about the same paths -- with a mkdir that cannot
+        # succeed. The probe says which of the three answers it got.
+        problem = _scaffold_directory_problem(name, directory)
+        if problem is not None:
+            findings.append(problem)
 
     # Leftover pre-YAML config files (clean break: these are no longer read).
     # Walked rather than globbed: glob answers a directory it cannot read with

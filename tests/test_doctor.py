@@ -2493,6 +2493,42 @@ def test_a_genuinely_absent_directory_under_a_searchable_root_is_still_missing(
     assert missing[0].level == "error"
 
 
+def test_an_unstattable_scaffold_directory_is_reported_as_unreadable(
+    config_tree: ConfigRoot,
+):
+    """A directory the kernel will not describe must not read as clean.
+
+    Suppressing missing-dir for a residual errno was right -- the mkdir it
+    offers fails for the same reason the stat did -- but nothing else picked
+    the path up. The legacy scan is guarded by os.path.isdir, which answers
+    False for that same errno, so _children never ran and no walk named the
+    directory either. The whole run came back empty for a root whose profiles/
+    cannot be used at all.
+
+    A self-referential symlink is the portable way to force the errno (ELOOP)
+    without root privileges and without a chmod, which would need the geteuid
+    guard the permission-based tests above carry.
+    """
+    shutil.rmtree(config_tree.profiles_dir)
+    os.symlink("profiles", config_tree.profiles_dir)
+
+    findings = diagnose(config_tree)
+
+    about_profiles = [f for f in findings if f.path == config_tree.profiles_dir]
+    assert [(f.level, f.kind) for f in about_profiles] == [("warn", "unparseable-source")]
+    assert str(config_tree.profiles_dir) in about_profiles[0].message
+    # The suppression this sits next to still holds: no error offering a mkdir
+    # that would fail exactly as the stat did.
+    assert [f for f in findings if f.kind == "missing-dir"] == []
+    # The two directories that are fine stay silent, so the warn is a report
+    # about profiles/ and not about the run having given up.
+    assert [
+        f
+        for f in findings
+        if f.path in (config_tree.bundles_dir, config_tree.envs_dir)
+    ] == []
+
+
 @pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
 def test_an_unsearchable_parent_of_the_root_reports_a_missing_root(tmp_path: Path):
     # The root's own probe needs search permission on the root's parent, which
