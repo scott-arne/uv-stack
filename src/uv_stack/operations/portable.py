@@ -415,6 +415,14 @@ def write_directory_keepers(config: ConfigRoot, *, dry_run: bool = False) -> lis
     later gets its placeholder from the next run of this command, which is the
     same command that has to run again anyway for the block to stay current.
 
+    A scaffold directory that is itself a symlink is skipped. Not only because
+    ``is_dir``, ``iterdir`` and :func:`atomic_write` all follow the final
+    component, so the file lands wherever the link points and may leave the
+    config root entirely — but because there is nothing for a placeholder to
+    do there. Git records the link, not the directory behind it, so the link
+    already survives a clone, and a file written into the target would never
+    travel with it.
+
     The placeholders are reported but not staged: the untracking sequence
     :func:`next_steps` prints stages ``.gitignore`` alone, on purpose, and
     leaves the root's other untracked files for their owner to add once
@@ -427,7 +435,15 @@ def write_directory_keepers(config: ConfigRoot, *, dry_run: bool = False) -> lis
     """
     written: list[Path] = []
     for directory in (config.profiles_dir, config.bundles_dir, config.envs_dir):
-        if not directory.is_dir() or any(directory.iterdir()):
+        # is_symlink is tested first because is_dir answers for the target. A
+        # window remains between this test and the write: a link planted in it
+        # is still followed, since closing that needs a dir_fd threaded through
+        # atomic_write, which five other call sites share. Left open
+        # deliberately -- the loser of that race is a placeholder file, not a
+        # config root's contents.
+        if directory.is_symlink() or not directory.is_dir():
+            continue
+        if any(directory.iterdir()):
             continue
         keeper = directory / KEEPER_NAME
         written.append(keeper)

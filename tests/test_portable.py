@@ -1065,6 +1065,30 @@ def test_the_placeholders_are_reported_but_not_written_under_dry_run(
     assert not (config_tree.bundles_dir / KEEPER_NAME).exists()
 
 
+def test_a_symlinked_scaffold_directory_gets_no_placeholder(
+    tmp_path: Path, config_tree: ConfigRoot
+):
+    """A placeholder written through a link lands outside the config root.
+
+    Path.is_dir, Path.iterdir and atomic_write all follow a symlink at the
+    final component, so an empty bundles/ that is a link puts the file in
+    whatever it points at -- here a sibling of the root, but it could be
+    anywhere on the machine.
+
+    The write has nothing to achieve in the first place. Git records the link
+    itself, not the directory behind it, so the link already survives a clone
+    and a placeholder inside the target would never travel with it.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    shutil.rmtree(config_tree.bundles_dir)
+    config_tree.bundles_dir.symlink_to(outside, target_is_directory=True)
+
+    assert write_directory_keepers(config_tree) == []
+    assert not (outside / KEEPER_NAME).exists()
+    assert not (config_tree.bundles_dir / KEEPER_NAME).exists()
+
+
 def test_an_absent_directory_is_left_absent(config_tree: ConfigRoot):
     shutil.rmtree(config_tree.bundles_dir)
 
