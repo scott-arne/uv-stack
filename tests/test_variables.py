@@ -482,3 +482,15 @@ def test_check_placement_names_each_offenders_own_file():
     assert "Refused 2 requirement entries" in message
     assert "/cfg/profiles/ds.yaml" in message
     assert "/cfg/profiles/chem.yaml" in message
+
+
+def test_check_placement_refuses_misaligned_sources():
+    """A short sources list would report the last entries with no file.
+
+    The ValueError is deliberate: zip would truncate silently, and a caller
+    would claim the feature worked while showing no file for entries that do
+    have one. Better to fail loudly than to lie.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        check_placement(["pkg-a", "pkg-b", "pkg-c"], sources=["a.yaml", "b.yaml"])
+    assert "sources has 2 items for 3 entries" in str(excinfo.value)
