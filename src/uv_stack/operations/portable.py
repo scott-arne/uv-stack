@@ -90,27 +90,35 @@ def enclosing_repository(path: Path) -> Path | None:
     No git is invoked, for the reason given on :class:`PortableResult`: the
     answer has to be the same on a machine where git is not installed. The
     price is that a ``.git`` in a directory this process may not search reads
-    as absent, and that a symlinked root is walked through its own path
-    rather than its target's.
+    as absent.
 
     :param path: The directory to start from, absolute or relative. It is
-        normalised before the walk and tested before its parents, so a root
-        that *is* a top level answers with itself.
-    :returns: The absolute, ``..``-free path of the nearest directory at or
-        above ``path`` holding a ``.git`` entry, or ``None`` when there is
-        none below the filesystem root. A ``.git`` *file* — the worktree and
-        submodule spelling — counts as readily as the directory, since either
-        one means the files are tracked.
+        resolved before the walk — symlinks and all, so a root is classified
+        by what it points at, as git itself would — and tested before its
+        parents, so a root that *is* a top level answers with itself.
+    :returns: The absolute, ``..``-free, symlink-resolved path of the nearest
+        directory at or above ``path`` holding a ``.git`` entry, or ``None``
+        when there is none below the filesystem root. A ``.git`` *file* — the
+        worktree and submodule spelling — counts as readily as the directory,
+        since either one means the files are tracked.
     """
-    # abspath, not the path as given: Path.parent is lexical and does not
+    # realpath, not the path as given: Path.parent is lexical and does not
     # collapse '..', so a root spelled '<repo>/sub/../../elsewhere' would have
     # the walk step through '<repo>/sub/..', find that repository's .git, and
-    # name a top level the root is not under at all. abspath normalises '..'
-    # away and anchors a relative root to the working directory, which is the
-    # only reading of a relative --root that git could act on. It stays purely
-    # lexical -- no symlink is resolved and no filesystem is consulted -- so
-    # every property the walk below relies on is preserved.
-    current = Path(os.path.abspath(path))
+    # name a top level the root is not under at all. realpath normalises '..'
+    # away and anchors a relative root to the working directory, like abspath,
+    # and additionally resolves symlinks -- which is what git itself does when
+    # it walks up from a working directory. Classifying a symlinked root by its
+    # own path instead reads a root linked into a repository as being in none,
+    # dropping the very advice this module exists to print.
+    #
+    # It resolves without raising: strict=False is realpath's default, so a
+    # root that does not exist yet still answers, and a symlink loop resolves
+    # to the path as far as it got rather than raising OSError.
+    #
+    # This changes only classification. Every command in next_steps is built
+    # from config.root as the user spelled it, so no printed path moves.
+    current = Path(os.path.realpath(path))
     while True:
         # os.path.exists, never Path.exists: before 3.14 the pathlib probe
         # re-raises any OSError whose errno is outside its small allowed set,

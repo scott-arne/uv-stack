@@ -595,6 +595,45 @@ def test_a_dot_dot_in_the_root_does_not_hand_it_to_a_repository_it_passes_throug
     assert any(step.endswith(" init") for step in next_steps(config, result))
 
 
+def test_a_symlinked_root_pointing_into_a_repository_is_in_that_repository(
+    tmp_path: Path,
+):
+    """The false negative costs the user the advice this command exists to give.
+
+    Classified through its own path, a symlinked root reads as being in no
+    repository -- so 'config portable' prints the git-init bootstrap for a
+    root whose files the enclosing repository already tracks.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    real_root = repo / "python-envs"
+    real_root.mkdir()
+    link = tmp_path / "linked-root"
+    link.symlink_to(real_root)
+
+    result = write_portable_ignore(ConfigRoot(link), dry_run=True)
+
+    assert result.repository_root == repo.resolve()
+    assert result.is_repository is True
+
+
+def test_a_symlinked_root_pointing_out_of_a_repository_is_in_no_repository(
+    tmp_path: Path,
+):
+    """The false positive prints untracking commands for files that are absent."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    link = repo / "python-envs"
+    link.symlink_to(outside)
+
+    result = write_portable_ignore(ConfigRoot(link), dry_run=True)
+
+    assert result.repository_root is None
+    assert any(step.endswith(" init") for step in next_steps(ConfigRoot(link), result))
+
+
 def test_a_relative_root_is_anchored_to_the_working_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
