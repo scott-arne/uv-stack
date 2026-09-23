@@ -590,6 +590,12 @@ A `.gitignore` that is a *symlink* is refused rather than written or replaced:
 git commits the link itself, so the rules it points at would never reach the
 machine that cloned the root.
 
+An empty `profiles/`, `bundles/`, or `envs/` also gets a `.gitkeep`. Git tracks
+files and not directories, so without one the directory would simply be absent
+from the clone, and the bring-up above would report it as a missing directory.
+Only a directory that already exists and holds nothing gets a placeholder —
+creating a directory is `stack config init`'s job, not this command's.
+
 The command prints the git commands to follow, and for a root that is already
 a repository those begin with an untracking step: files that are now ignored
 stay tracked until `git rm --cached` removes them from the index. That applies

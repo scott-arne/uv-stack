@@ -13,10 +13,12 @@ from uv_stack.errors import ConfigError
 from uv_stack.operations.portable import (
     BEGIN_MARKER,
     END_MARKER,
+    KEEPER_NAME,
     _newline,
     ignore_patterns,
     next_steps,
     render_block,
+    write_directory_keepers,
     write_portable_ignore,
 )
 
@@ -867,3 +869,67 @@ def test_dry_run_writes_nothing_whatever_the_file_already_holds(
         assert not path.exists()
     else:
         assert path.read_bytes() == before
+
+
+def test_only_an_empty_scaffolded_directory_gets_a_placeholder(config_tree: ConfigRoot):
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+
+    written = write_directory_keepers(config_tree)
+
+    assert written == [config_tree.bundles_dir / KEEPER_NAME]
+    assert (config_tree.bundles_dir / KEEPER_NAME).read_text() == ""
+    # profiles/ and envs/ hold real files, so they already travel; a
+    # placeholder in them would be a tracked file that nothing ever removes.
+    assert not (config_tree.profiles_dir / KEEPER_NAME).exists()
+    assert not (config_tree.envs_dir / KEEPER_NAME).exists()
+
+
+def test_the_placeholders_are_reported_but_not_written_under_dry_run(
+    config_tree: ConfigRoot,
+):
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+
+    written = write_directory_keepers(config_tree, dry_run=True)
+
+    assert written == [config_tree.bundles_dir / KEEPER_NAME]
+    assert not (config_tree.bundles_dir / KEEPER_NAME).exists()
+
+
+def test_an_absent_directory_is_left_absent(config_tree: ConfigRoot):
+    shutil.rmtree(config_tree.bundles_dir)
+
+    assert write_directory_keepers(config_tree) == []
+    # Creating it belongs to 'stack config init' and to doctor's repair. A
+    # placeholder written here would make this command a second scaffolder,
+    # and would silently convert doctor's error into a directory nobody asked
+    # for on the machine that is merely publishing the root.
+    assert not config_tree.bundles_dir.exists()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="requires a git executable")
+def test_an_empty_bundles_directory_survives_a_clone(
+    tmp_path: Path, config_tree: ConfigRoot
+):
+    """The placeholder is what keeps the documented bring-up clean.
+
+    Git tracks files, not directories, so without one the clone has no
+    bundles/ at all -- and the bring-up's step two, stack doctor, reports a
+    missing directory as an *error*, beside the variables report that step
+    exists to produce.
+    """
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+    root = config_tree.root
+    write_portable_ignore(config_tree)
+    write_directory_keepers(config_tree)
+
+    _git("init", "-q", str(root))
+    _git("-C", str(root), "add", ".")
+    _git("-C", str(root), "add", "-f", ".gitignore")
+    _git("-C", str(root), "commit", "-q", "-m", "initial")
+    clone = tmp_path / "clone"
+    _git("clone", "-q", str(root), str(clone))
+
+    assert (clone / "bundles").is_dir()

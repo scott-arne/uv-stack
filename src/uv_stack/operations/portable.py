@@ -26,6 +26,7 @@ from uv_stack.fsutil import atomic_write, read_text_utf8_nofollow
 
 BEGIN_MARKER = "# BEGIN uv-stack — managed block, do not edit by hand."
 END_MARKER = "# END uv-stack"
+KEEPER_NAME = ".gitkeep"
 
 
 def _pattern(config: ConfigRoot, path: Path) -> str:
@@ -367,6 +368,43 @@ def write_portable_ignore(
     return PortableResult(
         path=path, outcome=outcome, block=block, repository_root=repository_root
     )
+
+
+def write_directory_keepers(config: ConfigRoot, *, dry_run: bool = False) -> list[Path]:
+    """Place a ``.gitkeep`` in each scaffolded directory that holds nothing.
+
+    Git tracks files, not directories, so an empty ``profiles/``, ``bundles/``
+    or ``envs/`` does not survive the push and clone this command exists to
+    make work. Nothing recreates it on the far side either: the documented
+    bring-up runs ``stack doctor`` first, which reports the directory as a
+    missing-directory *error*, next to the variables report that step is
+    actually there to produce.
+
+    Only a directory that exists and is empty gets one. Creating an absent
+    directory belongs to ``stack config init`` and to doctor's repair, and a
+    directory with real content in it already travels. A root that empties one
+    later gets its placeholder from the next run of this command, which is the
+    same command that has to run again anyway for the block to stay current.
+
+    The placeholders are reported but not staged: the untracking sequence
+    :func:`next_steps` prints stages ``.gitignore`` alone, on purpose, and
+    leaves the root's other untracked files for their owner to add once
+    ``git status`` has shown them.
+
+    :param config: The config root.
+    :param dry_run: Compute the list but write nothing.
+    :returns: The placeholders written, or that would be, in directory order.
+    :raises OSError: When a scaffolded directory exists but cannot be listed.
+    """
+    written: list[Path] = []
+    for directory in (config.profiles_dir, config.bundles_dir, config.envs_dir):
+        if not directory.is_dir() or any(directory.iterdir()):
+            continue
+        keeper = directory / KEEPER_NAME
+        written.append(keeper)
+        if not dry_run:
+            atomic_write(keeper, "")
+    return written
 
 
 def next_steps(config: ConfigRoot, result: PortableResult) -> list[str]:

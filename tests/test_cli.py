@@ -5097,6 +5097,43 @@ def test_config_portable_dry_run_writes_nothing(config_tree: ConfigRoot):
     assert result.output.index("Re-run without") < result.output.index("git -C")
 
 
+def test_config_portable_places_and_names_a_placeholder_for_an_empty_directory(
+    config_tree: ConfigRoot,
+):
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable"]
+    )
+    assert result.exit_code == 0, result.output
+    assert (config_tree.bundles_dir / ".gitkeep").is_file()
+    # Naming it matters as much as writing it: the untracking sequence stages
+    # .gitignore alone, so a placeholder nobody is told about is one nobody adds.
+    assert "Placeholders" in result.output
+    assert str(config_tree.bundles_dir / ".gitkeep") in result.output
+
+
+def test_config_portable_dry_run_writes_no_placeholder(config_tree: ConfigRoot):
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert not (config_tree.bundles_dir / ".gitkeep").exists()
+    assert "dry run" in result.output
+
+
+def test_config_portable_says_nothing_about_placeholders_when_none_are_needed(
+    config_tree: ConfigRoot,
+):
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Placeholders" not in result.output
+
+
 def test_config_portable_does_not_caution_when_it_wrote_the_block(
     config_tree: ConfigRoot,
 ):
