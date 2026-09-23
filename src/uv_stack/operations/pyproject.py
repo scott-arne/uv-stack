@@ -60,21 +60,15 @@ def _read_exact(pyproject: Path) -> str:
     :raises ConfigError: If the file is not valid UTF-8, or does not parse as
         TOML.
     """
-    try:
-        with pyproject.open(encoding="utf-8", newline="") as handle:
-            text = handle.read()
-    except UnicodeDecodeError as error:
-        # Hand-rolled rather than read_text_utf8 because newline="" is the
-        # whole point of this read and read_text cannot express it. The two
-        # commands that mutate a project both call read_tracking first, which
-        # would already have converted this; the conversion belongs here anyway
-        # so a caller reaching remove_tracking on its own gets an error rather
-        # than a traceback, and so this function refuses malformed bytes the
-        # same way it refuses malformed TOML.
-        raise ConfigError(
-            f"Cannot read {pyproject}: not valid UTF-8.",
-            hint="Re-save the file as UTF-8 text.",
-        ) from error
+    # exact_newlines because this is a file uv-stack does not own: translating
+    # line endings on the way in and writing the result back would convert
+    # every line of a CRLF project, which is a whole-file diff nobody asked
+    # for. The decode refusal comes with it, and is wanted here: the two
+    # commands that mutate a project both call read_tracking first, which would
+    # already have converted bad bytes, but a caller reaching remove_tracking
+    # on its own must get an error rather than a traceback -- this function
+    # refuses malformed bytes the same way it refuses malformed TOML.
+    text = read_text_utf8(pyproject, exact_newlines=True)
     try:
         tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:
