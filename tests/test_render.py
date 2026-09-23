@@ -104,10 +104,19 @@ def test_render_reports_every_offender_across_profile_and_inline(config_tree: Co
 def test_render_output_is_unchanged_for_a_stack_without_references(
     config_tree: ConfigRoot,
 ):
+    """Expansion is a no-op on a stack that references nothing.
+
+    Anchored to the rendered text as well: on its own the equality is a
+    comparison of the function against itself, which two identically empty or
+    identically truncated renders would satisfy.
+    """
     stack = ResolvedStack(profiles=["ds", "chem"], inline=["umap-learn"])
-    assert render_requirements_in(
-        stack, config_tree, "main", Variables((), {})
-    ) == render_requirements_in(stack, config_tree, "main", None)
+    expanded = render_requirements_in(stack, config_tree, "main", Variables((), {}))
+    assert expanded == render_requirements_in(stack, config_tree, "main", None)
+    assert "# Profile: ds" in expanded
+    assert "# Profile: chem" in expanded
+    assert "umap-learn" in expanded
+    assert f"-r {config_tree.env_local_path('main')}" in expanded
 
 
 def test_rendered_output_never_adds_requirement_lines(config_tree: ConfigRoot):
