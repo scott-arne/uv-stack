@@ -42,6 +42,12 @@ RECURSIVE_OPTIONS = frozenset({"-r", "--requirement", "-c", "--constraint"})
 #: How much of an entry to quote when reporting a malformed reference.
 _FRAGMENT_WINDOW = 24
 
+#: A comment marker: a ``#`` that *begins* a whitespace-separated token, so it
+#: sits at the start of the entry or directly after whitespace. The preceding
+#: whitespace is part of the match so that slicing at :attr:`re.Match.start`
+#: drops the separator along with the comment.
+_COMMENT_RE = re.compile(r"(?:^|\s)#")
+
 
 @dataclass(frozen=True)
 class Variables:
@@ -116,6 +122,24 @@ def _first_token(entry: str) -> str:
     return tokens[0] if tokens else ""
 
 
+def _code_portion(entry: str) -> str:
+    """The part of ``entry`` uv actually reads, with any comment cut away.
+
+    A requirements file treats ``#`` as a comment marker at the start of a line
+    or after whitespace — exactly a token that begins with one — and discards it
+    along with the rest of the line. A ``#`` inside a token is ordinary text, so
+    ``pkg#egg=thing`` stays one requirement rather than becoming a bare ``pkg``.
+    This is the same definition of a comment :func:`expansion_problem` uses on
+    the other side of substitution.
+
+    :param entry: One requirement entry, a single physical line.
+    :returns: The text before the comment marker, or the whole entry when there
+        is none. The empty string when the entry is nothing but a comment.
+    """
+    match = _COMMENT_RE.search(entry)
+    return entry if match is None else entry[: match.start()]
+
+
 def _is_recursive_include(token: str) -> bool:
     """Whether ``token`` is a requirements-file or constraints-file option.
 
@@ -159,6 +183,26 @@ def placement_problem(entry: str) -> tuple[str, str] | None:
       message distinguishes an entry that fails one condition from one that
       fails several.
 
+    Only the last of the four is judged on the entry's code portion — the text
+    before any comment marker, per :func:`_code_portion`. uv discards a comment
+    entirely, so a reference inside one occupies no position and opens no
+    include; judging the raw entry refuses ``-e ${DEV}/pkg # do not use -r
+    here``, which is a correct line.
+
+    The first three deliberately stay on the raw entry. The asymmetry is not an
+    oversight:
+
+    - a comment cannot contain a newline, so ``multiline-entry`` reads the same
+      either way;
+    - a trailing backslash inside a comment still continues the *physical*
+      line, so ``-e ${DEV}/pkg # note \\`` swallows the requirement written
+      after it. Judging continuation on the code portion would admit exactly
+      that;
+    - a malformed ``${`` in a comment cannot hurt uv, which never reads it.
+      Naming it anyway is a judgment call and not a consequence: a typo in a
+      reference is worth hearing about wherever it was written, and a user who
+      meant the line to be inert loses nothing by fixing it.
+
     :param entry: One requirement entry, unexpanded.
     :returns: ``(kind, explanation)`` or ``None``.
     """
@@ -181,12 +225,17 @@ def placement_problem(entry: str) -> tuple[str, str] | None:
             "malformed-reference",
             f"'{fragment}' is not a well-formed reference; write ${{NAME}}",
         )
-    if not referenced_names(entry):
+    # Everything from here down reads the code portion, for the reason given in
+    # the docstring: a reference uv never reads cannot be misplaced. Computed
+    # once so the four reads below cannot disagree about where the comment
+    # starts.
+    code = _code_portion(entry)
+    if not referenced_names(code):
         return None
 
-    token = _first_token(entry)
+    token = _first_token(code)
     failed = []
-    if ownership_name(entry) is not None:
+    if ownership_name(code) is not None:
         failed.append(1)
     if not (token.startswith("-") or "/" in token or "\\" in token):
         failed.append(2)
@@ -197,8 +246,9 @@ def placement_problem(entry: str) -> tuple[str, str] | None:
     # looser still and accepts a recursive option after any option at all. A
     # first-token-only test therefore admits exactly the machine-local second
     # requirements file condition 3 exists to refuse. This is the same
-    # whole-sequence reading expansion_problem already applies.
-    if any(_is_recursive_include(other) for other in entry.split()):
+    # whole-sequence reading expansion_problem already applies. It stops at the
+    # comment, which is what keeps the scan from reading prose as an option.
+    if any(_is_recursive_include(other) for other in code.split()):
         failed.append(3)
     if not failed:
         return None

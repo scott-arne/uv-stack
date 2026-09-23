@@ -50,8 +50,21 @@ _ADMITTED_WITH_REFERENCES = [
     "--index-url ${HOST}/simple",
 ]
 
+#: Entries whose only reference sits in a comment, plus one that carries a real
+#: reference alongside a comment. Kept out of _ADMITTED_WITH_REFERENCES because
+#: the invariant tests there describe a reference uv actually reads: the rows
+#: below expand to text uv discards, and the second one legitimately names a
+#: distribution ('pkg') that no value can change.
+_ADMITTED_WITH_COMMENTS = [
+    "-e ${DEV}/pkg # do not use -r here",
+    "pkg # see ${DEV} for the path",
+    "# install ${DEV}/pkg manually",
+    "${DEV}/pkg # plain note",
+]
+
 _ADMITTED = [
     *_ADMITTED_WITH_REFERENCES,
+    *_ADMITTED_WITH_COMMENTS,
     "numpy",
     "-e /absolute/path",
     "-r /abs/reqs.txt",
@@ -71,6 +84,10 @@ _REFUSED = [
     ("--requirement=${DEV}/reqs.txt", "misplaced-reference"),
     ("-e ${DEV}/safe\n-r ${DEV}/reqs.txt", "multiline-entry"),
     ("-e ${DEV/pkg", "malformed-reference"),
+    # A '#' inside a token is ordinary text to uv, so this entry's reference is
+    # code and condition 2 still judges it. Pinned here so the comment rule
+    # above cannot be widened into a substring search.
+    ("pkg#egg=thing ${DEV}", "misplaced-reference"),
 ]
 
 
@@ -148,6 +165,38 @@ def test_a_recursive_include_is_caught_behind_a_preceding_option(entry):
     problem = placement_problem(entry)
     assert problem is not None, entry
     assert "condition 3" in problem[1]
+
+
+def test_a_recursive_option_inside_a_comment_is_not_an_include():
+    # The whole-sequence scan above must not reach past the comment marker: uv
+    # discards everything from '#' to the end of the line, so this entry opens
+    # no second requirements file at all.
+    assert placement_problem("-e ${DEV}/pkg # do not use -r here") is None
+
+
+def test_a_hash_inside_a_token_does_not_start_a_comment():
+    # The counterexample that fixes the comment rule at a token boundary. A
+    # '#' in mid-token is ordinary text to uv -- 'pkg#egg=thing' is one
+    # requirement -- so the reference after it is code and stays refused.
+    problem = placement_problem("pkg#egg=thing ${DEV}")
+    assert problem is not None
+    assert problem[0] == "misplaced-reference"
+
+
+def test_a_comment_does_not_rescue_a_trailing_backslash():
+    # Continuation is judged on the raw entry on purpose: the backslash ends
+    # the physical line whether or not a comment precedes it, so a code-portion
+    # reading would admit an entry that swallows the next requirement.
+    kind, _ = placement_problem("-e ${DEV}/pkg # note \\")
+    assert kind == "continuation-entry"
+
+
+def test_a_malformed_reference_inside_a_comment_is_still_named():
+    # The other deliberate asymmetry. uv would never read this text, so the
+    # typo cannot hurt it; naming it anyway is a judgment call about which
+    # mistake a user would rather hear about.
+    kind, _ = placement_problem("pkg # see ${DEV for the path")
+    assert kind == "malformed-reference"
 
 
 def test_multiline_is_refused_even_without_a_reference():
