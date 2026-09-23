@@ -169,6 +169,46 @@ def _absent_directory(path: Path) -> bool:
         return False
 
 
+def _is_root_directory(child: Path, config: ConfigRoot) -> bool:
+    """Whether ``child`` is one of the config root's own directories.
+
+    Asked of the filesystem, not answered by transforming the name. On a
+    case-insensitive filesystem ``Envs`` IS ``envs`` — the directory every
+    other read in the program resolves — and treating it as an unknown
+    top-level entry ends in a ``mv`` that moves that directory into itself.
+
+    Casefolding the name instead would be the mirror bug named in the comment
+    below: on a case-sensitive filesystem ``Envs`` is a different directory,
+    and a real misplaced env inside it has to stay reportable. Asking leaves
+    each platform's answer to that platform.
+
+    :param child: A top-level entry of the config root.
+    :param config: The configuration root, for the known directory paths.
+    :returns: ``True`` when ``child`` is one of the root's own directories.
+    """
+    if child.name in _KNOWN_TOP_LEVEL:
+        return True
+    return any(
+        _same_directory(child, config.root / known) for known in _KNOWN_TOP_LEVEL
+    )
+
+
+def _same_directory(left: Path, right: Path) -> bool:
+    """Whether two paths name one directory, answering False when unknowable.
+
+    ``samefile`` raises when either side is absent, which for this question is
+    simply "no" — a root that has no ``lib/`` cannot have a case variant of one.
+
+    :param left: First path.
+    :param right: Second path.
+    :returns: ``True`` only when the filesystem says both name one directory.
+    """
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
 def diagnose(config: ConfigRoot) -> list[Finding]:
     """Inspect the config tree and return findings.
 
@@ -270,7 +310,7 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
     root_children, walk_findings = _children(config.root)
     findings += walk_findings
     for child in root_children:
-        if not os.path.isdir(child) or child.name in _KNOWN_TOP_LEVEL:
+        if not os.path.isdir(child) or _is_root_directory(child, config):
             continue
         child_entries, walk_findings = _children(child)
         findings += walk_findings

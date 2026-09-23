@@ -1943,6 +1943,61 @@ def test_a_symlinked_ignore_file_is_reported_not_reported_clean(
     assert "Symlinked ignore file" in finding.message
 
 
+def _case_insensitive(root: Path) -> bool:
+    """Whether this filesystem resolves two spellings to one directory."""
+    probe = root / "CaseProbe"
+    probe.mkdir()
+    try:
+        return (root / "caseprobe").is_dir()
+    finally:
+        probe.rmdir()
+
+
+def test_a_case_variant_of_a_root_directory_is_not_called_misplaced(
+    config_tree: ConfigRoot,
+):
+    """On a case-insensitive filesystem 'Lib' IS the root's lib directory.
+
+    Falling through to the marker check prints 'mv <root>/Lib
+    <root>/envs/Lib' -- a proposal to move one of the root's own directories
+    into envs/, from the command whose job is to say what is actually wrong.
+
+    'Lib' rather than 'Envs' because scandir reports the name a directory was
+    created with: the fixture already makes 'envs', so mkdir('Envs') there is
+    a no-op and the entry stays lowercase. The fixture makes no 'lib'.
+    """
+    if not _case_insensitive(config_tree.root):
+        pytest.skip("two spellings only name one directory on a case-insensitive filesystem")
+    variant = config_tree.root / "Lib"
+    variant.mkdir()
+    (variant / "requirements.in").write_text("numpy\n")
+
+    findings = diagnose(config_tree)
+
+    assert not [f for f in findings if f.kind == "misplaced-env"]
+
+
+def test_a_genuinely_separate_case_variant_directory_is_still_reported(
+    config_tree: ConfigRoot,
+):
+    """The case-sensitive platform must keep its real finding.
+
+    Here 'Lib' is a different directory from any 'lib', so an env sitting in
+    it is genuinely misplaced. Casefolding the name would suppress this, which
+    is why the fix asks the filesystem instead -- the same reasoning
+    doctor.py:280-288 already applies to the marker names.
+    """
+    if _case_insensitive(config_tree.root):
+        pytest.skip("the two spellings are one directory on a case-insensitive filesystem")
+    stray = config_tree.root / "Lib"
+    stray.mkdir()
+    (stray / "requirements.in").write_text("numpy\n")
+
+    findings = diagnose(config_tree)
+
+    assert [f for f in findings if f.kind == "misplaced-env" and f.path == stray]
+
+
 def test_a_non_repository_root_is_never_flagged(config_tree: ConfigRoot):
     assert not [f for f in diagnose(config_tree) if f.kind == "stale-ignore-block"]
 
