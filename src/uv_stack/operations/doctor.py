@@ -1195,6 +1195,12 @@ def _editable_target(entry: str) -> str | None:
     ``=``, and the value carries no URL scheme. Anything else is a remote
     install with no path to check.
 
+    In the separated form the remaining tokens are rejoined, because uv reads
+    them as one path — ``-e ./my pkg`` installs from ``my pkg``. The rejoin
+    stops at the first token that could be an option of its own, so an entry
+    carrying both a spaced path and a trailing flag reads the whole path and
+    none of the flag.
+
     A trailing PEP 508 extras suffix is dropped from the operand.
 
     :param entry: One expanded requirement entry.
@@ -1217,7 +1223,25 @@ def _editable_target(entry: str) -> str | None:
     if attached and operand:
         target = operand
     elif len(parts) >= 2:
-        target = parts[1]
+        # uv reads everything after the flag as one path: '-e ./my pkg'
+        # installs from 'my pkg'. Taking parts[1] alone reports a missing
+        # checkout for a directory that is there under its real name -- a
+        # false positive, which is the worse direction for a diagnosis.
+        #
+        # The path runs up to the first token that could be an option of its
+        # own, so an entry carrying both -- a spaced path and a trailing flag
+        # -- still reads the whole path and none of the flag. Giving up on the
+        # rejoin entirely when a later option appears would get that case
+        # wrong in the original direction. An option cannot be part of a path
+        # uv would accept here, and a path that genuinely begins with '-' is
+        # unreachable through this parser anyway.
+        rest = parts[1:]
+        end = len(rest)
+        for offset, token in enumerate(rest[1:], start=1):
+            if token.startswith("-"):
+                end = offset
+                break
+        target = " ".join(rest[:end])
     else:
         return None
     if "://" in target or target.startswith("git+"):

@@ -1722,6 +1722,55 @@ def test_a_relative_editable_resolves_against_the_config_root(
     assert "missing-checkout" not in _kinds(diagnose(config_tree))
 
 
+def test_an_editable_path_holding_a_space_is_read_whole(config_tree: ConfigRoot):
+    """uv reads everything after the flag as one path; so must the diagnosis.
+
+    Reading only the first token reports a missing checkout for a directory
+    that is present under its real name -- a false positive from the command
+    whose job is to say what is actually wrong.
+    """
+    checkout = config_tree.root / "my pkg"
+    checkout.mkdir()
+    config_tree.profile_path("ds").write_text("includes:\n  - -e my pkg\n")
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_entry_with_a_trailing_option_keeps_its_path_token(
+    config_tree: ConfigRoot,
+):
+    """The rejoin must not swallow an option into the path.
+
+    Pins one side of the boundary the fix draws: rejoining stops before a
+    token that could be an option of its own.
+    """
+    config_tree.profile_path("ds").write_text(
+        "includes:\n  - -e ./absent --config-settings editable_mode=compat\n"
+    )
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert "--config-settings" not in missing[0].message
+
+
+def test_an_editable_path_holding_a_space_survives_a_trailing_option(
+    config_tree: ConfigRoot,
+):
+    """Both halves of the rule at once: rejoin the path, then stop at the option.
+
+    The other side of the boundary. An all-or-nothing rejoin -- give up
+    entirely as soon as any later token looks like an option -- passes both
+    tests above and still reports './my' here.
+    """
+    checkout = config_tree.root / "my pkg"
+    checkout.mkdir()
+    config_tree.profile_path("ds").write_text(
+        "includes:\n  - -e my pkg --config-settings editable_mode=compat\n"
+    )
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
 def test_the_checkout_check_is_skipped_when_a_variable_is_undefined(
     config_tree: ConfigRoot,
 ):
