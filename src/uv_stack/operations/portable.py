@@ -304,6 +304,10 @@ def write_portable_ignore(
     :returns: What happened, or would have.
     :raises ConfigError: When the existing file is a symlink, has an illegal
         marker topology, is not valid UTF-8, or is not a regular file.
+    :raises OSError: When the ignore file cannot be opened, or the write cannot
+        be published — a permission denied on the root, a filesystem with no
+        space left. Left to the group edge, which renders an OSError with its
+        path rather than a traceback.
     """
     path = config.root / ".gitignore"
     block = render_block(config)
