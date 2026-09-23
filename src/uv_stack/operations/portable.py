@@ -28,6 +28,14 @@ BEGIN_MARKER = "# BEGIN uv-stack — managed block, do not edit by hand."
 END_MARKER = "# END uv-stack"
 KEEPER_NAME = ".gitkeep"
 
+#: Ignore-block entries that are bare filenames rather than uv-stack paths, so
+#: there is no accessor to derive them from. A file with one of these names
+#: cannot be committed while the block is in force, which is why
+#: :func:`write_directory_keepers` does not count one as evidence a directory
+#: travels. Both uses read this tuple so the two cannot drift: a name added
+#: here starts being ignored and stops being counted in the same edit.
+IGNORED_NAMES = (".DS_Store",)
+
 
 def _pattern(config: ConfigRoot, path: Path) -> str:
     """Render a path accessor's result as a root-relative ignore pattern.
@@ -59,8 +67,7 @@ def ignore_patterns(config: ConfigRoot) -> list[str]:
         _pattern(config, config.env_environment_yml("*")),
         _pattern(config, config.env_requirements_lock("*")),
         _pattern(config, config.env_local_path("*")),
-        # Not a uv-stack path, so there is no accessor to derive it from.
-        ".DS_Store",
+        *IGNORED_NAMES,
     ]
 
 
@@ -415,6 +422,18 @@ def write_directory_keepers(config: ConfigRoot, *, dry_run: bool = False) -> lis
     later gets its placeholder from the next run of this command, which is the
     same command that has to run again anyway for the block to stay current.
 
+    "Empty" means holding nothing that could be committed, not holding no
+    entries. A child whose bare name the managed block ignores — ``.DS_Store``
+    is the only one today, and :data:`IGNORED_NAMES` is where both this test
+    and the block read it from — does not travel, so a ``profiles/`` holding
+    only that one is gone after a clone exactly as a truly empty one would be.
+
+    The test is over bare names and goes no deeper. An ``envs/`` holding a
+    single ``envs/<name>/`` whose every file the block ignores still counts as
+    non-empty, because answering that properly means reimplementing gitignore
+    matching, and a command that prints git advice rather than running git is
+    the wrong place for a second implementation of it.
+
     A scaffold directory that is itself a symlink is skipped. Not only because
     ``is_dir``, ``iterdir`` and :func:`atomic_write` all follow the final
     component, so the file lands wherever the link points and may leave the
@@ -443,7 +462,7 @@ def write_directory_keepers(config: ConfigRoot, *, dry_run: bool = False) -> lis
         # config root's contents.
         if directory.is_symlink() or not directory.is_dir():
             continue
-        if any(directory.iterdir()):
+        if any(child.name not in IGNORED_NAMES for child in directory.iterdir()):
             continue
         keeper = directory / KEEPER_NAME
         written.append(keeper)

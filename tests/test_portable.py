@@ -13,6 +13,7 @@ from uv_stack.errors import ConfigError
 from uv_stack.operations.portable import (
     BEGIN_MARKER,
     END_MARKER,
+    IGNORED_NAMES,
     KEEPER_NAME,
     _newline,
     ignore_patterns,
@@ -1063,6 +1064,35 @@ def test_the_placeholders_are_reported_but_not_written_under_dry_run(
 
     assert written == [config_tree.bundles_dir / KEEPER_NAME]
     assert not (config_tree.bundles_dir / KEEPER_NAME).exists()
+
+
+def test_a_directory_holding_only_an_ignored_file_gets_a_placeholder(
+    config_tree: ConfigRoot,
+):
+    """An ignored file is not evidence that the directory travels.
+
+    Any entry at all used to count. The managed block ignores .DS_Store, so a
+    bundles/ holding nothing else has nothing git can record: after the printed
+    workflow and a clone the directory is gone, which is the exact outcome the
+    placeholder exists to prevent.
+    """
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+    (config_tree.bundles_dir / ".DS_Store").write_bytes(b"\x00")
+
+    written = write_directory_keepers(config_tree)
+
+    assert written == [config_tree.bundles_dir / KEEPER_NAME]
+    assert (config_tree.bundles_dir / KEEPER_NAME).is_file()
+
+
+def test_the_names_the_keeper_probe_discounts_are_the_ones_the_block_ignores(
+    config_tree: ConfigRoot,
+):
+    # The two uses read one constant, so a name added to the block is
+    # discounted by the probe without a second edit -- and a name dropped from
+    # the block stops being discounted.
+    assert set(IGNORED_NAMES) <= set(ignore_patterns(config_tree))
 
 
 def test_a_symlinked_scaffold_directory_gets_no_placeholder(
