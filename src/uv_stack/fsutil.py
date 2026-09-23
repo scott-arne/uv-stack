@@ -367,6 +367,26 @@ def link_or_copy_no_replace(
         raise
 
 
+def relax_to_conventional_mode(path: str | Path) -> None:
+    """Widen a ``mkstemp`` file from 0600 to the conventional file mode.
+
+    ``mkstemp`` creates 0600, which is the wrong mode to publish: a generated
+    file has to be readable like the hand-authored sources beside it, and a
+    root shared with a second account otherwise yields files only the writer
+    can read. The process umask is honoured, so a caller wanting the private
+    mode gets it by setting one.
+
+    Call it on the temporary file, before publication — the published name has
+    to appear with its final mode already on it.
+
+    :param path: The temporary file.
+    :raises OSError: When the mode cannot be changed.
+    """
+    umask = os.umask(0)
+    os.umask(umask)
+    os.chmod(path, 0o666 & ~umask)
+
+
 def atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically.
 
@@ -422,12 +442,7 @@ def atomic_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
-        # mkstemp creates the file 0600; relax it to the conventional file mode
-        # (honoring the process umask) so generated config files are readable
-        # like the hand-authored sources alongside them.
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(tmp_name, 0o666 & ~umask)
+        relax_to_conventional_mode(tmp_name)
         os.replace(tmp_name, path)
     except BaseException:
         if os.path.exists(tmp_name):
@@ -461,9 +476,7 @@ def atomic_write_new(path: Path, text: str) -> os.stat_result:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(tmp_name, 0o666 & ~umask)
+        relax_to_conventional_mode(tmp_name)
         return link_or_copy_no_replace(tmp_name, path).stat
     finally:
         if os.path.exists(tmp_name):

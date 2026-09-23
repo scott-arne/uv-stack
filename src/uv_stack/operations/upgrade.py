@@ -25,7 +25,7 @@ from uv_stack.commands import (
 )
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError, ToolError, UvStackError
-from uv_stack.fsutil import atomic_write
+from uv_stack.fsutil import atomic_write, relax_to_conventional_mode
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.create import ensure_env
 from uv_stack.pyversion import is_comparable, parse_python_info, satisfies
@@ -110,6 +110,12 @@ def _new_candidate_lock(lock: Path, *, seed: bool) -> tuple[Path, bool]:
     )
     os.close(tmp_fd)
     candidate = Path(tmp_name)
+    # This inode is what Path.replace publishes as the lock, so it carries
+    # mkstemp's 0600 all the way onto the user's config root unless it is
+    # relaxed here. The requirements.in written in the same operation goes
+    # through atomic_write and lands 0o666 & ~umask; the lock is not a secret
+    # and must not be the one generated file a second account cannot read.
+    relax_to_conventional_mode(candidate)
     if not seed:
         return candidate, False
     try:
