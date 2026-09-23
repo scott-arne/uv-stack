@@ -239,12 +239,12 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
         # it is the only arm there is, and the suite drives it by patching the
         # module-level _FASTPATH_AVAILABLE. Patching the os constants does not
         # work: availability is decided once at import, so the substitution
-        # arrives too late to change it and the test goes green having
-        # exercised the guarded arm. require_regular_file is load-bearing here
-        # rather than a name-based echo of the descriptor check below: without
-        # O_NONBLOCK a read-only open of a FIFO standing at path waits for a
-        # writer that never arrives, so refusing by name is what keeps the
-        # process from hanging.
+        # arrives too late to change it and the test exercises the guarded arm
+        # instead. require_regular_file is load-bearing here rather than a
+        # name-based echo of the descriptor check below: without O_NONBLOCK a
+        # read-only open of a FIFO standing at path waits for a writer that
+        # never arrives, so refusing by name is what keeps the process from
+        # hanging.
         require_regular_file(path)
         if not path.exists():
             return None
@@ -757,10 +757,12 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         below it, so the whole directory degrades rather than refusing or raising. All of that
         assumes both open guards, and so does every promise above it. POSIX requires both, and
         ``fcntl`` — which gates this function entirely — ships only where POSIX does, so the
-        guardless arm is defensive rather than reachable; the suite drives it by substituting the
-        constants. Which shape it refuses there is deliberately not promised here: the open resolves
-        a symlink that the ``lstat`` behind it does not, so the two halves of that arm disagree
-        about what is standing at the path, and no single rule covers both.
+        guardless create is defensive rather than reachable, and nothing in the suite drives it
+        either: that open takes the module constants directly, so patching ``_FASTPATH_AVAILABLE`` —
+        the substitution that reaches the read-only retry — leaves it exactly as it was. Which shape
+        it refuses there is therefore neither promised nor tested, deliberately: the open resolves a
+        symlink that the ``lstat`` behind it does not, so the two halves of that arm disagree about
+        what is standing at the path, and no single rule covers both.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
         symlink planted at ``path``, a socket or a device node the kernel will

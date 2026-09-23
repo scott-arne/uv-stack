@@ -322,13 +322,18 @@ def write_portable_ignore(
     through :func:`atomic_write`, which publishes a new inode. Permissions
     revert to the process default and a hardlinked ignore file is de-linked.
     A *symlinked* ignore file is refused outright rather than written through
-    or replaced, because git commits the link and not the rules. The read side
-    of that refusal is race-free — it opens ``O_NOFOLLOW``, so a link planted
-    after the check is refused rather than followed to a file the invoking user
-    can read and the planter cannot. The write side is narrowed and not closed:
-    ``os.replace`` never follows a link, so nothing is written through one, but
-    a link planted in the instant before the rename is destroyed rather than
-    refused, and POSIX has no rename that declines a symlinked target.
+    or replaced, because git commits the link and not the rules. That refusal
+    is made on the name, so it catches any link already standing there on any
+    platform; what the open guards close is the window after it. Where the
+    platform has both, the read side is race-free — it opens ``O_NOFOLLOW``, so
+    a link planted after the check is refused rather than followed to a file
+    the invoking user can read and the planter cannot. Where either is absent
+    that window stays open, and only that window: a link planted after the
+    check and before the bytes are read, resolving to a regular file, is
+    followed. The write side is narrowed and not closed: ``os.replace`` never
+    follows a link, so nothing is written through one, but a link planted in
+    the instant before the rename is destroyed rather than refused, and POSIX
+    has no rename that declines a symlinked target.
 
     :param config: The config root.
     :param dry_run: Compute the outcome but write nothing. Malformed-topology
@@ -361,12 +366,17 @@ def write_portable_ignore(
     # separate syscalls, so the guarantees are layered rather than resting here.
     _refuse_symlink(path)
 
-    # The read is the half that can be closed outright, and is: it opens
-    # O_NOFOLLOW, so a link planted after the test above is refused by the
-    # kernel instead of resolved. Left to an ordinary open, that link's target
-    # would be read with the invoking user's permissions — reaching a file the
-    # planter cannot read themselves — spliced into the block, and written to a
-    # .gitignore the printed sequence then tells the user to commit and push.
+    # The read is the half that can be closed outright, and is wherever the
+    # platform has both open guards: it opens O_NOFOLLOW, so a link planted
+    # after the test above is refused by the kernel instead of resolved. Left
+    # to an ordinary open, that link's target would be read with the invoking
+    # user's permissions — reaching a file the planter cannot read themselves —
+    # spliced into the block, and written to a .gitignore the printed sequence
+    # then tells the user to commit and push. Where a constant is absent the
+    # read is that ordinary open, so what the guards close here is exactly one
+    # window: a link planted after the test above and before the fallback's own
+    # open, resolving to a regular file. Anything already standing at the path
+    # was refused by name, on every platform.
     original = read_text_utf8_nofollow(path)
 
     if original is None:
