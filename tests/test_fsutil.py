@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import builtins
 import contextlib
 import errno
+import io
 import os
 import stat
 import time
@@ -2013,9 +2015,17 @@ def test_read_text_utf8_nofollow_refuses_a_fifo_without_guards_and_without_hangi
     The old arm called ``require_regular_file`` before its open for exactly
     this: without ``O_NONBLOCK`` a read-only open of a FIFO waits for a writer
     no test will supply. The arm makes no open now, so the hazard is gone — but
-    a reintroduced open would park forever, so patch ``os.open`` to fail loudly
-    rather than trust that. ``os.lstat`` is unaffected and still decides
-    presence.
+    a reintroduced open would park forever, so every route to one is made to
+    fail loudly rather than trusted not to be taken.
+
+    Patching ``os.open`` alone does not cover it, which is why there are three.
+    ``read_text_utf8`` — the call the removed arm made — reads through
+    ``Path.open``, and that reaches the C-level ``_io.open`` without ever
+    looking up the Python-visible ``os.open``. ``os.lstat`` is deliberately
+    left alone: it is what decides presence on this arm.
+
+    The patches are scoped to the one call rather than to the test so that an
+    assertion failing below is still reported by an unpatched pytest.
     """
     from uv_stack import fsutil
 
@@ -2024,13 +2034,39 @@ def test_read_text_utf8_nofollow_refuses_a_fifo_without_guards_and_without_hangi
     def _no_open(*args, **kwargs):
         raise AssertionError("the guardless arm must not open anything")
 
-    monkeypatch.setattr(os, "open", _no_open)
-
     path = tmp_path / "f.txt"
     os.mkfifo(path)
-    with pytest.raises(ConfigError) as excinfo:
-        fsutil.read_text_utf8_nofollow(path)
+    with monkeypatch.context() as no_opens:
+        no_opens.setattr(os, "open", _no_open)
+        no_opens.setattr(io, "open", _no_open)
+        no_opens.setattr(builtins, "open", _no_open)
+        with pytest.raises(ConfigError) as excinfo:
+            fsutil.read_text_utf8_nofollow(path)
+
     assert str(path) in excinfo.value.message
     # The blanket refusal, not the old "not a regular file" by name: this arm
     # no longer inspects the type it found, only that something was found.
     assert "platform" in excinfo.value.message
+
+
+def test_read_text_utf8_nofollow_propagates_a_non_absence_lstat_error(
+    tmp_path, monkeypatch
+):
+    """The guardless arm splits errors exactly as the guarded one does.
+
+    ``FileNotFoundError`` is absence and answers ``None``; every other
+    ``OSError`` is the caller's to handle. Widening that to ``except OSError``
+    would report an unsearchable directory as an absent file, and the one
+    caller's answer to absent is to create.
+    """
+    from uv_stack import fsutil
+
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
+
+    def _denied(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    with monkeypatch.context() as denied:
+        denied.setattr(os, "lstat", _denied)
+        with pytest.raises(PermissionError):
+            fsutil.read_text_utf8_nofollow(tmp_path / "f.txt")

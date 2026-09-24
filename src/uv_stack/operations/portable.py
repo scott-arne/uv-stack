@@ -324,14 +324,16 @@ def write_portable_ignore(
     A *symlinked* ignore file is refused outright rather than written through
     or replaced, because git commits the link and not the rules. That refusal
     is made on the name, so it catches any link already standing there on any
-    platform; the read closes the window after it. That read never follows a
-    link, on any platform — it opens ``O_NOFOLLOW`` where the guards exist and
-    refuses to read an existing file at all where they do not — so a link
-    planted after the check is never resolved to a file the invoking user can
-    read and the planter cannot. It is not race-free in general: where the
-    guards exist, a *regular* file swapped for another between the check and
-    the open is read as the original, which hands a planter nothing they did
-    not already hold. The price of the second arm is that a guardless platform
+    platform; the read closes the *symlink* window after it. That read never
+    follows a link, on any platform — it opens ``O_NOFOLLOW`` where the guards
+    exist and refuses to read an existing file at all where they do not — so a
+    link planted after the check is never resolved to a file the invoking user
+    can read and the planter cannot. It is not race-free in general, because
+    ``O_NOFOLLOW`` declines a symlink and nothing else: where the guards exist,
+    a *regular* file renamed over the path between the check and the open is
+    read as though it were the original, and a second hard link to someone
+    else's file is a regular file to every check on this path.
+    The price of the second arm is that a guardless platform
     cannot refresh an ignore file that is already there, only create one that
     is not. The write side is narrowed and not closed: ``os.replace`` never
     follows a link, so nothing is written through one, but a link planted in

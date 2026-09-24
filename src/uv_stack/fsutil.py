@@ -196,9 +196,10 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
 
     Decoding and byte-exact newline handling are :func:`read_text_utf8` with
     ``exact_newlines=True``; the refusal of a non-regular file is
-    :func:`require_regular_file`. What differs, where the guards exist, is that
-    both are decided on an open descriptor rather than on the name, so neither
-    answer can go stale between the test and the read.
+    :func:`require_regular_file`. What differs on the guarded arm is that both
+    are decided on an open descriptor rather than on the name, so neither
+    answer can go stale between the test and the read. Neither helper is called
+    on the other arm, which makes no open and so has nothing to decide.
 
     That is the whole of its purpose. A caller that tests a path and then opens
     it has made two syscalls, and a symlink planted between them is resolved by
