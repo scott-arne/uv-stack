@@ -32,10 +32,12 @@ _LINK_FALLBACK_ERRNOS = frozenset(
 #: or hanging on a FIFO. Callers answer that in one of three ways. Most can
 #: decline the open, and skip it entirely rather than take it unguarded; what
 #: each gives up by skipping differs, and is stated at the call site.
-#: read_text_utf8_nofollow could decline only by refusing every config read on
-#: such a platform — a platform-support decision, not a local one — so it takes
-#: the read unguarded instead, falling back to the name-based check and
-#: accepting the window it had before the guarded path existed. name_lock's
+#: read_text_utf8_nofollow takes the read unguarded instead, falling back to the
+#: name-based check and accepting the window it had before the guarded path
+#: existed — not because it cannot decline, but because whether to fail closed
+#: on a guardless platform is one question across all three of these facilities
+#: and it has not been answered; see that function for the full reasoning.
+#: name_lock's
 #: create is the one open that cannot be declined at all — there is no lock
 #: without it — so it passes both constants for whatever they are worth on the
 #: platform and rejects a non-regular target after the fact.
@@ -128,9 +130,9 @@ def nofollow_read_flags() -> int | None:
     about it is the caller's to decide, and the callers do not all decide the
     same way: most decline the read, either raising or skipping an optional
     check and taking the safe alternative. :func:`read_text_utf8_nofollow` is
-    the exception — it could decline only by refusing every config read on such
-    a platform, so it degrades to the name-based check that preceded it and
-    simply does not get the guarantee.
+    the exception — it degrades to the name-based check that preceded it and
+    simply does not get the guarantee. That is a deferred decision rather than
+    a forced one; the reasoning is at its own definition.
 
     :returns: Flags for :func:`os.open`, or ``None`` where this platform lacks
         the guards the read needs.
@@ -229,12 +231,22 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
     """
     flags = nofollow_read_flags()
     if flags is None:
-        # Both guards or none, per nofollow_read_flags. Declining here would
-        # mean refusing every config read on such a platform — a
-        # platform-support decision, not a local one — so it degrades instead
-        # to the name-based check every caller made before this function
-        # existed: no platform is left worse off, it simply does not get the
-        # guarantee. POSIX requires both constants, so no POSIX platform
+        # Both guards or none, per nofollow_read_flags. This degrades to the
+        # name-based check every caller made before this function existed: no
+        # platform is left worse off, it simply does not get the guarantee.
+        # Declining instead would be cheap, and an earlier version of this
+        # comment was wrong to say it would mean refusing every config read on
+        # such a platform. There is exactly one caller — write_portable_ignore
+        # — and every other config read in this package goes through
+        # read_text_utf8 or read_clean_lines, neither of which ever had the
+        # guarantee. Failing closed would cost that one command its read of an
+        # existing ignore file, and nothing else. It degrades anyway because
+        # that is one third of a question, not a local call: _FASTPATH_AVAILABLE,
+        # _LOCK_AVAILABLE and _PTY_AVAILABLE all degrade silently today, this
+        # package declares no platform support either way, and the three should
+        # be answered together. Until they are, the guarantee is documented as
+        # conditional rather than quietly extended or quietly withdrawn.
+        # POSIX requires both constants, so no POSIX platform
         # reaches this arm; where one is absent — Windows has no O_NOFOLLOW —
         # it is the only arm there is, and the suite drives it by patching the
         # module-level _FASTPATH_AVAILABLE. Patching the os constants does not
