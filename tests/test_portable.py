@@ -251,6 +251,32 @@ def test_a_link_planted_after_the_check_is_refused_by_the_read(
     assert written == []
 
 
+def test_without_the_open_guards_an_ignore_file_is_created_but_never_refreshed(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    """The caller-level shape of the guardless read: create yes, refresh no.
+
+    A name with nothing at it still reads as absent, so the file this command
+    exists to write is still written. An existing one cannot be read through an
+    open that proves what it opened, so it is refused rather than spliced — and
+    the refusal names the platform, because an ordinary .gitignore has nothing
+    wrong with it for the user to fix.
+    """
+    from uv_stack import fsutil
+
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
+    path = config_tree.root / ".gitignore"
+
+    assert write_portable_ignore(config_tree).outcome == "created"
+    assert path.read_text() == render_block(config_tree) + "\n"
+
+    written = _record_writes(monkeypatch)
+    with pytest.raises(ConfigError) as excinfo:
+        write_portable_ignore(config_tree)
+    assert "platform" in excinfo.value.message
+    assert written == []
+
+
 def test_a_symlinked_ignore_file_is_refused_under_dry_run_too(
     config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
 ):

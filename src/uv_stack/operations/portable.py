@@ -324,15 +324,13 @@ def write_portable_ignore(
     A *symlinked* ignore file is refused outright rather than written through
     or replaced, because git commits the link and not the rules. That refusal
     is made on the name, so it catches any link already standing there on any
-    platform; what the open guards close is the window after it. Where the
-    platform has both, the read side is race-free — it opens ``O_NOFOLLOW``, so
-    a link planted after the check is refused rather than followed to a file
-    the invoking user can read and the planter cannot. Where either is absent
-    that window stays open: a link planted after the check and before the bytes
-    are read is followed. The fallback's own name check narrows the first half
-    of it to links resolving to a regular file; a link planted past that check
-    is followed to whatever it resolves to, a FIFO included. The write side is
-    narrowed and not closed: ``os.replace`` never
+    platform; the read closes the window after it. That read is race-free on
+    every platform — it opens ``O_NOFOLLOW`` where the guards exist and refuses
+    to read an existing file at all where they do not — so a link planted after
+    the check is never followed to a file the invoking user can read and the
+    planter cannot. The price of the second arm is that a guardless platform
+    cannot refresh an ignore file that is already there, only create one that
+    is not. The write side is narrowed and not closed: ``os.replace`` never
     follows a link, so nothing is written through one, but a link planted in
     the instant before the rename is destroyed rather than refused, and POSIX
     has no rename that declines a symlinked target.
@@ -342,7 +340,9 @@ def write_portable_ignore(
         refusals still raise, because the point of the dry run is to find out.
     :returns: What happened, or would have.
     :raises ConfigError: When the existing file is a symlink, has an illegal
-        marker topology, is not valid UTF-8, or is not a regular file.
+        marker topology, is not valid UTF-8, is not a regular file, or stands
+        at the path on a platform whose missing open guards make reading it
+        unsafe.
     :raises OSError: When the ignore file cannot be opened, or the write cannot
         be published — a permission denied on the root, a filesystem with no
         space left. Left to the group edge, which renders an OSError with its
@@ -368,20 +368,16 @@ def write_portable_ignore(
     # separate syscalls, so the guarantees are layered rather than resting here.
     _refuse_symlink(path)
 
-    # The read is the half that can be closed outright, and is wherever the
-    # platform has both open guards: it opens O_NOFOLLOW, so a link planted
-    # after the test above is refused by the kernel instead of resolved. Left
-    # to an ordinary open, that link's target would be read with the invoking
-    # user's permissions — reaching a file the planter cannot read themselves —
-    # spliced into the block, and written to a .gitignore the printed sequence
-    # then tells the user to commit and push. Where a constant is absent the
-    # read is that ordinary open, so what the guards close here is the window
-    # between the test above and the fallback's own open. The fallback's name
-    # check narrows the first half of that window to links resolving to a
-    # regular file; past it, a link is followed to whatever it resolves to, a
-    # FIFO included — which blocks the open outright when no writer appears.
-    # Anything already standing at the path was refused by name, on every
-    # platform.
+    # The read is the half that can be closed outright, and is. Left to an
+    # ordinary open, a link planted just after the test above would be resolved
+    # and its target read with the invoking user's permissions — reaching a
+    # file the planter cannot read themselves — spliced into the block, and
+    # written to a .gitignore the printed sequence then tells the user to
+    # commit and push. Where the platform has both open guards the read opens
+    # O_NOFOLLOW and the kernel refuses that link; where either is absent there
+    # is no open that can, so the read refuses anything standing at the path
+    # instead. An absent path still reads as absent on both arms, which is what
+    # leaves this command able to create an ignore file that is not there.
     original = read_text_utf8_nofollow(path)
 
     if original is None:

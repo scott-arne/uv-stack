@@ -29,18 +29,14 @@ _LINK_FALLBACK_ERRNOS = frozenset(
 #: absent getattr yields 0, which does not weaken the guard — it removes it,
 #: and an identity recheck afterwards comes too late to make up for it: it can
 #: reject what the open returned, not stop the open from following a symlink
-#: or hanging on a FIFO. Callers answer that in one of three ways. Most can
+#: or hanging on a FIFO. Callers answer that in one of two ways. Most can
 #: decline the open, and skip it entirely rather than take it unguarded; what
 #: each gives up by skipping differs, and is stated at the call site.
-#: read_text_utf8_nofollow takes the read unguarded instead, falling back to the
-#: name-based check and accepting the window it had before the guarded path
-#: existed — not because it cannot decline, but because whether to fail closed
-#: on a guardless platform is one question across all three of these facilities
-#: and it has not been answered; see that function for the full reasoning.
-#: name_lock's
-#: create is the one open that cannot be declined at all — there is no lock
-#: without it — so it passes both constants for whatever they are worth on the
-#: platform and rejects a non-regular target after the fact.
+#: read_text_utf8_nofollow declines too, and what it gives up is reading an
+#: existing file at all rather than reading one it cannot prove it opened.
+#: name_lock's create is the one open that cannot be declined at all — there is
+#: no lock without it — so it passes both constants for whatever they are worth
+#: on the platform and rejects a non-regular target after the fact.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _FASTPATH_AVAILABLE = bool(_O_NOFOLLOW) and bool(_O_NONBLOCK)
@@ -127,12 +123,9 @@ def nofollow_read_flags() -> int | None:
     a platform missing either gets ``None`` rather than a weaker flag set.
 
     ``None`` says that the guarantee is unavailable and nothing more. What to do
-    about it is the caller's to decide, and the callers do not all decide the
-    same way: most decline the read, either raising or skipping an optional
-    check and taking the safe alternative. :func:`read_text_utf8_nofollow` is
-    the exception — it degrades to the name-based check that preceded it and
-    simply does not get the guarantee. That is a deferred decision rather than
-    a forced one; the reasoning is at its own definition.
+    about it is the caller's to decide, and every caller declines the read —
+    raising, or skipping an optional check and taking the safe alternative.
+    None of them takes it unguarded.
 
     :returns: Flags for :func:`os.open`, or ``None`` where this platform lacks
         the guards the read needs.
@@ -199,7 +192,7 @@ def read_text_utf8(path: Path, *, exact_newlines: bool = False) -> str:
 
 
 def read_text_utf8_nofollow(path: Path) -> str | None:
-    """Read ``path`` as UTF-8 verbatim, refusing a symlink where the guards exist.
+    """Read ``path`` as UTF-8 verbatim, refusing a symlink.
 
     Decoding and byte-exact newline handling are :func:`read_text_utf8` with
     ``exact_newlines=True``; the refusal of a non-regular file is
@@ -215,52 +208,47 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
     leaves no window — either the open got something that is not a symlink, or
     it got nothing.
 
-    That holds wherever :func:`nofollow_read_flags` yields flags, which is every
-    POSIX platform. Where either constant is absent it yields ``None`` and this
-    function degrades to a name-based check followed by a separate open — the
-    two-syscall shape above, window included — and a symlink resolving to a
-    regular file is followed rather than refused.
+    Where :func:`nofollow_read_flags` yields ``None`` that open cannot be made,
+    so none is made: anything standing at ``path`` is refused, and only a name
+    with nothing at it still reports absent. A plain regular file is refused
+    along with the rest, because without the guards there is no proving that
+    the thing opened is the thing that was stat'd — "it looked like a regular
+    file a moment ago" is the reasoning this function exists to stop resting
+    on. POSIX mandates both constants, so no POSIX platform pays for that.
 
     :param path: The file to read.
     :returns: The decoded text, or ``None`` when nothing is at ``path``.
     :raises ConfigError: When a symlink stands at ``path``, when what is there
-        is not a regular file, or when the bytes are not valid UTF-8. The
-        symlink refusal holds only where the guard constants exist: without
-        them a symlink to a regular file is followed and its target read, while
-        one that resolves to anything else is still refused, by name.
+        is not a regular file, when the bytes are not valid UTF-8, or — on a
+        platform lacking the guard constants — when anything at all stands at
+        ``path``.
     """
     flags = nofollow_read_flags()
     if flags is None:
-        # Both guards or none, per nofollow_read_flags. This degrades to the
-        # name-based check every caller made before this function existed: no
-        # platform is left worse off, it simply does not get the guarantee.
-        # Declining instead would be cheap, and an earlier version of this
-        # comment was wrong to say it would mean refusing every config read on
-        # such a platform. There is exactly one caller — write_portable_ignore
-        # — and every other config read in this package goes through
-        # read_text_utf8 or read_clean_lines, neither of which ever had the
-        # guarantee. Failing closed would cost that one command its read of an
-        # existing ignore file, and nothing else. It degrades anyway because
-        # that is one third of a question, not a local call: _FASTPATH_AVAILABLE,
-        # _LOCK_AVAILABLE and _PTY_AVAILABLE all degrade silently today, this
-        # package declares no platform support either way, and the three should
-        # be answered together. Until they are, the guarantee is documented as
-        # conditional rather than quietly extended or quietly withdrawn.
-        # POSIX requires both constants, so no POSIX platform
-        # reaches this arm; where one is absent — Windows has no O_NOFOLLOW —
-        # it is the only arm there is, and the suite drives it by patching the
-        # module-level _FASTPATH_AVAILABLE. Patching the os constants does not
-        # work: availability is decided once at import, so the substitution
-        # arrives too late to change it and the test exercises the guarded arm
-        # instead. require_regular_file is load-bearing here rather than a
-        # name-based echo of the descriptor check below: without O_NONBLOCK a
-        # read-only open of a FIFO standing at path waits for a writer that
-        # never arrives, so refusing by name is what keeps the process from
-        # hanging.
-        require_regular_file(path)
-        if not path.exists():
+        # Both guards or none, per nofollow_read_flags. POSIX requires both
+        # constants, so no POSIX platform reaches this arm; where one is absent
+        # — Windows has no O_NOFOLLOW — it is the only arm there is, and the
+        # suite drives it by patching the module-level _FASTPATH_AVAILABLE.
+        # Patching the os constants does not work: availability is decided once
+        # at import, so the substitution arrives too late to change it and the
+        # test exercises the guarded arm instead.
+        #
+        # Absence is settled on the name because exists() resolves the link: a
+        # dangling one answers False, and returning None for it would tell the
+        # caller to create over a link the user made on purpose.
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
             return None
-        return read_text_utf8(path, exact_newlines=True)
+        raise ConfigError(
+            f"Cannot read {path} safely on this platform.",
+            hint=(
+                "This platform lacks O_NOFOLLOW or O_NONBLOCK, so a read here "
+                "cannot prove it opened the file it stat'd rather than a "
+                "symlink planted since. Move that path aside to have a fresh "
+                "file written in its place."
+            ),
+        )
 
     try:
         fd = os.open(path, flags)
