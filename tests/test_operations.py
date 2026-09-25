@@ -33,6 +33,7 @@ from uv_stack.operations.project import (
     resolve_project_python,
     select_project_python,
 )
+from uv_stack.operations.scaffold import validate_name
 from uv_stack.operations.upgrade import UpgradeOptions, _new_candidate_lock, upgrade_env
 from uv_stack.runner import Command, CommandResult, RecordingRunner
 
@@ -4272,3 +4273,12 @@ def test_refresh_dry_run_still_runs_the_placement_check(tmp_path: Path):
     assert "backslash" in str(excinfo.value)
     assert runner.commands == []
     assert pyproject.read_text() == before
+
+
+def test_validate_name_hint_explains_why_a_listed_directory_is_refused():
+    """A hand-made directory stays listed but cannot be named; say so."""
+    with pytest.raises(ConfigError) as excinfo:
+        validate_name("environment", "my env")
+    hint = excinfo.value.hint or ""
+    assert "still listed" in hint
+    assert "rename" in hint.lower()
