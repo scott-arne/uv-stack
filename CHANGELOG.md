@@ -1,11 +1,13 @@
 # Changelog
 
-All notable changes to uv-stack are documented in this file.
+Notable changes to uv-stack are documented in this file, beginning with 0.6.0.
+Earlier releases predate it.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) with
+one addition, a `Breaking` section for changes that alter existing behavior, and
+this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - 2026-09-24
+## 0.6.0 - 2026-09-24
 
 ### Breaking
 
@@ -23,17 +25,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A config file that is a directory, a dangling symlink, or a FIFO is now a
   ConfigError instead of reading as absent. This covers `project-python.txt`,
   `editor.txt`, and an environment's `python.txt`, `micromamba.txt`, and
-  `channels.txt`, each of which previously fell back to its default while
-  `stack doctor` reported the root clean.
+  `channels.txt`, each of which previously fell back to its default. For all but
+  `python.txt` that happened while `stack doctor` reported the root clean; a
+  non-regular `python.txt` was reported, but as missing (see Fixed).
 - `[tool.uv-stack].python` refuses an empty or space-padded value. An empty
   value previously read as "no preference" and fell through to the machine
   default; a padded one defeated the version test and was taken to name a
   micromamba environment.
-- `stack create env|profile|bundle`, `stack init`, and `stack edit` refuse a
-  requirement entry that spans more than one line or ends in a trailing
-  backslash. Both shapes were previously written and rendered into
+- A requirement entry that spans more than one line or ends in a trailing
+  backslash is refused. Both shapes were previously written and rendered into
   `requirements.in` verbatim, where a continuation swallows the requirement
-  written after it.
+  written after it. `stack create env|profile|bundle`, `stack init`, and
+  `stack edit` refuse one on the way in; because rendering validates too, every
+  command that renders — `upgrade`, `converge`, `status`, `show env`, `refresh`,
+  `create project` — now also refuses one already sitting in a `stack.txt` or a
+  profile.
 
 ### Added
 
@@ -51,9 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `stack config portable` writes a managed `.gitignore` block so a config root
   can be committed and cloned. It never invokes git itself: it prints the
   commands for you to run, and `--dry-run` prints the plan without writing.
-- `stack create project` and `stack refresh` warn when the interpreter spec
-  they record names an environment local to this machine, since such a spec
-  will not resolve on another one.
+- `stack create project` and `stack refresh` warn when the interpreter spec they
+  record will not resolve on another machine — either an absolute path, or a
+  micromamba environment that exists only here.
 - `stack doctor` gained diagnostics for sources it cannot read or parse,
   missing editable checkouts, unsafe variable expansion, and a portable
   `.gitignore` block that is absent or stale.
@@ -111,7 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `stack upgrade` validates every NAME before it starts the batch, so a name
   that would escape the config root is refused rather than used to read another
   directory's sources and overwrite its generated files.
-- The guarded read behind `stack config portable` refuses an existing
+- The guarded read behind `stack config portable` — a command new in this
+  release, so no published version was exposed — refuses an existing
   `.gitignore` that is a symlink or that carries a second hard link, and
   refuses outright on a platform without `O_NOFOLLOW` and `O_NONBLOCK` rather
   than degrading to an unguarded open. A refresh preserves everything outside
