@@ -319,8 +319,10 @@ def write_portable_ignore(
     doing so and a CRLF file stays a CRLF file.
 
     That guarantee covers the file's contents, not its identity: a write goes
-    through :func:`atomic_write`, which publishes a new inode. Permissions
-    revert to the process default and a hardlinked ignore file is de-linked.
+    through :func:`atomic_write`, which publishes a new inode, so permissions
+    revert to the process default. A *hardlinked* ignore file never reaches
+    the write: the read refuses it, so what used to be a silent de-linking is
+    now a refusal.
     A *symlinked* ignore file is refused outright rather than written through
     or replaced, because git commits the link and not the rules. That refusal
     is made on the name, so it catches any link already standing there on any
@@ -331,8 +333,8 @@ def write_portable_ignore(
     can read and the planter cannot. It is not race-free in general, because
     ``O_NOFOLLOW`` declines a symlink and nothing else: where the guards exist,
     a *regular* file renamed over the path between the check and the open is
-    read as though it were the original, and a second hard link to someone
-    else's file is a regular file to every check on this path.
+    read as though it were the original. A second hard link no longer survives
+    the read, but it is the link count that refuses it, not ``O_NOFOLLOW``.
     The price of the second arm is that a guardless platform
     cannot refresh an ignore file that is already there, only create one that
     is not. The write side is narrowed and not closed: ``os.replace`` never
@@ -345,9 +347,9 @@ def write_portable_ignore(
         refusals still raise, because the point of the dry run is to find out.
     :returns: What happened, or would have.
     :raises ConfigError: When the existing file is a symlink, has an illegal
-        marker topology, is not valid UTF-8, is not a regular file, or stands
-        at the path on a platform whose missing open guards make reading it
-        unsafe.
+        marker topology, is not valid UTF-8, is not a regular file, carries a
+        second hard link, or stands at the path on a platform whose missing
+        open guards make reading it unsafe.
     :raises OSError: When the ignore file cannot be opened, or the write cannot
         be published — a permission denied on the root, a filesystem with no
         space left. Left to the group edge, which renders an OSError with its

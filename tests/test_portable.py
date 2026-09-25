@@ -251,6 +251,33 @@ def test_a_link_planted_after_the_check_is_refused_by_the_read(
     assert written == []
 
 
+def test_a_hardlinked_ignore_file_is_refused_by_the_read(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    """The caller-level shape of the nlink guard, which no symlink test covers.
+
+    os.link needs no read permission on its source, so a second name planted
+    here would have had this command read a file the planter cannot, splice it
+    into the block, and print the git commands to commit it. The cost is that a
+    hardlink snapshot backup (cp -al, rsnapshot) now refuses rather than being
+    silently de-linked by the write.
+    """
+    secret = config_tree.root / "secret.txt"
+    secret.write_text("BEGIN PRIVATE KEY\n")
+    path = config_tree.root / ".gitignore"
+    os.link(secret, path)
+    written = _record_writes(monkeypatch)
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_portable_ignore(config_tree)
+
+    assert "more than one name" in excinfo.value.message
+    assert str(path) in excinfo.value.message
+    assert "PRIVATE" not in excinfo.value.message
+    assert secret.read_text() == "BEGIN PRIVATE KEY\n"
+    assert written == []
+
+
 def test_without_the_open_guards_an_ignore_file_is_created_but_never_refreshed(
     config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
 ):

@@ -23,6 +23,17 @@ _LINK_FALLBACK_ERRNOS = frozenset(
     | ({getattr(errno, "ENOTSUP")} if hasattr(errno, "ENOTSUP") else set())  # noqa: B009
 )
 
+#: Platform policy for the three availability constants in this package
+#: (_FASTPATH_AVAILABLE here, _LOCK_AVAILABLE below, _PTY_AVAILABLE in
+#: runner.py): a missing facility that invalidates a *guarantee* fails closed,
+#: and one that costs only *convenience* degrades. That is why these three do
+#: not agree and should not be made to. Failing closed on the lock would turn
+#: every create into an error on a mount that cannot lock; degrading the
+#: no-follow read would hand back bytes it cannot prove came from the file it
+#: stat'd. The package declares POSIX in its classifiers accordingly: Windows
+#: has none of these facilities, and there write_portable_ignore can create an
+#: absent ignore file but not refresh one that is already there.
+
 #: True only where BOTH guard flags exist. Opening a target whose type is not
 #: known in advance needs both: O_NOFOLLOW so a symlinked target is never
 #: opened, O_NONBLOCK so a FIFO target never blocks the open. Where either is
@@ -54,8 +65,10 @@ def _lock_supported() -> bool:
 #: True only where fcntl.flock exists. Where it does not, name_lock is a no-op
 #: and the writers fall back to their post-publish collision checks alone: the
 #: both-processes-survive race stays closed, while the killed-mid-window case
-#: and the adopter residual do not. Same degrade-silently posture as
-#: _FASTPATH_AVAILABLE above and _PTY_AVAILABLE in runner.py.
+#: and the adopter residual do not. That is a silent degrade, and so is
+#: _PTY_AVAILABLE's in runner.py. _FASTPATH_AVAILABLE above is the one that
+#: declines instead, because a guard it cannot apply is a guarantee it cannot
+#: make. The split is deliberate, not an oversight.
 _LOCK_AVAILABLE = _lock_supported()
 
 #: Read at call time, not bound as a default argument, so a test can shorten it.
@@ -192,14 +205,16 @@ def read_text_utf8(path: Path, *, exact_newlines: bool = False) -> str:
 
 
 def read_text_utf8_nofollow(path: Path) -> str | None:
-    """Read ``path`` as UTF-8 verbatim, refusing a symlink.
+    """Read ``path`` as UTF-8 verbatim, refusing a symlink or a second hard link.
 
     Decoding and byte-exact newline handling are :func:`read_text_utf8` with
     ``exact_newlines=True``; the refusal of a non-regular file is
     :func:`require_regular_file`. What differs on the guarded arm is that both
     are decided on an open descriptor rather than on the name, so neither
     answer can go stale between the test and the read. Neither helper is called
-    on the other arm, which makes no open and so has nothing to decide.
+    on the other arm, which makes no open and so has nothing to decide. The
+    third check, on the link count, has no helper analogue: it exists only
+    here, because only here is there a descriptor to count a file's names on.
 
     That is the whole of its purpose. A caller that tests a path and then opens
     it has made two syscalls, and a symlink planted between them is resolved by
@@ -220,9 +235,9 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
     :param path: The file to read.
     :returns: The decoded text, or ``None`` when nothing is at ``path``.
     :raises ConfigError: When a symlink stands at ``path``, when what is there
-        is not a regular file, when the bytes are not valid UTF-8, or — on a
-        platform lacking the guard constants — when anything at all stands at
-        ``path``.
+        is not a regular file, when it is a regular file carrying a second hard
+        link, when the bytes are not valid UTF-8, or — on a platform lacking the
+        guard constants — when anything at all stands at ``path``.
     """
     flags = nofollow_read_flags()
     if flags is None:
@@ -264,13 +279,41 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
         ) from error
 
     with os.fdopen(fd, encoding="utf-8", newline="") as handle:
-        # On the descriptor, so a swap after the open cannot make this true
-        # about a file other than the one about to be read. O_NONBLOCK is why
-        # a FIFO reaches the check at all instead of parking the open.
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+        st_fd = os.fstat(handle.fileno())
+        # On the descriptor, so a swap after the open cannot make either answer
+        # true about a file other than the one about to be read. O_NONBLOCK is
+        # why a FIFO reaches the check at all instead of parking the open.
+        if not stat.S_ISREG(st_fd.st_mode):
             raise ConfigError(
                 f"Not a regular file: {path}",
                 hint="Remove or rename whatever is at that path.",
+            )
+        # O_NOFOLLOW declines a symlink and nothing else, so a second hard link
+        # to a file this user can read and its planter cannot passes every check
+        # above. os.link needs no read permission on its source, which is what
+        # makes that a confused-deputy route and not merely an odd topology.
+        # Refusing here rather than at the write is deliberate, and it is not
+        # free: a hardlink snapshot backup (cp -al, rsnapshot) leaves the live
+        # file at nlink > 1, and a root whose block is already current is never
+        # rewritten, so such a file used to survive indefinitely. Allowing the
+        # read and refusing only the write would keep that case working, at the
+        # price of auditing every consumer -- present and future -- for anywhere
+        # the bytes could surface. The chokepoint is the only placement that
+        # holds without that audit.
+        if st_fd.st_nlink != 1:
+            raise ConfigError(
+                f"File has more than one name: {path}",
+                hint=(
+                    "This path is a second name for a file that has another, "
+                    "so reading it would disclose that file's contents -- "
+                    "including a file that whoever made the link cannot read "
+                    "themselves. If you did not make it, delete this path "
+                    "rather than copying it: a copy carries those contents "
+                    "into the file you go on to commit. A hardlink snapshot "
+                    "backup (cp -al, rsnapshot) is the usual innocent cause, "
+                    "and there copying to a new path and moving it back is "
+                    "the way to break the link."
+                ),
             )
         try:
             return handle.read()
@@ -756,14 +799,16 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         parent it will not resolve — a loop, or a chain past its link budget. A FIFO is the shape
         that never escapes, at any mode. A parent this user may not search hides whatever stands
         below it, so the whole directory degrades rather than refusing or raising. All of that
-        assumes both open guards, and so does every promise above it. POSIX requires both, and
-        ``fcntl`` — which gates this function entirely — ships only where POSIX does, so the
-        guardless create is defensive rather than reachable, and nothing in the suite drives it
-        either: that open takes the module constants directly, so patching ``_FASTPATH_AVAILABLE`` —
-        the substitution that reaches the read-only retry — leaves it exactly as it was. Which shape
-        it refuses there is therefore neither promised nor tested, deliberately: the open resolves a
-        symlink that the ``lstat`` behind it does not, so the two halves of that arm disagree about
-        what is standing at the path, and no single rule covers both.
+        assumes both open guards, as does every promise above it bar the two about their absence:
+        the guardless no-op, and the guardless platform where an unopenable regular file goes
+        unrefused. POSIX requires both, and ``fcntl`` — which gates this function entirely — ships
+        only where POSIX does, so the guardless create is defensive rather than reachable, and
+        nothing in the suite drives it either: that open takes the module constants directly, so
+        patching ``_FASTPATH_AVAILABLE`` — the substitution that reaches the read-only retry —
+        leaves it exactly as it was. Which shape it refuses there is therefore neither promised nor
+        tested, deliberately: the open resolves a symlink that the ``lstat`` behind it does not, so
+        the two halves of that arm disagree about what is standing at the path, and no single rule
+        covers both.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
         symlink planted at ``path``, a socket or a device node the kernel will
