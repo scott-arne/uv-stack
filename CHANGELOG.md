@@ -101,6 +101,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `stack doctor` reports an environment whose `stack.txt` is not a regular file.
   Such an environment is dropped from every listing in the program, and doctor
   skipped it on the same probe and printed "No problems detected."
+- `stack doctor` reports an env-like directory under `envs/` that has no
+  `stack.txt` at all -- one holding a `requirements.in` or an `environment.yml`,
+  so a sync ran there. It is dropped from every listing for the same reason,
+  which left `stack env sync` answering that the environment does not exist
+  while its own compiled lock sat beside it. A directory under `envs/` with no
+  such marker is still not reported: it is not a broken environment, it is not
+  an environment.
 - Every YAML loader failure on a profile or bundle becomes a ConfigError. Only
   `YAMLError` was converted before, so a document whose constructor raises
   something else -- a date of `2020-99-99`, or `!!bool "nope"` -- came out of
