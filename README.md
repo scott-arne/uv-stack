@@ -592,8 +592,11 @@ machine that cloned the root.
 
 A `.gitignore` that carries a second **hard link** is refused too. A hard link
 can be created without permission to read what it points at, so reading through
-one could copy a file you can read -- and whoever created the link cannot --
-into a file you are about to commit.
+one could copy a file you can read — and whoever created the link cannot — into
+a file you are about to commit. The same refusal catches an innocent case: a
+hardlink snapshot backup such as `cp -al` or `rsnapshot` leaves every file it
+covers with a second link, so a `.gitignore` under one must be de-linked (copy
+it to a new path and move it back) before the command will refresh it.
 
 An empty `profiles/`, `bundles/`, or `envs/` also gets a `.gitkeep`. Git tracks
 files and not directories, so without one the directory would simply be absent

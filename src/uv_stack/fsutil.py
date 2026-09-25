@@ -205,14 +205,16 @@ def read_text_utf8(path: Path, *, exact_newlines: bool = False) -> str:
 
 
 def read_text_utf8_nofollow(path: Path) -> str | None:
-    """Read ``path`` as UTF-8 verbatim, refusing a symlink.
+    """Read ``path`` as UTF-8 verbatim, refusing a symlink or a second hard link.
 
     Decoding and byte-exact newline handling are :func:`read_text_utf8` with
     ``exact_newlines=True``; the refusal of a non-regular file is
     :func:`require_regular_file`. What differs on the guarded arm is that both
     are decided on an open descriptor rather than on the name, so neither
     answer can go stale between the test and the read. Neither helper is called
-    on the other arm, which makes no open and so has nothing to decide.
+    on the other arm, which makes no open and so has nothing to decide. The
+    third check, on the link count, has no helper analogue: it exists only
+    here, because only here is there a descriptor to count a file's names on.
 
     That is the whole of its purpose. A caller that tests a path and then opens
     it has made two syscalls, and a symlink planted between them is resolved by
@@ -304,10 +306,13 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
                 hint=(
                     "This path is a second name for a file that has another, "
                     "so reading it would disclose that file's contents -- "
-                    "including a file whose other writer cannot read it. A "
-                    "hardlink snapshot backup is the usual innocent cause. "
-                    "Copy the file to a new path and move it back to break "
-                    "the link."
+                    "including a file that whoever made the link cannot read "
+                    "themselves. If you did not make it, delete this path "
+                    "rather than copying it: a copy carries those contents "
+                    "into the file you go on to commit. A hardlink snapshot "
+                    "backup (cp -al, rsnapshot) is the usual innocent cause, "
+                    "and there copying to a new path and moving it back is "
+                    "the way to break the link."
                 ),
             )
         try:

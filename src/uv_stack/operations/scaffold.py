@@ -51,10 +51,10 @@ def validate_name(kind: str, name: str) -> None:
             f"Invalid {kind} name: '{name}'",
             hint=(
                 "Names are file stems: no path separators, dot segments, "
-                "':', '@', whitespace, or leading '-'. A directory that "
-                "already carries such a name is still listed, because hiding "
-                "it would be no easier to act on — rename it on disk to use "
-                "it by name."
+                "':', '@', whitespace, or leading '-'. Anything already on "
+                "disk under such a name stays listed, because hiding it "
+                "would be no easier to act on; renaming it on disk is what "
+                "makes it nameable."
             ),
         )
 
