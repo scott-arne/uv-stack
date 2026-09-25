@@ -590,6 +590,11 @@ A `.gitignore` that is a *symlink* is refused rather than written or replaced:
 git commits the link itself, so the rules it points at would never reach the
 machine that cloned the root.
 
+A `.gitignore` that carries a second **hard link** is refused too. A hard link
+can be created without permission to read what it points at, so reading through
+one could copy a file you can read -- and whoever created the link cannot --
+into a file you are about to commit.
+
 An empty `profiles/`, `bundles/`, or `envs/` also gets a `.gitkeep`. Git tracks
 files and not directories, so without one the directory would simply be absent
 from the clone, and the bring-up above would report it as a missing directory.

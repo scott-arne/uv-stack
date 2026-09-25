@@ -222,9 +222,9 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
     :param path: The file to read.
     :returns: The decoded text, or ``None`` when nothing is at ``path``.
     :raises ConfigError: When a symlink stands at ``path``, when what is there
-        is not a regular file, when the bytes are not valid UTF-8, or — on a
-        platform lacking the guard constants — when anything at all stands at
-        ``path``.
+        is not a regular file, when it is a regular file carrying a second hard
+        link, when the bytes are not valid UTF-8, or — on a platform lacking the
+        guard constants — when anything at all stands at ``path``.
     """
     flags = nofollow_read_flags()
     if flags is None:
@@ -266,13 +266,38 @@ def read_text_utf8_nofollow(path: Path) -> str | None:
         ) from error
 
     with os.fdopen(fd, encoding="utf-8", newline="") as handle:
-        # On the descriptor, so a swap after the open cannot make this true
-        # about a file other than the one about to be read. O_NONBLOCK is why
-        # a FIFO reaches the check at all instead of parking the open.
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+        st_fd = os.fstat(handle.fileno())
+        # On the descriptor, so a swap after the open cannot make either answer
+        # true about a file other than the one about to be read. O_NONBLOCK is
+        # why a FIFO reaches the check at all instead of parking the open.
+        if not stat.S_ISREG(st_fd.st_mode):
             raise ConfigError(
                 f"Not a regular file: {path}",
                 hint="Remove or rename whatever is at that path.",
+            )
+        # O_NOFOLLOW declines a symlink and nothing else, so a second hard link
+        # to a file this user can read and its planter cannot passes every check
+        # above. os.link needs no read permission on its source, which is what
+        # makes that a confused-deputy route and not merely an odd topology.
+        # Refusing here rather than at the write is deliberate, and it is not
+        # free: a hardlink snapshot backup (cp -al, rsnapshot) leaves the live
+        # file at nlink > 1, and a root whose block is already current is never
+        # rewritten, so such a file used to survive indefinitely. Allowing the
+        # read and refusing only the write would keep that case working, at the
+        # price of auditing every consumer -- present and future -- for anywhere
+        # the bytes could surface. The chokepoint is the only placement that
+        # holds without that audit.
+        if st_fd.st_nlink != 1:
+            raise ConfigError(
+                f"File has more than one name: {path}",
+                hint=(
+                    "This path is a second name for a file that has another, "
+                    "so reading it would disclose that file's contents -- "
+                    "including a file whose other writer cannot read it. A "
+                    "hardlink snapshot backup is the usual innocent cause. "
+                    "Copy the file to a new path and move it back to break "
+                    "the link."
+                ),
             )
         try:
             return handle.read()

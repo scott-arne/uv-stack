@@ -1938,6 +1938,32 @@ def test_read_text_utf8_nofollow_refuses_a_fifo_without_hanging(tmp_path: Path):
     assert str(path) in excinfo.value.message
 
 
+@pytest.mark.skipif(not _O_NOFOLLOW, reason="requires O_NOFOLLOW")
+def test_read_text_utf8_nofollow_refuses_a_second_hard_link(tmp_path: Path):
+    """A hard link is a regular file to every other check, so nlink guards it."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("BEGIN PRIVATE KEY\n", encoding="utf-8")
+    path = tmp_path / "ignore.txt"
+    os.link(secret, path)
+
+    assert path.stat().st_nlink == 2
+
+    with pytest.raises(ConfigError) as excinfo:
+        read_text_utf8_nofollow(path)
+    assert "more than one name" in str(excinfo.value)
+    assert str(path) in excinfo.value.message
+    assert "PRIVATE" not in excinfo.value.message
+
+
+@pytest.mark.skipif(not _O_NOFOLLOW, reason="requires O_NOFOLLOW")
+def test_read_text_utf8_nofollow_still_reads_a_single_linked_file(tmp_path: Path):
+    """The nlink guard must not refuse the ordinary case."""
+    path = tmp_path / "ignore.txt"
+    path.write_text("ordinary\n", encoding="utf-8")
+
+    assert read_text_utf8_nofollow(path) == "ordinary\n"
+
+
 def test_read_text_utf8_nofollow_names_the_file_on_bad_bytes(tmp_path: Path):
     path = tmp_path / "f.txt"
     path.write_bytes(b"\xff\xfe\n")
