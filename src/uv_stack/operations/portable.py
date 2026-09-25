@@ -14,6 +14,7 @@ they were ignored is a history-touching operation that belongs to the user.
 
 from __future__ import annotations
 
+import errno
 import os
 import shlex
 from dataclasses import dataclass
@@ -35,6 +36,74 @@ KEEPER_NAME = ".gitkeep"
 #: travels. Both uses read this tuple so the two cannot drift: a name added
 #: here starts being ignored and stops being counted in the same edit.
 IGNORED_NAMES = (".DS_Store",)
+
+#: True only where a placeholder can be written into the directory the
+#: emptiness test inspected rather than into whatever its path names by the
+#: time the write happens: O_DIRECTORY and O_NOFOLLOW to open that directory
+#: and refuse a link standing where it was, and dir_fd support on os.open to
+#: create the file relative to the descriptor. Where any is missing
+#: :func:`write_directory_keepers` declines, following the platform policy
+#: stated in fsutil: the anchor is the whole guarantee here, and an unanchored
+#: write is exactly how a placeholder lands outside the config root. What
+#: declining gives up is an empty scaffold directory surviving a clone, which
+#: is the degrade write_portable_ignore already has on the same platforms.
+_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_KEEPER_ANCHOR_AVAILABLE = (
+    bool(_O_DIRECTORY) and bool(_O_NOFOLLOW) and os.open in os.supports_dir_fd
+)
+
+#: Errnos from the anchored open that mean this run lost a race rather than
+#: met a fault: the directory became a symlink (ELOOP) or some other
+#: non-directory (ENOTDIR), it went away (ENOENT), or a concurrent run placed
+#: the keeper first (EEXIST, reachable only through O_EXCL, since a keeper
+#: already there when the scan ran would have counted the directory
+#: non-empty). Skipping is what the is_symlink test gives for the same
+#: situation noticed a moment earlier; anything else is a real error and
+#: propagates.
+_KEEPER_RACE_ERRNOS = frozenset(
+    {errno.ELOOP, errno.ENOTDIR, errno.ENOENT, errno.EEXIST}
+)
+
+
+def _place_keeper(directory: Path) -> bool:
+    """Create an empty ``.gitkeep`` inside ``directory``, following no link.
+
+    The file is created relative to a descriptor opened on ``directory``
+    itself, so it lands in the directory the caller's emptiness test inspected
+    or nowhere at all. :func:`atomic_write` cannot give that: it resolves a
+    path at write time, and threading a ``dir_fd`` through it would change a
+    helper five other call sites share. Nor is it needed — a zero-byte
+    placeholder has no content for a reader to catch half-written, which is
+    the only thing atomicity buys.
+
+    ``O_EXCL`` covers the other half of the same window, the keeper's own
+    name. Anything standing there appeared after the scan, since a keeper
+    already present would have counted the directory non-empty, so creating is
+    the only outcome that can be right. Without it a symlink planted under
+    that name would be opened instead — with the invoking user's permissions,
+    and then reported as a placeholder written.
+
+    :param directory: A directory that existed and was empty when tested.
+    :returns: True once the placeholder exists; False when ``directory``
+        stopped being that directory, or gained a keeper, first.
+    :raises OSError: On any failure that is not one of those races.
+    """
+    dir_fd: int | None = None
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW)
+        keeper_fd = os.open(
+            KEEPER_NAME, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644, dir_fd=dir_fd
+        )
+        os.close(keeper_fd)
+    except OSError as exc:
+        if exc.errno in _KEEPER_RACE_ERRNOS:
+            return False
+        raise
+    finally:
+        if dir_fd is not None:
+            os.close(dir_fd)
+    return True
 
 
 def _pattern(config: ConfigRoot, path: Path) -> str:
@@ -453,12 +522,18 @@ def write_directory_keepers(config: ConfigRoot, *, dry_run: bool = False) -> lis
     the wrong place for a second implementation of it.
 
     A scaffold directory that is itself a symlink is skipped. Not only because
-    ``is_dir``, ``iterdir`` and :func:`atomic_write` all follow the final
-    component, so the file lands wherever the link points and may leave the
-    config root entirely — but because there is nothing for a placeholder to
-    do there. Git records the link, not the directory behind it, so the link
-    already survives a clone, and a file written into the target would never
-    travel with it.
+    ``is_dir`` and ``iterdir`` both follow the final component, so the answers
+    they give are the target's — but because there is nothing for a
+    placeholder to do there. Git records the link, not the directory behind
+    it, so the link already survives a clone, and a file written into the
+    target would never travel with it.
+
+    A link planted *after* that test gets the same answer rather than a
+    different one, because :func:`_place_keeper` writes through a descriptor
+    opened on the directory instead of re-resolving its path. On a platform
+    without the flags that needs (:data:`_KEEPER_ANCHOR_AVAILABLE`) no
+    placeholder is written at all: an unanchored write is how one lands
+    outside the config root, and the guarantee is the only reason to make it.
 
     The placeholders are reported but not staged: the untracking sequence
     :func:`next_steps` prints stages ``.gitignore`` alone, on purpose, and
@@ -470,22 +545,21 @@ def write_directory_keepers(config: ConfigRoot, *, dry_run: bool = False) -> lis
     :returns: The placeholders written, or that would be, in directory order.
     :raises OSError: When a scaffolded directory exists but cannot be listed.
     """
+    if not _KEEPER_ANCHOR_AVAILABLE:  # pragma: no cover - POSIX has the flags
+        return []
     written: list[Path] = []
     for directory in (config.profiles_dir, config.bundles_dir, config.envs_dir):
-        # is_symlink is tested first because is_dir answers for the target. A
-        # window remains between this test and the write: a link planted in it
-        # is still followed, since closing that needs a dir_fd threaded through
-        # atomic_write, which five other call sites share. Left open
-        # deliberately -- the loser of that race is a placeholder file, not a
-        # config root's contents.
+        # is_symlink is tested first because is_dir answers for the target.
         if directory.is_symlink() or not directory.is_dir():
             continue
         if any(child.name not in IGNORED_NAMES for child in directory.iterdir()):
             continue
         keeper = directory / KEEPER_NAME
-        written.append(keeper)
-        if not dry_run:
-            atomic_write(keeper, "")
+        # Under dry_run there is no write and so no race to lose; the report
+        # is of what the directory looked like when it was read, which is what
+        # every other line of this listing is too.
+        if dry_run or _place_keeper(directory):
+            written.append(keeper)
     return written
 
 

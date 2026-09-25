@@ -1172,6 +1172,65 @@ def test_a_symlinked_scaffold_directory_gets_no_placeholder(
     assert not (config_tree.bundles_dir / KEEPER_NAME).exists()
 
 
+def test_a_directory_swapped_for_a_link_after_the_check_gets_no_placeholder(
+    tmp_path: Path, config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    """The write is anchored to the directory the emptiness test inspected.
+
+    The test above covers a link that is already there when the check runs.
+    This is the same check losing the race: the link appears in the window
+    after it, which a write by path would still follow, putting the file
+    outside the config root. The placeholder goes through a descriptor opened
+    on the directory itself, so there is no name left to re-resolve.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+    real_iterdir = Path.iterdir
+
+    def swap_after_listing(self: Path):
+        children = list(real_iterdir(self))
+        if self == config_tree.bundles_dir:
+            self.rmdir()
+            self.symlink_to(outside, target_is_directory=True)
+        return iter(children)
+
+    monkeypatch.setattr(Path, "iterdir", swap_after_listing)
+
+    assert write_directory_keepers(config_tree) == []
+    assert not (outside / KEEPER_NAME).exists()
+
+
+def test_a_link_planted_under_the_keeper_name_is_not_opened(
+    tmp_path: Path, config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    """Anchoring closes the directory; O_EXCL closes the name inside it.
+
+    A .gitkeep present when the scan runs makes the directory non-empty, so
+    the only one that can be there at write time arrived in the window. The
+    create refuses it rather than opening whatever it points at and going on
+    to report a placeholder that is really a link.
+    """
+    victim = tmp_path / "victim"
+    victim.write_text("keep me")
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+    real_iterdir = Path.iterdir
+
+    def plant_after_listing(self: Path):
+        children = list(real_iterdir(self))
+        if self == config_tree.bundles_dir:
+            (self / KEEPER_NAME).symlink_to(victim)
+        return iter(children)
+
+    monkeypatch.setattr(Path, "iterdir", plant_after_listing)
+
+    assert write_directory_keepers(config_tree) == []
+    assert victim.read_text() == "keep me"
+    assert (config_tree.bundles_dir / KEEPER_NAME).is_symlink()
+
+
 def test_an_absent_directory_is_left_absent(config_tree: ConfigRoot):
     shutil.rmtree(config_tree.bundles_dir)
 
