@@ -1,0 +1,119 @@
+# Changelog
+
+All notable changes to uv-stack are documented in this file.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.6.0] - 2026-09-24
+
+### Breaking
+
+- `stack show env|profile|bundle NAME` and `stack status NAMES...` now apply
+  the same file-stem rule the create and edit commands apply, so a NAME holding
+  a path separator, a `.` or `..` segment, `:`, `@`, whitespace, or a leading
+  `-` is refused instead of being joined onto the config root and read. A
+  hand-made directory carrying such a name is still listed by `stack list env`
+  and by a bare `stack status`; naming it on the command line is what stopped
+  working, and renaming the directory on disk is what makes it nameable again.
+- `stack upgrade --no-upgrade` and `stack upgrade --upgrade-package PKG` now
+  preserve the pins the published lock already holds. Both previously compiled
+  into an empty file, and `uv pip compile` reads prior pins out of its output
+  file, so either flag silently re-resolved every distribution.
+- A config file that is a directory, a dangling symlink, or a FIFO is now a
+  ConfigError instead of reading as absent. This covers `project-python.txt`,
+  `editor.txt`, and an environment's `python.txt`, `micromamba.txt`, and
+  `channels.txt`, each of which previously fell back to its default while
+  `stack doctor` reported the root clean.
+- `[tool.uv-stack].python` refuses an empty or space-padded value. An empty
+  value previously read as "no preference" and fell through to the machine
+  default; a padded one defeated the version test and was taken to name a
+  micromamba environment.
+- `stack create env|profile|bundle`, `stack init`, and `stack edit` refuse a
+  requirement entry that spans more than one line or ends in a trailing
+  backslash. Both shapes were previously written and rendered into
+  `requirements.in` verbatim, where a continuation swallows the requirement
+  written after it.
+
+### Added
+
+- `stack converge [NAMES]...` creates, builds, and recompiles every environment
+  the config root declares, without a prompt and creating missing environments
+  rather than reporting them as errors, which makes it the first command to run
+  on a freshly cloned config root. It accepts `--dry-run`, `--stop-on-error`,
+  `--strict`, and `--upgrade`.
+- Config roots can declare variables in `variables.txt`, supply this machine's
+  values in `variables.local.txt` or in an exported environment variable of the
+  same name, and reference them as `${NAME}` in profiles, bundles, and
+  `stack.txt`. References are expanded when generating `requirements.in` and
+  when calling `uv add`, but a tracked project's ledger keeps the unexpanded
+  entry so the project travels.
+- `stack config portable` writes a managed `.gitignore` block so a config root
+  can be committed and cloned. It never invokes git itself: it prints the
+  commands for you to run, and `--dry-run` prints the plan without writing.
+- `stack create project` and `stack refresh` warn when the interpreter spec
+  they record names an environment local to this machine, since such a spec
+  will not resolve on another one.
+- `stack doctor` gained diagnostics for sources it cannot read or parse,
+  missing editable checkouts, unsafe variable expansion, and a portable
+  `.gitignore` block that is absent or stale.
+
+### Changed
+
+- `stack show env` prints a note and exits 0 when `requirements.in` cannot be
+  rendered, matching what `stack status` already did. It previously printed the
+  whole description and then exited 1, while `--json` exited 0 on the same
+  root.
+- The upgrade and converge batch summary reports three outcomes rather than
+  two: succeeded, failed, and skipped. A `--dry-run` batch prints the summary
+  too, where it previously printed none and still exited 1 when an environment
+  failed.
+- The package declares POSIX support in its classifiers. `fcntl`, `pty`,
+  `termios`, `O_NOFOLLOW`, and `O_NONBLOCK` are all absent on Windows, where
+  `stack config portable` can create an absent ignore file but cannot refresh
+  an existing one.
+
+### Fixed
+
+- `stack upgrade` publishes `requirements.lock.txt` with the mode every other
+  generated file gets rather than `mkstemp`'s 0600, which on a config root
+  shared with a second account left the lock the one generated file they could
+  not read.
+- `stack upgrade NAME NAME` upgrades that environment once instead of twice.
+- A filesystem error in one environment no longer aborts the whole batch; it is
+  reported in the summary like any other failure.
+- An environment that `--stop-on-error` abandoned after an earlier failure is
+  reported as skipped rather than as a success.
+- `stack doctor` no longer answers for a path it could not read. An unsearchable
+  config root previously turned `profiles/`, `bundles/`, and `envs/` into
+  "missing" errors offering a `mkdir` that would fail for the same reason the
+  stat did, and a top-level directory it could not enumerate produced no finding
+  at all.
+- `stack doctor` no longer calls a `python.txt` that is present but not a
+  regular file missing, a report whose offered repair could not run because the
+  entry was already there.
+- `stack doctor` reports an environment whose `stack.txt` is not a regular file.
+  Such an environment is dropped from every listing in the program, and doctor
+  skipped it on the same probe and printed "No problems detected."
+- Every YAML loader failure on a profile or bundle becomes a ConfigError. Only
+  `YAMLError` was converted before, so a document whose constructor raises
+  something else -- a date of `2020-99-99`, or `!!bool "nope"` -- came out of
+  `stack doctor` as a traceback.
+- `stack create project` resuming an interrupted run keeps editable, VCS, and
+  path entries in `tracking.applied` instead of deleting them, which silently
+  handed ownership of those dependencies back to the user.
+- An environment marker no longer hides a requirement's name from ownership
+  tracking. A `/` or `\` anywhere in the entry, including inside the marker,
+  made it read as a path and so as user-owned.
+
+### Security
+
+- `stack upgrade` validates every NAME before it starts the batch, so a name
+  that would escape the config root is refused rather than used to read another
+  directory's sources and overwrite its generated files.
+- The guarded read behind `stack config portable` refuses an existing
+  `.gitignore` that is a symlink or that carries a second hard link, and
+  refuses outright on a platform without `O_NOFOLLOW` and `O_NONBLOCK` rather
+  than degrading to an unguarded open. A refresh preserves everything outside
+  the managed block byte for byte, so each route would otherwise copy a planted
+  file's contents into the `.gitignore` you go on to commit.
