@@ -25,7 +25,7 @@ from uv_stack.commands import (
 )
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError, ToolError, UvStackError
-from uv_stack.fsutil import atomic_write
+from uv_stack.fsutil import atomic_write, relax_to_conventional_mode
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.create import ensure_env
 from uv_stack.pyversion import is_comparable, parse_python_info, satisfies
@@ -81,7 +81,7 @@ def _should_upgrade_all(options: UpgradeOptions) -> bool:
     return not options.no_upgrade and not options.upgrade_packages
 
 
-def _new_candidate_lock(lock: Path, *, seed: bool) -> Path:
+def _new_candidate_lock(lock: Path, *, seed: bool) -> tuple[Path, bool]:
     """Create a sibling file to compile a candidate lock into.
 
     The candidate is seeded from the published lock when one exists. ``uv pip
@@ -99,15 +99,28 @@ def _new_candidate_lock(lock: Path, *, seed: bool) -> Path:
     :param lock: The lock the candidate will replace once it is complete.
     :param seed: Whether to seed the candidate from the published lock. Pass
         False for a full upgrade, where uv ignores the output file.
-    :returns: Path to the newly created temp file.
+    :returns: The newly created temp file, and whether the published lock's
+        pins actually reached it. Requesting a seed does not guarantee one --
+        an absent lock, or one that is not a regular file, leaves the candidate
+        empty -- and callers that describe the candidate must say what it
+        holds, not what was asked for.
     """
     tmp_fd, tmp_name = tempfile.mkstemp(
         dir=lock.parent, prefix=lock.name + ".", suffix=".tmp"
     )
     os.close(tmp_fd)
     candidate = Path(tmp_name)
+    # mkstemp creates the candidate 0600, and the lock is not a secret: it must
+    # not be the one generated file a second account cannot read, where the
+    # requirements.in written in the same operation lands 0o666 & ~umask
+    # through atomic_write. The relax is defensive rather than load-bearing --
+    # uv pip compile replaces its output file rather than writing into this
+    # inode, so the mode Path.replace publishes is uv's own. Setting it here
+    # keeps the invariant local instead of resting on an undocumented uv
+    # detail: a uv that wrote in place would put 0600 on the user's root.
+    relax_to_conventional_mode(candidate)
     if not seed:
-        return candidate
+        return candidate, False
     try:
         # One lookup, not two. Checking the pathname and then opening it lets a
         # FIFO swapped in between park the open with no timeout and no unwind,
@@ -121,46 +134,51 @@ def _new_candidate_lock(lock: Path, *, seed: bool) -> Path:
         except FileNotFoundError:
             # Covers both a lock never published and one removed between the
             # caller's decision to seed and this open.
-            return candidate
+            return candidate, False
+        copied = False
         try:
             if stat.S_ISREG(os.fstat(fd).st_mode):
                 with os.fdopen(fd, "rb") as handle:
                     fd = -1  # ownership transferred to the file object
                     pins = handle.read()
                 candidate.write_bytes(pins)
+                copied = True
         finally:
             if fd != -1:
                 os.close(fd)
     except BaseException:
         candidate.unlink(missing_ok=True)
         raise
-    return candidate
+    return candidate, copied
 
 
-def _explain_candidate_lock(error: BaseException, lock: Path, *, seeded: bool) -> None:
+def _explain_candidate_lock(
+    error: BaseException, lock: Path, *, seeded: bool, copied: bool
+) -> None:
     """Point a failed compile at the published lock behind the temp file.
 
     uv compiles into a ``.tmp`` sibling of the lock that the unwind deletes on
     the way out, so its diagnostics name a path that no longer exists and never
-    mention the lock. What that path *was* depends on the mode: a seeded copy
-    of the lock, or a new empty file that a full upgrade resolves into from
-    scratch. Calling the latter a copy would describe a read that never
-    happened, and the recovery advice only helps when a full upgrade is still
-    an escape route rather than the mode that just failed. Two CLI commands now
+    mention the lock. What that path *was* takes three forms, and the two
+    arguments below separate them because the request and the outcome come
+    apart: a seeded copy of the lock; a new empty file a full upgrade resolves
+    into from scratch; or a new empty file a seeded mode had to settle for
+    because there was no lock to read. Calling either empty case a copy would
+    describe a read that never happened and would send the user to fix a parse
+    error in a file that may not exist, while blaming the third case on the
+    mode would claim pins were ignored when there were none. Two CLI commands
     reach this code and the spelling that escapes a seeded compile differs
-    between them, so the hint names both.
+    between them, so that hint names both.
 
     :param error: The exception about to be re-raised. Anything that is not a
         :class:`ToolError`, any error that already carries a hint, and any
         error from a command other than the compile, is left alone.
     :param lock: The published lock the candidate stands in for.
     :param seeded: Whether seeding was REQUESTED — the same value the caller
-        passed as ``seed`` to :func:`_new_candidate_lock`, not whether a copy
-        was made. The two differ when the lock is absent or is not a regular
-        file, where that function returns an empty candidate anyway; the
-        seeded wording then names a copy that did not happen. Narrow enough to
-        leave alone, but it is why this parameter is the request, not the
-        outcome.
+        passed as ``seed`` to :func:`_new_candidate_lock`.
+    :param copied: Whether the lock's pins actually reached the candidate — the
+        second element :func:`_new_candidate_lock` returns. False with
+        ``seeded`` true is the absent-or-irregular lock.
     """
     # The argv PREFIX, not membership: micromamba_remove and
     # micromamba_python_path both place the env name in argv as a bare element,
@@ -172,7 +190,7 @@ def _explain_candidate_lock(error: BaseException, lock: Path, *, seeded: bool) -
         and error.hint is None
         and error.command[:3] == ["uv", "pip", "compile"]
     ):
-        if seeded:
+        if copied:
             error.hint = (
                 f"uv compiles into a copy of {lock}, so a '.tmp' path above "
                 f"names that copy, not a file you are missing. If {lock.name} "
@@ -181,6 +199,14 @@ def _explain_candidate_lock(error: BaseException, lock: Path, *, seeded: bool) -
                 "command you ran, keeping the same environment names, and "
                 "either drop --no-upgrade/--upgrade-package from "
                 "'stack upgrade' or add --upgrade to 'stack converge'."
+            )
+        elif seeded:
+            error.hint = (
+                f"uv compiles into a new empty file beside {lock}, so a '.tmp' "
+                "path above names that file, not one you are missing. There "
+                f"was nothing to seed it with: {lock.name} is absent or is not "
+                "a regular file, so this run re-resolved from scratch despite "
+                "being asked to preserve pins."
             )
         else:
             error.hint = (
@@ -342,7 +368,14 @@ def upgrade_env(
             planned.append(micromamba_remove(env_name))
             planned.append(micromamba_create(config.env_environment_yml(env_name)))
         else:
-            if options.create:
+            # ensure_env creates only when the env is missing, so planning the
+            # create unconditionally described a step the real run declines to
+            # issue -- the dishonesty the drift guard above refuses in its own
+            # case. The answer is already paid for: that guard probed the
+            # interpreter and kept it. None covers both "not there" and "could
+            # not ask", so an unknown answer keeps the create and a dry run on
+            # a machine without micromamba still plans the whole sequence.
+            if options.create and probed_python is None:
                 planned.append(micromamba_create(config.env_environment_yml(env_name)))
             planned.append(
                 uv_pip_compile(
@@ -367,7 +400,7 @@ def upgrade_env(
             # still standing. This narrows the window; it does not close it —
             # micromamba create or uv pip sync can still fail once the old
             # environment is gone.
-            tmp_lock = _new_candidate_lock(lock, seed=seeded)
+            tmp_lock, copied = _new_candidate_lock(lock, seed=seeded)
             try:
                 runner.run(
                     uv_pip_compile_for_version(
@@ -392,7 +425,7 @@ def upgrade_env(
             except BaseException as error:
                 if tmp_lock.exists():
                     tmp_lock.unlink()
-                _explain_candidate_lock(error, lock, seeded=seeded)
+                _explain_candidate_lock(error, lock, seeded=seeded, copied=copied)
                 raise
         else:
             ensure_env(
@@ -404,7 +437,7 @@ def upgrade_env(
 
             # Compile to a temp lock, then atomically replace, so a failed compile never
             # corrupts an existing lockfile.
-            tmp_lock = _new_candidate_lock(lock, seed=seeded)
+            tmp_lock, copied = _new_candidate_lock(lock, seed=seeded)
             try:
                 runner.run(
                     uv_pip_compile(
@@ -419,7 +452,7 @@ def upgrade_env(
             except BaseException as error:
                 if tmp_lock.exists():
                     tmp_lock.unlink()
-                _explain_candidate_lock(error, lock, seeded=seeded)
+                _explain_candidate_lock(error, lock, seeded=seeded, copied=copied)
                 raise
 
         runner.run(uv_pip_sync(python, lock))

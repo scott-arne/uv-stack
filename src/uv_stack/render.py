@@ -24,6 +24,10 @@ def render_requirements_in(
 ) -> str:
     """Render the generated ``requirements.in`` for one environment.
 
+    Each profile's packages are expanded inline — uv cannot read the YAML
+    profile files — under a ``# Profile: <name>`` comment. The environment's
+    ``requirements.local.in`` is referenced with ``-r`` only if it exists.
+
     This is the single boundary where ``${NAME}`` references are substituted:
     everything uv-stack stores durably keeps the unexpanded text, and only the
     file uv reads holds machine-specific paths.
@@ -36,22 +40,38 @@ def render_requirements_in(
         silently skip expansion. ``None`` is for callers that only need to know
         the render succeeds — ``stack edit``, which must stay machine-independent.
     :returns: The file contents, newline-terminated.
-    :raises ConfigError: When ``variables`` is supplied and an entry is refused,
-        references an undeclared name, or references a name with no local value.
+    :raises ConfigError: When a resolved profile cannot be loaded, which does
+        not depend on ``variables`` — the profiles are read either way. And,
+        when ``variables`` is supplied, on anything :func:`expand_all` refuses:
+        a misplaced reference, an undeclared name, a declared name with no
+        value on this machine, or a value whose substitution would change which
+        options an entry carries.
     """
     lines = [_HEADER, _EDIT_HINT, ""]
 
     sections: list[tuple[str, list[str]]] = []
+    # Positionally aligned with the flattened entries below, so a refusal can
+    # name the profile each offender came from. The inline section has no
+    # single file -- its entries arrive from bundles and the env's stack.txt
+    # alike -- so it contributes None rather than a misleading path.
+    origins: list[str | None] = []
     for name in stack.profiles:
         profile = config.load_profile(name)
-        sections.append((f"# Profile: {name}", list(profile.includes)))
+        includes = list(profile.includes)
+        sections.append((f"# Profile: {name}", includes))
+        origins += [str(config.profile_path(name))] * len(includes)
     if stack.inline:
         sections.append(("# Inline requirements from bundles/stack", list(stack.inline)))
+        origins += [None] * len(stack.inline)
 
     if variables is not None:
         # Expanded as one sequence so a single error names every offender in
         # the file rather than only those in the first bad profile.
-        flat = expand_all([entry for _, entries in sections for entry in entries], variables)
+        flat = expand_all(
+            [entry for _, entries in sections for entry in entries],
+            variables,
+            sources=origins,
+        )
         cursor = 0
         expanded: list[tuple[str, list[str]]] = []
         for header, entries in sections:

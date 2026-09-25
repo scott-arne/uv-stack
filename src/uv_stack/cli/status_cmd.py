@@ -10,6 +10,7 @@ from rich.text import Text
 from uv_stack.cli._complete import complete_env_names
 from uv_stack.cli._render import console, echo, render_table
 from uv_stack.config import ConfigRoot
+from uv_stack.operations.scaffold import validate_name
 from uv_stack.operations.status import compute_status
 from uv_stack.runner import SubprocessRunner
 
@@ -20,6 +21,14 @@ from uv_stack.runner import SubprocessRunner
 @click.pass_obj
 def status(config: ConfigRoot, names: tuple[str, ...], as_json: bool) -> None:
     """Show each shared environment's build state (drift, lock, existence)."""
+    for name in names:
+        # compute_status joins each NAME onto <root>/envs and reads what it
+        # lands on, so the file-stem rule upgrade and converge apply to their
+        # own NAMEs holds here too. Refused up front rather than reported as
+        # one more "config error" row: a name that cannot name an environment
+        # is a bad argument, not a config that failed to load. Discovered names
+        # need no check -- list_envs yields single directory components.
+        validate_name("environment", name)
     statuses = compute_status(config, SubprocessRunner(), list(names) or None)
     if as_json:
         payload = [

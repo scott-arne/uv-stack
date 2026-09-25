@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import os
 import shutil
+import stat
 from pathlib import Path
 
 import pytest
@@ -544,6 +545,48 @@ def test_upgrade_dry_run_recreate_plan_leads_with_the_compile(config_tree: Confi
         uv_pip_sync("<env-python>", lock),
         uv_pip_check("<env-python>"),
     ]
+
+
+def test_upgrade_dry_run_omits_the_create_for_an_env_that_is_already_there(
+    config_tree: ConfigRoot,
+):
+    """A plan must never describe commands the real run would refuse to issue.
+
+    ensure_env probes first and creates only what is missing, so --create
+    against an existing env issues no create at all. The plan claimed one
+    anyway, off the flag alone, and 'micromamba create' over a live env is not
+    the no-op that omission would make it look like.
+    """
+    rec = RecordingRunner(responder=_existing_env_responder)
+    result = upgrade_env(
+        config_tree, rec, "main", UpgradeOptions(dry_run=True, create=True)
+    )
+    lock = config_tree.env_requirements_lock("main")
+    assert result.planned == [
+        uv_pip_compile(
+            "<env-python>", config_tree.env_requirements_in("main"), lock, upgrade=True
+        ),
+        uv_pip_sync("<env-python>", lock),
+        uv_pip_check("<env-python>"),
+    ]
+
+
+def test_upgrade_dry_run_keeps_the_create_when_the_env_cannot_be_probed(
+    config_tree: ConfigRoot,
+):
+    # The suppression is conditioned on a positive answer, not on the absence
+    # of a negative one. Without micromamba there is no answer, and the honest
+    # plan is the one the run would follow if the env turns out to be missing.
+    def _spawn_failure(cmd: Command) -> CommandResult:
+        raise ToolError("Could not run micromamba.", command=cmd.args, returncode=127)
+
+    rec = RecordingRunner(responder=_spawn_failure)
+    result = upgrade_env(
+        config_tree, rec, "main", UpgradeOptions(dry_run=True, create=True)
+    )
+    assert result.planned[0] == micromamba_create(
+        config_tree.env_environment_yml("main")
+    )
 
 
 def test_upgrade_dry_run_create_plan_is_unchanged(config_tree: ConfigRoot):
@@ -3026,10 +3069,32 @@ def test_candidate_lock_is_seeded_from_the_published_lock(config_tree: ConfigRoo
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("numpy==1.26.0\n")
-    candidate = _new_candidate_lock(lock, seed=True)
+    candidate, copied = _new_candidate_lock(lock, seed=True)
     try:
+        assert copied is True
         assert candidate.read_text() == "numpy==1.26.0\n"
         assert candidate != lock
+    finally:
+        candidate.unlink(missing_ok=True)
+
+
+def test_candidate_lock_carries_the_conventional_file_mode(config_tree: ConfigRoot):
+    """The candidate comes back at 0o666 & ~umask, not at mkstemp's 0600.
+
+    That is _new_candidate_lock's own contract and the whole of what this
+    asserts. It is not a check on the published lock's mode: uv pip compile
+    replaces its output file rather than writing into this inode, so the mode
+    that reaches the user is uv's to set. The relax guards the case where that
+    stops holding -- a uv that wrote in place would publish 0600 onto a root
+    whose every other generated file is readable.
+    """
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    candidate, _ = _new_candidate_lock(lock, seed=False)
+    try:
+        umask = os.umask(0)
+        os.umask(umask)
+        assert stat.S_IMODE(candidate.stat().st_mode) == 0o666 & ~umask
     finally:
         candidate.unlink(missing_ok=True)
 
@@ -3038,8 +3103,10 @@ def test_candidate_lock_is_empty_when_no_lock_is_published(config_tree: ConfigRo
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
     assert not lock.exists()
-    candidate = _new_candidate_lock(lock, seed=True)
+    candidate, copied = _new_candidate_lock(lock, seed=True)
     try:
+        # Seeding was requested; the hint wording keys off this, not the mode.
+        assert copied is False
         assert candidate.read_text() == ""
     finally:
         candidate.unlink(missing_ok=True)
@@ -3110,8 +3177,9 @@ def test_candidate_lock_is_empty_when_lock_path_is_a_directory(config_tree: Conf
     lock = config_tree.env_requirements_lock("main")
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.mkdir()  # A directory stands in for any non-regular file.
-    candidate = _new_candidate_lock(lock, seed=True)
+    candidate, copied = _new_candidate_lock(lock, seed=True)
     try:
+        assert copied is False
         assert candidate.read_text() == ""
     finally:
         candidate.unlink(missing_ok=True)
@@ -3134,8 +3202,9 @@ def test_candidate_lock_survives_concurrent_lock_removal(
 
     monkeypatch.setattr(os, "open", open_losing_the_race)
 
-    candidate = _new_candidate_lock(lock, seed=True)
+    candidate, copied = _new_candidate_lock(lock, seed=True)
     try:
+        assert copied is False
         assert candidate.read_text() == ""
     finally:
         candidate.unlink(missing_ok=True)
@@ -3233,6 +3302,48 @@ def test_a_failed_compile_hint_describes_an_unseeded_candidate(
     # bare "copy" could match a tmp_path component rather than the wording.
     assert "copy of" not in hint
     assert "re-run without" not in hint
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_a_failed_compile_hint_does_not_claim_a_copy_that_never_happened(
+    config_tree: ConfigRoot, recreate: bool
+):
+    """Seeding was requested, but there was no published lock to seed from.
+
+    The wording follows what the candidate actually holds, not the mode that
+    asked for it. An absent lock leaves the candidate empty whatever
+    --no-upgrade requested, and the seeded advice would send the user to fix a
+    parse error in a file that is not there.
+    """
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    assert not lock.exists()
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    runner = RecordingRunner(responder=responder)
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(
+            config_tree,
+            runner,
+            "main",
+            UpgradeOptions(recreate=recreate, no_upgrade=True),
+        )
+    hint = caught.value.hint
+    assert hint is not None
+    assert str(lock) in hint
+    assert "new empty file" in hint
+    assert "copy of" not in hint
+    assert "re-run as a full upgrade" not in hint
+    # Nor the full-upgrade explanation: the pins were not ignored, there were
+    # none. Saying so is the only way the user learns why a --no-upgrade run
+    # came back with everything re-resolved.
+    assert "a full upgrade ignores the existing pins" not in hint
+    assert "nothing to seed" in hint
     assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
 
 
@@ -3342,8 +3453,9 @@ def test_candidate_lock_is_empty_when_lock_path_is_a_fifo(config_tree: ConfigRoo
     os.mkfifo(lock)
     try:
         with _deadline(5.0):
-            candidate = _new_candidate_lock(lock, seed=True)
+            candidate, copied = _new_candidate_lock(lock, seed=True)
         try:
+            assert copied is False
             assert candidate.read_text() == ""
         finally:
             candidate.unlink(missing_ok=True)

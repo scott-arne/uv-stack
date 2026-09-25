@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -309,6 +310,37 @@ def test_repair_converts_legacy_bundle(config_tree: ConfigRoot):
     repair(config_tree, diagnose(config_tree))
     assert config_tree.load_bundle("oldb").includes == ["ds", "chem"]
     assert (config_tree.bundles_dir / "oldb.bundle.bak").is_file()
+
+
+@pytest.mark.parametrize(
+    ("directory", "filename", "kind"),
+    [
+        ("profiles_dir", "old.in", "legacy-profile"),
+        ("bundles_dir", "oldb.bundle", "legacy-bundle"),
+    ],
+)
+def test_repair_skips_converting_an_entry_uv_stack_would_not_write(
+    config_tree: ConfigRoot, directory: str, filename: str, kind: str
+):
+    """The conversion is a durable writer of human-typed entries like any other.
+
+    ``init``, ``create``, and ``edit`` all refuse this entry, so publishing it
+    as YAML would leave behind a generated file every later command rejects --
+    and the refusal would name that file rather than the legacy one the user
+    actually wrote, which the conversion has by then hidden as a ``.bak``.
+    """
+    legacy = getattr(config_tree, directory) / filename
+    legacy.write_text("numpy\n-r ${DEV}/extra.txt\n")
+    actions = repair(config_tree, diagnose(config_tree))
+    skipped = [a for a in actions if a.finding.kind == kind]
+    assert skipped and not skipped[0].applied
+    assert skipped[0].reason is not None
+    assert "uv-stack will not write" in skipped[0].reason
+    assert "-r ${DEV}/extra.txt" in skipped[0].reason
+    # Nothing published and nothing moved, so the file to fix is where it was.
+    assert legacy.read_text() == "numpy\n-r ${DEV}/extra.txt\n"
+    assert not legacy.with_suffix(".yaml").exists()
+    assert not legacy.with_name(legacy.name + ".bak").exists()
 
 
 def test_repair_skips_legacy_profile_when_bundle_exists_for_stem(config_tree: ConfigRoot):
@@ -1451,6 +1483,49 @@ def test_an_unparseable_variables_file_is_reported_not_raised(
     )
 
 
+def test_a_broken_local_variables_file_is_blamed_on_itself(config_tree: ConfigRoot):
+    """The finding names the file at fault, not the call doctor happened to make.
+
+    load_variables reads two files, and the finding was built from the
+    declaration path unconditionally -- so a malformed variables.local.txt was
+    reported as "Cannot read variables.txt", with the message then naming the
+    real file in its tail. A reader is told to fix a file that is fine, and the
+    path a JSON consumer acts on is the wrong one.
+    """
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV /srv/src\n")
+
+    finding = next(f for f in diagnose(config_tree) if f.kind == "unparseable-source")
+
+    assert finding.path == config_tree.variables_local_path()
+    assert finding.message.startswith(f"Cannot read {config_tree.variables_local_path()}:")
+
+
+def test_a_broken_declaration_file_is_still_blamed_on_itself(config_tree: ConfigRoot):
+    # The control: blame follows the failing read, and the first read is the
+    # declarations, so this one must keep naming variables.txt.
+    config_tree.variables_path().write_text("not a name\n")
+
+    finding = next(f for f in diagnose(config_tree) if f.kind == "unparseable-source")
+
+    assert finding.path == config_tree.variables_path()
+
+
+def test_a_bad_environment_value_is_blamed_on_the_declaration_file(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    # An environment override belongs to no file, and the message says so. The
+    # declaration file is what named it, so it is the closest thing to an
+    # offender there is; the alternative is a finding with no path at all.
+    config_tree.variables_path().write_text("DEV\n")
+    monkeypatch.setenv("DEV", "/srv/with a space")
+
+    finding = next(f for f in diagnose(config_tree) if f.kind == "unparseable-source")
+
+    assert finding.path == config_tree.variables_path()
+    assert "environment variable DEV" in finding.message
+
+
 @pytest.mark.parametrize(
     "shape",
     [
@@ -1645,6 +1720,251 @@ def test_a_relative_editable_resolves_against_the_config_root(
     assert str(config_tree.root / "lib" / "widget") in finding.message
     (config_tree.root / "lib" / "widget").mkdir(parents=True)
     assert "missing-checkout" not in _kinds(diagnose(config_tree))
+
+
+def test_an_editable_path_holding_a_space_is_read_whole(config_tree: ConfigRoot):
+    """uv reads everything after the flag as one path; so must the diagnosis.
+
+    Reading only the first token reports a missing checkout for a directory
+    that is present under its real name -- a false positive from the command
+    whose job is to say what is actually wrong.
+    """
+    checkout = config_tree.root / "my pkg"
+    checkout.mkdir()
+    config_tree.profile_path("ds").write_text("includes:\n  - -e my pkg\n")
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_path_holding_a_space_is_read_whole_when_absent(
+    config_tree: ConfigRoot,
+):
+    """The complete path must appear in the message for an absent checkout.
+
+    Strengthens the positive test: a parser that truncated the path would fail
+    here, while both would pass if only the presence of the finding mattered.
+    """
+    config_tree.profile_path("ds").write_text("includes:\n  - -e my pkg\n")
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert str(config_tree.root / "my pkg") in missing[0].message
+
+
+def test_an_editable_entry_with_a_trailing_option_keeps_its_path_token(
+    config_tree: ConfigRoot,
+):
+    """The rejoin must not swallow an option into the path.
+
+    Pins one side of the boundary the fix draws: rejoining stops before a
+    token that could be an option of its own.
+    """
+    config_tree.profile_path("ds").write_text(
+        "includes:\n  - -e ./absent --config-settings editable_mode=compat\n"
+    )
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert "--config-settings" not in missing[0].message
+    assert str(config_tree.root / "absent") in missing[0].message
+
+
+def test_an_editable_path_holding_a_space_survives_a_trailing_option(
+    config_tree: ConfigRoot,
+):
+    """Both halves of the rule at once: rejoin the path, then stop at the option.
+
+    The other side of the boundary. An all-or-nothing rejoin -- give up
+    entirely as soon as any later token looks like an option -- passes both
+    tests above and still reports './my' here.
+    """
+    checkout = config_tree.root / "my pkg"
+    checkout.mkdir()
+    config_tree.profile_path("ds").write_text(
+        "includes:\n  - -e my pkg --config-settings editable_mode=compat\n"
+    )
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_path_with_attached_equals_reads_the_whole_spaced_path(
+    config_tree: ConfigRoot,
+):
+    """The attached form must read the operand verbatim, not from split().
+
+    '-e=my pkg' partitions parts[0] into ('-e', '=', 'my'), leaving 'pkg' in
+    parts[1:]. Stopping at that attached operand truncates the path exactly as
+    taking the first token alone did before the separated form was fixed.
+    """
+    checkout = config_tree.root / "my pkg"
+    checkout.mkdir()
+    config_tree.profile_path("ds").write_text("includes:\n  - -e=my pkg\n")
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_path_with_long_flag_attached_names_the_whole_path_when_absent(
+    config_tree: ConfigRoot,
+):
+    """The --editable= spelling must report the complete path when absent.
+
+    Covers the long-flag attached form and asserts on message content so a
+    truncating parser would fail.
+    """
+    config_tree.profile_path("ds").write_text("includes:\n  - --editable=my pkg\n")
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert str(config_tree.root / "my pkg") in missing[0].message
+
+
+def test_an_editable_path_with_repeated_whitespace_preserves_the_run_length(
+    config_tree: ConfigRoot,
+):
+    """Interior whitespace must be preserved exactly as written.
+
+    split() discards run length and rejoin cannot restore it, so a directory
+    whose real name holds two spaces is reported missing while it sits there.
+    The parser must extract the operand from the original entry, not from
+    the split tokens.
+    """
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ./my  pkg\n")
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert str(config_tree.root / "my  pkg") in missing[0].message
+
+
+def test_an_editable_path_with_a_trailing_comment_is_read_without_the_comment(
+    config_tree: ConfigRoot,
+):
+    """A comment marker after whitespace terminates the operand.
+
+    uv treats '#' as a comment marker at the start of a line or after
+    whitespace. The entry must be quoted in YAML — an unquoted
+    '- -e ./pkg # note' has its comment eaten by the YAML parser before
+    doctor sees it.
+    """
+    checkout = config_tree.root / "pkg"
+    checkout.mkdir()
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e ./pkg # local checkout"\n')
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_path_with_a_trailing_comment_names_the_path_when_absent(
+    config_tree: ConfigRoot,
+):
+    """The message must name the path without the comment text.
+
+    Proves the parser cut before the comment rather than merely accepting
+    it as part of the path.
+    """
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e ./pkg # local"\n')
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert str(config_tree.root / "pkg") in missing[0].message
+    assert "# local" not in missing[0].message
+
+
+def test_an_editable_spaced_path_with_a_trailing_comment_reads_both_rules(
+    config_tree: ConfigRoot,
+):
+    """Whitespace preservation and comment termination in one entry.
+
+    A spaced path plus a trailing comment exercises both rules: rejoin the
+    path tokens, then stop before the comment.
+    """
+    checkout = config_tree.root / "my pkg"
+    checkout.mkdir()
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e my pkg # note"\n')
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_path_containing_a_hash_preserves_the_character(
+    config_tree: ConfigRoot,
+):
+    """A '#' with no whitespace before it is part of the operand.
+
+    uv treats '#' as a comment marker only at the start of a line or after
+    whitespace. A '#' inside a token is ordinary text.
+    """
+    checkout = config_tree.root / "pkg#1"
+    checkout.mkdir()
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ./pkg#1\n")
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_path_with_attached_equals_and_comment_cuts_at_the_comment(
+    config_tree: ConfigRoot,
+):
+    """The attached spelling must also terminate at a comment marker.
+
+    The two spellings must read alike, so '-e=./pkg # note' must cut at the
+    comment just as '-e ./pkg # note' does.
+    """
+    checkout = config_tree.root / "pkg"
+    checkout.mkdir()
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e=./pkg # note"\n')
+    findings = diagnose(config_tree)
+    assert not [f for f in findings if f.kind == "missing-checkout"]
+
+
+def test_an_editable_entry_that_is_only_a_comment_is_silent(
+    config_tree: ConfigRoot,
+):
+    """When the operand is nothing but a comment, doctor stays silent.
+
+    uv sees a bare '-e' here, which is a malformed entry, not a checkout.
+    The entry must be quoted so the YAML parser preserves the comment.
+    """
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e # local checkout"\n')
+    findings = diagnose(config_tree)
+    # No missing-checkout and no other findings about this entry.
+    assert not findings
+
+
+def test_an_editable_entry_with_empty_attached_operand_and_comment_is_silent(
+    config_tree: ConfigRoot,
+):
+    """The attached form with empty operand falls through to separated reading.
+
+    '-e= # note' has an empty attached operand, so it falls through to the
+    separated branch where the lstrip()ed remainder begins with '#' and the
+    guard fires. The entry must be quoted so the YAML parser preserves the
+    comment.
+    """
+    # The entry must be quoted so the YAML parser preserves the comment.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e= # note"\n')
+    findings = diagnose(config_tree)
+    # No missing-checkout and no other findings about this entry.
+    assert not findings
+
+
+def test_an_editable_entry_with_glued_hash_names_a_path_beginning_with_hash(
+    config_tree: ConfigRoot,
+):
+    """In the attached form, a '#' immediately after '=' is inside the token.
+
+    '-e=#note' has no whitespace before the '#', so the '#' is ordinary text
+    and uv installs from a directory named '#note'. The entry is quoted for
+    consistency with the other hash tests, though the '#' has no space before
+    it and would survive unquoted.
+    """
+    # Quoted for consistency with other hash tests, though not strictly required.
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e=#note"\n')
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-checkout"]
+    assert len(missing) == 1
+    assert str(config_tree.root / "#note") in missing[0].message
 
 
 def test_the_checkout_check_is_skipped_when_a_variable_is_undefined(
@@ -1868,6 +2188,61 @@ def test_a_symlinked_ignore_file_is_reported_not_reported_clean(
     assert "Symlinked ignore file" in finding.message
 
 
+def _case_insensitive(root: Path) -> bool:
+    """Whether this filesystem resolves two spellings to one directory."""
+    probe = root / "CaseProbe"
+    probe.mkdir()
+    try:
+        return (root / "caseprobe").is_dir()
+    finally:
+        probe.rmdir()
+
+
+def test_a_case_variant_of_a_root_directory_is_not_called_misplaced(
+    config_tree: ConfigRoot,
+):
+    """On a case-insensitive filesystem 'Lib' IS the root's lib directory.
+
+    Falling through to the marker check prints 'mv <root>/Lib
+    <root>/envs/Lib' -- a proposal to move one of the root's own directories
+    into envs/, from the command whose job is to say what is actually wrong.
+
+    'Lib' rather than 'Envs' because scandir reports the name a directory was
+    created with: the fixture already makes 'envs', so mkdir('Envs') there is
+    a no-op and the entry stays lowercase. The fixture makes no 'lib'.
+    """
+    if not _case_insensitive(config_tree.root):
+        pytest.skip("two spellings only name one directory on a case-insensitive filesystem")
+    variant = config_tree.root / "Lib"
+    variant.mkdir()
+    (variant / "requirements.in").write_text("numpy\n")
+
+    findings = diagnose(config_tree)
+
+    assert not [f for f in findings if f.kind == "misplaced-env"]
+
+
+def test_a_genuinely_separate_case_variant_directory_is_still_reported(
+    config_tree: ConfigRoot,
+):
+    """The case-sensitive platform must keep its real finding.
+
+    Here 'Lib' is a different directory from any 'lib', so an env sitting in
+    it is genuinely misplaced. Casefolding the name would suppress this, which
+    is why the fix asks the filesystem instead -- the same reasoning
+    doctor.py:280-288 already applies to the marker names.
+    """
+    if _case_insensitive(config_tree.root):
+        pytest.skip("the two spellings are one directory on a case-insensitive filesystem")
+    stray = config_tree.root / "Lib"
+    stray.mkdir()
+    (stray / "requirements.in").write_text("numpy\n")
+
+    findings = diagnose(config_tree)
+
+    assert [f for f in findings if f.kind == "misplaced-env" and f.path == stray]
+
+
 def test_a_non_repository_root_is_never_flagged(config_tree: ConfigRoot):
     assert not [f for f in diagnose(config_tree) if f.kind == "stale-ignore-block"]
 
@@ -2077,6 +2452,107 @@ def test_an_unsearchable_config_root_reports_instead_of_raising(config_tree: Con
     assert any(
         f.kind == "unparseable-source" and f.path == config_tree.profiles_dir for f in findings
     )
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_an_unsearchable_root_does_not_call_its_directories_missing(config_tree: ConfigRoot):
+    """The same tree as above, asserted on what it must not say.
+
+    Stat'ing profiles/ needs search permission on the root, not on profiles/,
+    so an unsearchable root turns all three fixed-path probes False for
+    directories that are plainly there. The run then contradicted itself: three
+    errors saying they are missing, each offering a mkdir that cannot run, and
+    below them three warns correctly naming the same paths as unreadable.
+    """
+    os.chmod(config_tree.root, 0o400)
+    try:
+        findings = diagnose(config_tree)
+    finally:
+        os.chmod(config_tree.root, 0o700)
+
+    assert [f.message for f in findings if f.kind == "missing-dir"] == []
+    # Suppressing the three errors may not cost the paths their mention: the
+    # warns are what is left saying anything about them at all.
+    unreadable = {f.path for f in findings if f.kind == "unparseable-source"}
+    assert {
+        config_tree.profiles_dir,
+        config_tree.bundles_dir,
+        config_tree.envs_dir,
+    } <= unreadable
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_an_unsearchable_root_names_each_directory_once(config_tree: ConfigRoot):
+    """The same tree again, asserted on how many times it says it.
+
+    Two independent probes reach the same conclusion here: the scaffold-directory
+    stat fails EACCES, and so does the listing _scan_sources does for the same
+    path. Both render the errno through _unparseable, so the findings come out
+    byte-identical. Printed twice they read as two distinct problems.
+    """
+    os.chmod(config_tree.root, 0o400)
+    try:
+        findings = diagnose(config_tree)
+    finally:
+        os.chmod(config_tree.root, 0o700)
+
+    for directory in (
+        config_tree.profiles_dir,
+        config_tree.bundles_dir,
+        config_tree.envs_dir,
+    ):
+        named = [
+            f for f in findings if f.kind == "unparseable-source" and f.path == directory
+        ]
+        assert len(named) == 1, named
+
+
+def test_a_genuinely_absent_directory_under_a_searchable_root_is_still_missing(
+    config_tree: ConfigRoot,
+):
+    # The control for the test above: the suppression is conditioned on the
+    # root being unsearchable, not on the finding being inconvenient.
+    shutil.rmtree(config_tree.bundles_dir)
+    findings = diagnose(config_tree)
+    missing = [f for f in findings if f.kind == "missing-dir"]
+    assert [f.path for f in missing] == [config_tree.bundles_dir]
+    assert missing[0].level == "error"
+
+
+def test_an_unstattable_scaffold_directory_is_reported_as_unreadable(
+    config_tree: ConfigRoot,
+):
+    """A directory the kernel will not describe must not read as clean.
+
+    Suppressing missing-dir for a residual errno was right -- the mkdir it
+    offers fails for the same reason the stat did -- but nothing else picked
+    the path up. The legacy scan is guarded by os.path.isdir, which answers
+    False for that same errno, so _children never ran and no walk named the
+    directory either. The whole run came back empty for a root whose profiles/
+    cannot be used at all.
+
+    A self-referential symlink is the portable way to force the errno (ELOOP)
+    without root privileges and without a chmod, which would need the geteuid
+    guard the permission-based tests above carry.
+    """
+    shutil.rmtree(config_tree.profiles_dir)
+    os.symlink("profiles", config_tree.profiles_dir)
+
+    findings = diagnose(config_tree)
+
+    about_profiles = [f for f in findings if f.path == config_tree.profiles_dir]
+    assert [(f.level, f.kind) for f in about_profiles] == [("warn", "unparseable-source")]
+    assert str(config_tree.profiles_dir) in about_profiles[0].message
+    # The suppression this sits next to still holds: no error offering a mkdir
+    # that would fail exactly as the stat did.
+    assert [f for f in findings if f.kind == "missing-dir"] == []
+    # The two directories that are fine stay silent, so the warn is a report
+    # about profiles/ and not about the run having given up.
+    assert [
+        f
+        for f in findings
+        if f.path in (config_tree.bundles_dir, config_tree.envs_dir)
+    ] == []
 
 
 @pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")

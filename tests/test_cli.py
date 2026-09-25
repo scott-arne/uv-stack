@@ -525,7 +525,47 @@ def test_show_missing_env_errors(tmp_path: Path):
     assert "ghost" in result.output
 
 
-def test_show_env_fails_on_undefined_variable(tmp_path: Path):
+def _outside_root(tmp_path: Path) -> Path:
+    """A config root beside a directory a traversing NAME would reach.
+
+    Holds both shapes a ``show`` branch would land on: ``secret.yaml`` for the
+    profile and bundle joins, ``secret/`` for the env one.
+    """
+    root = _env_root(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.yaml").write_text("description: leaked\nincludes:\n  - hidden\n")
+    env_dir = outside / "secret"
+    env_dir.mkdir()
+    (env_dir / "stack.txt").write_text("@standard\n")
+    (env_dir / "python.txt").write_text("3.99\n")
+    return root
+
+
+@pytest.mark.parametrize(
+    ("kind", "label"),
+    [("env", "environment"), ("profile", "profile"), ("bundle", "bundle")],
+)
+def test_show_rejects_a_traversing_name(tmp_path: Path, kind, label):
+    """A NAME is a file stem here too, and ``stack edit`` already refuses this one.
+
+    Unguarded, every branch joins the name onto a config directory and reads
+    whatever it lands on, so a ``..``-bearing name describes a file outside the
+    root as though the root declared it.
+    """
+    root = _outside_root(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "show", kind, "../../outside/secret"]
+    )
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert f"Invalid {label} name" in output
+    assert "leaked" not in output
+    assert "3.99" not in output
+
+
+def _undefined_variable_root(tmp_path: Path) -> Path:
+    """An env root whose profile references a declared-but-unset variable."""
     from uv_stack.config import ConfigRoot
 
     root = _env_root(tmp_path)
@@ -535,9 +575,67 @@ def test_show_env_fails_on_undefined_variable(tmp_path: Path):
         "description: Core data-science stack\n"
         "includes:\n  - numpy\n  - -e ${DEV}/mypkg\n"
     )
+    return root
+
+
+def test_show_env_notes_an_undefined_variable_without_failing(tmp_path: Path):
+    root = _undefined_variable_root(tmp_path)
     result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "main"])
-    assert result.exit_code == 1
-    assert "DEV" in result.output
+    # The description above the render is complete and correct; only the
+    # requirements.in the variable would have fed is unavailable. Reporting
+    # that is the whole job, as it already is for stack status.
+    assert result.exit_code == 0
+    output = _combined_output(result)
+    assert "DEV" in output
+    assert "Cannot render requirements.in" in output
+    assert "Environment: main" in output
+
+
+def test_show_env_json_agrees_with_the_text_form_on_an_undefined_variable(tmp_path: Path):
+    import json
+
+    root = _undefined_variable_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "show", "env", "main", "--json"])
+    # --json returns before the render, so it always succeeded here. Pinning the
+    # pair is what keeps one output mode from going fatal on a root the other
+    # describes without complaint.
+    assert result.exit_code == 0
+    assert json.loads(result.output)["name"] == "main"
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="root ignores file permissions",
+)
+def test_show_env_notes_an_unreadable_variables_file_without_failing(tmp_path: Path):
+    """The same asymmetry the test above pins, reached by a bare OSError instead.
+
+    An unreadable variables.txt is still a regular file, so require_regular_file
+    passes it and nothing converts the PermissionError into a UvStackError. The
+    render arm has to warn on it for the same reason it warns on an undefined
+    variable: every descriptive line is already printed and correct, and --json
+    never reaches the render at all.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = _env_root(tmp_path)
+    variables = ConfigRoot(root).variables_path()
+    variables.write_text("DEV\n")
+    variables.chmod(0o000)
+    try:
+        result = CliRunner().invoke(
+            cli, ["--root", str(root), "show", "env", "main"], env={"COLUMNS": "400"}
+        )
+    finally:
+        # Restore, or tmp_path teardown cannot remove the file.
+        variables.chmod(0o644)
+    assert result.exit_code == 0
+    output = _combined_output(result)
+    assert "Environment: main" in output
+    assert "Cannot render requirements.in" in output
+    # Naming the file is the point: "Permission denied" alone leaves the reader
+    # to guess which of the root's files they cannot read.
+    assert str(variables) in output
 
 
 @pytest.mark.parametrize(
@@ -2041,6 +2139,46 @@ def test_doctor_json_lists_findings(tmp_path: Path):
     assert payload[0]["level"] == "error"
 
 
+def test_doctor_json_names_the_offending_and_target_paths(tmp_path: Path):
+    """A JSON consumer gets the paths the human-readable form spells out.
+
+    The message and the fix are prose built for a terminal; ``path`` and
+    ``dest`` are the same two facts in a form a caller can act on. Omitting
+    them left ``--json`` strictly less useful than parsing the printed text,
+    and left ``--fix --json`` self-inconsistent: every entry under ``actions``
+    carries a path while the ``remaining`` entries beside them did not.
+    """
+    import json
+
+    root = _seeded_root(tmp_path)
+    from uv_stack.config import ConfigRoot
+
+    cfg = ConfigRoot(root)
+    (cfg.bundles_dir / "old.bundle").write_text("ds\n")
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(root), "doctor", "--json"])
+
+    assert result.exit_code == 0
+    finding = next(f for f in json.loads(result.output) if f["kind"] == "legacy-bundle")
+    assert finding["path"] == str(cfg.bundles_dir / "old.bundle")
+    assert finding["dest"] == str(cfg.bundles_dir / "old.yaml")
+
+
+def test_doctor_json_leaves_absent_paths_null(tmp_path: Path):
+    # Not every finding has either path, and a caller distinguishing "no
+    # target" from "the string 'None'" needs the key present and null rather
+    # than stringified or dropped.
+    import json
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["--root", str(tmp_path / "nope"), "doctor", "--json"])
+
+    finding = json.loads(result.output)[0]
+    assert finding["kind"] == "missing-root"
+    assert finding["path"] == str(tmp_path / "nope")
+    assert finding["dest"] is None
+
+
 def test_doctor_fix_json_shape(tmp_path: Path):
     import json
 
@@ -2134,7 +2272,15 @@ def test_show_env_shell_quotes_name_in_hint(tmp_path: Path, monkeypatch):
     assert "stack create env 'bad;touch'" in result.output
 
 
-def test_show_env_prefixes_leading_dash_name_in_hint(tmp_path: Path, monkeypatch):
+# No leading-dash counterpart to the quoting test above: the NAME reaches
+# validate_name, which refuses a leading '-', so this site cannot render that
+# case either. render_positional_arg's dash branch is covered in test_hints.py.
+def test_show_env_refuses_a_dash_named_directory(tmp_path: Path, monkeypatch):
+    """A hand-made envs/ directory the create commands would have refused.
+
+    ``status`` and ``list env`` still show it, because discovered names are not
+    validated; naming it on the command line is what the guard refuses.
+    """
     from uv_stack.config import ConfigRoot
 
     root = _env_root(tmp_path)
@@ -2149,8 +2295,12 @@ def test_show_env_prefixes_leading_dash_name_in_hint(tmp_path: Path, monkeypatch
     )
     runner = CliRunner()
     result = runner.invoke(cli, ["--root", str(root), "show", "env", "--", "--recreate"])
-    assert result.exit_code == 0
-    assert "stack create env -- --recreate" in result.output
+    assert result.exit_code == 1
+    assert "Invalid environment name" in _combined_output(result)
+
+    listed = runner.invoke(cli, ["--root", str(root), "list", "env"])
+    assert listed.exit_code == 0
+    assert "--recreate" in listed.output
 
 
 def test_status_table(tmp_path: Path, monkeypatch):
@@ -2182,6 +2332,27 @@ def test_status_config_error_row_prints_message(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     assert "config error" in result.output
     assert "main: Missing stack file" in result.output
+
+
+def test_status_rejects_a_traversing_name(tmp_path: Path, monkeypatch):
+    """The file-stem rule ``upgrade`` and ``converge`` apply to their own NAMEs.
+
+    Refused up front rather than reported as one more "config error" row: a
+    name that cannot name an environment is a bad argument, and a row would
+    claim a config exists out there and failed to load.
+    """
+    root = _outside_root(tmp_path)
+    monkeypatch.setattr(
+        "uv_stack.cli.status_cmd.SubprocessRunner", lambda: _FakeProbeRunner()
+    )
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "status", "main", "../../outside/secret"]
+    )
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert "Invalid environment name" in output
+    # The batch is refused whole, so the valid name beside it reports nothing.
+    assert "never built" not in output
 
 
 def test_status_json(tmp_path: Path, monkeypatch):
@@ -4992,7 +5163,13 @@ def test_init_accepts_an_admitted_reference(tmp_path: Path, monkeypatch):
     from uv_stack.config import ConfigRoot
 
     root = tmp_path / "python-envs"
-    monkeypatch.setattr("uv_stack.cli.init_cmd._run_upgrade", lambda *a, **kw: None)
+    # The last answer declines the build, so a stub that returns would be
+    # inert. Throwing instead pins that the entry was admitted by the prompt's
+    # own check rather than by a build this test never wanted to reach.
+    monkeypatch.setattr(
+        "uv_stack.cli.init_cmd._run_upgrade",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
     runner = CliRunner()
     # Tokens are split on whitespace by 'stack init', so an editable entry
     # cannot be typed at this prompt; a path operand is the admitted form
@@ -5031,6 +5208,43 @@ def test_config_portable_dry_run_writes_nothing(config_tree: ConfigRoot):
     # never written, so the caution comes before them.
     assert "Re-run without --dry-run first" in result.output
     assert result.output.index("Re-run without") < result.output.index("git -C")
+
+
+def test_config_portable_places_and_names_a_placeholder_for_an_empty_directory(
+    config_tree: ConfigRoot,
+):
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable"]
+    )
+    assert result.exit_code == 0, result.output
+    assert (config_tree.bundles_dir / ".gitkeep").is_file()
+    # Naming it matters as much as writing it: the untracking sequence stages
+    # .gitignore alone, so a placeholder nobody is told about is one nobody adds.
+    assert "Placeholders" in result.output
+    assert str(config_tree.bundles_dir / ".gitkeep") in result.output
+
+
+def test_config_portable_dry_run_writes_no_placeholder(config_tree: ConfigRoot):
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert not (config_tree.bundles_dir / ".gitkeep").exists()
+    assert "dry run" in result.output
+
+
+def test_config_portable_says_nothing_about_placeholders_when_none_are_needed(
+    config_tree: ConfigRoot,
+):
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "portable"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Placeholders" not in result.output
 
 
 def test_config_portable_does_not_caution_when_it_wrote_the_block(

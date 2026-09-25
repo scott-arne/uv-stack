@@ -10,10 +10,11 @@ import rich_click as click
 from uv_stack.cli._complete import KIND_CHOICES, complete_show_names
 from uv_stack.cli._render import echo, render_warnings
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError
+from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.create import env_interpreter
 from uv_stack.operations.pyproject import read_tracking
+from uv_stack.operations.scaffold import validate_name
 from uv_stack.render import render_requirements_in
 from uv_stack.resolver import Resolver
 from uv_stack.runner import SubprocessRunner
@@ -34,7 +35,14 @@ def show(config: ConfigRoot, kind: str, name: str | None, as_json: bool) -> None
     reads the current directory.
     """
     if kind == "env":
-        _show_env(config, name or "main", as_json)
+        env_name = name or "main"
+        # Each branch below joins NAME onto a config directory and reads what
+        # it lands on, so the file-stem rule the create and edit commands apply
+        # holds here too: without it a '..'-bearing NAME describes a file
+        # outside the root as though the root declared it. "environment"
+        # matches the wording `stack create env` uses.
+        validate_name("environment", env_name)
+        _show_env(config, env_name, as_json)
     elif kind == "project":
         if name is not None:
             raise click.UsageError(
@@ -45,8 +53,10 @@ def show(config: ConfigRoot, kind: str, name: str | None, as_json: bool) -> None
     elif name is None:
         raise click.UsageError(f"'show {kind}' requires a NAME.")
     elif kind == "profile":
+        validate_name(kind, name)
         _show_profile(config, name, as_json)
     else:
+        validate_name(kind, name)
         _show_bundle(config, name, as_json)
 
 
@@ -91,8 +101,29 @@ def _show_env(config: ConfigRoot, name: str, as_json: bool) -> None:
     echo("Resolved inline requirements:")
     for req in stack.inline:
         echo(f"  {req}")
-    # Touch render to validate it produces text without error.
-    render_requirements_in(stack, config, name, config.load_variables())
+    # The render runs only to surface a config that cannot produce a
+    # requirements.in -- an unresolvable variable, most often. It reports
+    # rather than aborts: every line above is already printed and correct, so
+    # failing here condemned a description that succeeded. It also failed in
+    # this branch alone, since --json returns above and never reaches the
+    # check, which made the same root fatal in one output mode and fine in the
+    # other. stack status sets the precedent, turning the identical failure
+    # into a "config error" row rather than an exit status.
+    try:
+        render_requirements_in(stack, config, name, config.load_variables())
+    except UvStackError as error:
+        render_warnings([f"Cannot render requirements.in: {error.message}"])
+    except OSError as error:
+        # An unreadable variables.txt is a regular file, so require_regular_file
+        # passes it and no layer converts the PermissionError. Left to the group
+        # handler it would exit 1 and reinstate the very asymmetry above. There
+        # is no .message to reuse, so this borrows render_os_error's shape:
+        # strerror leads, and the file is named separately because the errno
+        # text alone does not say which of the root's files could not be read.
+        reason = error.strerror or str(error)
+        if error.filename:
+            reason = f"{reason}: {error.filename}"
+        render_warnings([f"Cannot render requirements.in: {reason}"])
 
 
 def _show_project(as_json: bool) -> None:

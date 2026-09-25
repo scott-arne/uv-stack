@@ -13,10 +13,13 @@ from uv_stack.errors import ConfigError
 from uv_stack.operations.portable import (
     BEGIN_MARKER,
     END_MARKER,
+    IGNORED_NAMES,
+    KEEPER_NAME,
     _newline,
     ignore_patterns,
     next_steps,
     render_block,
+    write_directory_keepers,
     write_portable_ignore,
 )
 
@@ -214,6 +217,63 @@ def test_a_symlinked_ignore_file_is_refused_and_stays_a_symlink(
 
     assert str(path) in excinfo.value.message
     assert path.is_symlink()
+    assert written == []
+
+
+def test_a_link_planted_after_the_check_is_refused_by_the_read(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    """The refusal above the read is a test on a name; the read is the guard.
+
+    Neutering the check is how a plant that lands a moment after it runs is
+    reproduced without racing a real one. What the check used to be alone
+    bought: require_regular_file accepts a link to a regular file, so the
+    target was read with the invoking user's permissions — reaching a file the
+    planter need not be able to read — spliced into the block, and written to a
+    .gitignore the printed sequence then says to commit and push.
+    """
+    target = config_tree.root / "secret.txt"
+    target.write_text("BEGIN PRIVATE KEY\n")
+    path = config_tree.root / ".gitignore"
+    path.symlink_to(target)
+    written = _record_writes(monkeypatch)
+    monkeypatch.setattr(
+        "uv_stack.operations.portable._refuse_symlink", lambda _path: None
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        write_portable_ignore(config_tree)
+
+    assert str(path) in excinfo.value.message
+    assert "PRIVATE" not in excinfo.value.message
+    assert path.is_symlink()
+    assert target.read_text() == "BEGIN PRIVATE KEY\n"
+    assert written == []
+
+
+def test_without_the_open_guards_an_ignore_file_is_created_but_never_refreshed(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+):
+    """The caller-level shape of the guardless read: create yes, refresh no.
+
+    A name with nothing at it still reads as absent, so the file this command
+    exists to write is still written. An existing one cannot be read through an
+    open that proves what it opened, so it is refused rather than spliced — and
+    the refusal names the platform, because an ordinary .gitignore has nothing
+    wrong with it for the user to fix.
+    """
+    from uv_stack import fsutil
+
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
+    path = config_tree.root / ".gitignore"
+
+    assert write_portable_ignore(config_tree).outcome == "created"
+    assert path.read_text() == render_block(config_tree) + "\n"
+
+    written = _record_writes(monkeypatch)
+    with pytest.raises(ConfigError) as excinfo:
+        write_portable_ignore(config_tree)
+    assert "platform" in excinfo.value.message
     assert written == []
 
 
@@ -433,6 +493,88 @@ def test_the_printed_commands_stage_nothing_the_user_did_not_ask_for(tmp_path: P
     assert "python-envs/variables.txt" in _git("-C", str(top), "ls-files").splitlines()
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="requires a git executable")
+def test_the_printed_commands_reach_the_index_through_a_symlinked_root(tmp_path: Path):
+    """Only git can say whether the untracking lands in the enclosing index.
+
+    Classifying a symlinked root by its target is what puts this sequence on
+    screen at all, and the commands it prints name the link rather than the
+    target. Whether the two agree is git's answer to give, not this module's:
+    if ``-C <link>`` discovered a different repository, or none, the sequence
+    would be advice that cannot run against the index it was generated for.
+    """
+    top = tmp_path / "dotfiles"
+    real_root = top / "python-envs"
+    real_root.mkdir(parents=True)
+    _git("init", "-q", str(top))
+    (real_root / "variables.txt").write_text("DEV\n")
+    (real_root / "variables.local.txt").write_text("DEV=/srv/src\n")
+    _git("-C", str(top), "add", "-A")
+    _git("-C", str(top), "commit", "-q", "-m", "initial")
+    link = tmp_path / "linked-root"
+    link.symlink_to(real_root)
+
+    config = ConfigRoot(link)
+    result = write_portable_ignore(config)
+    assert result.is_repository is True
+    steps = next_steps(config, result)
+    # As far as the add, for the reason the exemplar above stops there.
+    _git(*shlex.split(next(s for s in steps if "rm -r --cached" in s))[1:])
+    _git(*shlex.split(next(s for s in steps if " add " in s))[1:])
+
+    staged = {
+        line[3:]
+        for line in _git("-C", str(top), "status", "--porcelain").splitlines()
+        if line[0] not in " ?"
+    }
+    # Named through the top level, which is how the index spells them: the
+    # commands went in through the link and came out in this repository.
+    assert staged == {"python-envs/.gitignore", "python-envs/variables.local.txt"}
+    # The untracking reached the generated files and stopped there, exactly as
+    # it does for a root spelled directly.
+    assert "python-envs/variables.txt" in _git("-C", str(top), "ls-files").splitlines()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="requires a git executable")
+def test_the_bootstrap_sequence_stages_an_ignore_file_the_machine_ignores(tmp_path: Path):
+    """The bootstrap add is forced too, for the same reason the nested one is.
+
+    No repository sits above a root being bootstrapped, so no parent
+    .gitignore can reach it — but ``core.excludesFile`` still does, and a
+    developer who wrote ``.gitignore`` into theirs has told git to skip every
+    generated ignore file on the machine. ``add .`` then honours that, and the
+    commit and push two lines below publish a root whose block never travels.
+    """
+    root = tmp_path / "python-envs"
+    root.mkdir()
+    (root / "keep.txt").write_text("declared\n")
+    (root / "variables.local.txt").write_text("DEV=/srv/src\n")
+    excludes = tmp_path / "global-excludes"
+    excludes.write_text(".gitignore\n")
+
+    config = ConfigRoot(root)
+    result = write_portable_ignore(config)
+    assert result.is_repository is False
+    steps = next_steps(config, result)
+
+    _git(*shlex.split(next(s for s in steps if s.endswith(" init")))[1:])
+    # _GIT_ENV blanks the global config, so the excludes file has to be named
+    # at the one level left. Where git reads it from does not change what it
+    # does with it: 'add' consults core.excludesFile whatever its origin.
+    _git("-C", str(root), "config", "core.excludesFile", str(excludes))
+    for step in [s for s in steps if " add " in s and "remote" not in s]:
+        _git(*shlex.split(step)[1:])
+
+    staged = {
+        line[3:]
+        for line in _git("-C", str(root), "status", "--porcelain").splitlines()
+        if line[0] not in " ?"
+    }
+    # 'keep.txt' is the other half: the bootstrap add stages the whole root on
+    # purpose, and forcing the ignore file must not narrow it to one file.
+    assert staged == {".gitignore", "keep.txt"}
+
+
 def test_the_walk_climbs_past_more_than_one_level(tmp_path: Path):
     # One level up is the easy case to get right by accident. Nothing in the
     # printed commands depends on the distance any more, but doctor's decision
@@ -516,6 +658,103 @@ def test_a_dot_dot_in_the_root_does_not_hand_it_to_a_repository_it_passes_throug
     (tmp_path / "outside" / "python-envs").mkdir(parents=True)
 
     config = ConfigRoot(tmp_path / "repo" / "sub" / ".." / ".." / "outside" / "python-envs")
+    result = write_portable_ignore(config, dry_run=True)
+
+    assert result.repository_root is None
+    assert any(step.endswith(" init") for step in next_steps(config, result))
+
+
+def test_a_symlinked_root_pointing_into_a_repository_is_in_that_repository(
+    tmp_path: Path,
+):
+    """The false negative costs the user the advice this command exists to give.
+
+    Classified through its own path, a symlinked root reads as being in no
+    repository -- so 'config portable' prints the git-init bootstrap for a
+    root whose files the enclosing repository already tracks.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    real_root = repo / "python-envs"
+    real_root.mkdir()
+    link = tmp_path / "linked-root"
+    link.symlink_to(real_root)
+    config = ConfigRoot(link)
+
+    result = write_portable_ignore(config, dry_run=True)
+
+    assert result.repository_root == repo.resolve()
+    assert result.is_repository is True
+    steps = next_steps(config, result)
+    # Resolving the classification must not move the printed path: this branch
+    # newly emits 'rm -r --cached', and addressing the target rather than the
+    # link would untrack through a path the user never spelled.
+    untrack = next(s for s in steps if "rm -r --cached" in s)
+    tokens = shlex.split(untrack)
+    assert tokens[:3] == ["git", "-C", str(link)]
+    assert tokens[tokens.index("--") + 1 :] == GOLDEN_PATTERNS
+    add = next(s for s in steps if " add " in s)
+    assert shlex.split(add) == ["git", "-C", str(link), "add", "-f", ".gitignore"]
+
+
+def test_a_symlinked_root_pointing_out_of_a_repository_is_in_no_repository(
+    tmp_path: Path,
+):
+    """The false positive prints untracking commands for files that are absent."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    link = repo / "python-envs"
+    link.symlink_to(outside)
+
+    result = write_portable_ignore(ConfigRoot(link), dry_run=True)
+
+    assert result.repository_root is None
+    assert any(step.endswith(" init") for step in next_steps(ConfigRoot(link), result))
+
+
+def test_a_symlinked_ancestor_pointing_into_a_repository_is_in_that_repository(
+    tmp_path: Path,
+):
+    """The root need not be the link for its path to lie about where it is.
+
+    A root reached through a symlinked parent -- '~/work/envs' where 'work' is
+    the link -- is the ordinary shape of this, and the lexical answer names a
+    top level that exists nowhere on disk under that spelling. Whoever reads
+    'which working tree already tracks this root' is handed a path they cannot
+    check against 'git -C' output.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "python-envs").mkdir()
+    (tmp_path / "linkin").symlink_to(repo)
+
+    config = ConfigRoot(tmp_path / "linkin" / "python-envs")
+    result = write_portable_ignore(config, dry_run=True)
+
+    # The real directory, not a resolve() of the path the test built: both
+    # implementations answer non-None here, so only naming the canonical top
+    # level tells them apart.
+    assert result.repository_root == repo
+    assert result.is_repository is True
+
+
+def test_a_symlinked_ancestor_pointing_out_of_a_repository_is_in_no_repository(
+    tmp_path: Path,
+):
+    """The same false positive as a linked root, one level up, and destructive.
+
+    A path that only passes through the repository on its way out reads as
+    tracked, so the sequence offers 'rm -r --cached' against an index that
+    holds none of these files.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (tmp_path / "elsewhere" / "python-envs").mkdir(parents=True)
+    (repo / "linkout").symlink_to(tmp_path / "elsewhere")
+
+    config = ConfigRoot(repo / "linkout" / "python-envs")
     result = write_portable_ignore(config, dry_run=True)
 
     assert result.repository_root is None
@@ -750,6 +989,35 @@ def test_a_begin_marker_ended_by_an_unrestorable_separator_is_refused(
     assert written == []
 
 
+@pytest.mark.parametrize(
+    "prefix",
+    [pytest.param("﻿", id="byte-order-mark"), pytest.param("  ", id="indented")],
+)
+def test_a_marker_that_did_not_count_is_named_in_the_hint(
+    config_tree: ConfigRoot, prefix: str, monkeypatch: pytest.MonkeyPatch
+):
+    """A BEGIN the reader can see, reported as 'none', needs an explanation.
+
+    Refusing is right -- a file this shape is one a rewrite could corrupt --
+    but the message alone sends someone hunting for a marker that is sitting
+    on line 1 in front of them.
+    """
+    path = _write_bytes(
+        config_tree, f"{prefix}{BEGIN_MARKER}\nstale-entry\n{END_MARKER}\n"
+    )
+    before = path.read_bytes()
+    written = _record_writes(monkeypatch)
+    with pytest.raises(ConfigError) as excinfo:
+        write_portable_ignore(config_tree)
+    assert "BEGIN on line(s) none" in excinfo.value.message
+    hint = excinfo.value.hint
+    assert hint is not None
+    assert "marker text that did not count" in hint
+    assert "Line(s) 1" in hint
+    assert path.read_bytes() == before
+    assert written == []
+
+
 def test_a_marker_line_with_trailing_blanks_is_still_matched(config_tree: ConfigRoot):
     path = _write_bytes(
         config_tree,
@@ -796,3 +1064,120 @@ def test_dry_run_writes_nothing_whatever_the_file_already_holds(
         assert not path.exists()
     else:
         assert path.read_bytes() == before
+
+
+def test_only_an_empty_scaffolded_directory_gets_a_placeholder(config_tree: ConfigRoot):
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+
+    written = write_directory_keepers(config_tree)
+
+    assert written == [config_tree.bundles_dir / KEEPER_NAME]
+    assert (config_tree.bundles_dir / KEEPER_NAME).read_text() == ""
+    # profiles/ and envs/ hold real files, so they already travel; a
+    # placeholder in them would be a tracked file that nothing ever removes.
+    assert not (config_tree.profiles_dir / KEEPER_NAME).exists()
+    assert not (config_tree.envs_dir / KEEPER_NAME).exists()
+
+
+def test_the_placeholders_are_reported_but_not_written_under_dry_run(
+    config_tree: ConfigRoot,
+):
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+
+    written = write_directory_keepers(config_tree, dry_run=True)
+
+    assert written == [config_tree.bundles_dir / KEEPER_NAME]
+    assert not (config_tree.bundles_dir / KEEPER_NAME).exists()
+
+
+def test_a_directory_holding_only_an_ignored_file_gets_a_placeholder(
+    config_tree: ConfigRoot,
+):
+    """An ignored file is not evidence that the directory travels.
+
+    Any entry at all used to count. The managed block ignores .DS_Store, so a
+    bundles/ holding nothing else has nothing git can record: after the printed
+    workflow and a clone the directory is gone, which is the exact outcome the
+    placeholder exists to prevent.
+    """
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+    (config_tree.bundles_dir / ".DS_Store").write_bytes(b"\x00")
+
+    written = write_directory_keepers(config_tree)
+
+    assert written == [config_tree.bundles_dir / KEEPER_NAME]
+    assert (config_tree.bundles_dir / KEEPER_NAME).is_file()
+
+
+def test_the_names_the_keeper_probe_discounts_are_the_ones_the_block_ignores(
+    config_tree: ConfigRoot,
+):
+    # The two uses read one constant, so a name added to the block is
+    # discounted by the probe without a second edit -- and a name dropped from
+    # the block stops being discounted.
+    assert set(IGNORED_NAMES) <= set(ignore_patterns(config_tree))
+
+
+def test_a_symlinked_scaffold_directory_gets_no_placeholder(
+    tmp_path: Path, config_tree: ConfigRoot
+):
+    """A placeholder written through a link lands outside the config root.
+
+    Path.is_dir, Path.iterdir and atomic_write all follow a symlink at the
+    final component, so an empty bundles/ that is a link puts the file in
+    whatever it points at -- here a sibling of the root, but it could be
+    anywhere on the machine.
+
+    The write has nothing to achieve in the first place. Git records the link
+    itself, not the directory behind it, so the link already survives a clone
+    and a placeholder inside the target would never travel with it.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    shutil.rmtree(config_tree.bundles_dir)
+    config_tree.bundles_dir.symlink_to(outside, target_is_directory=True)
+
+    assert write_directory_keepers(config_tree) == []
+    assert not (outside / KEEPER_NAME).exists()
+    assert not (config_tree.bundles_dir / KEEPER_NAME).exists()
+
+
+def test_an_absent_directory_is_left_absent(config_tree: ConfigRoot):
+    shutil.rmtree(config_tree.bundles_dir)
+
+    assert write_directory_keepers(config_tree) == []
+    # Creating it belongs to 'stack config init' and to doctor's repair. A
+    # placeholder written here would make this command a second scaffolder,
+    # and would silently convert doctor's error into a directory nobody asked
+    # for on the machine that is merely publishing the root.
+    assert not config_tree.bundles_dir.exists()
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="requires a git executable")
+def test_an_empty_bundles_directory_survives_a_clone(
+    tmp_path: Path, config_tree: ConfigRoot
+):
+    """The placeholder is what keeps the documented bring-up clean.
+
+    Git tracks files, not directories, so without one the clone has no
+    bundles/ at all -- and the bring-up's step two, stack doctor, reports a
+    missing directory as an *error*, beside the variables report that step
+    exists to produce.
+    """
+    for entry in config_tree.bundles_dir.iterdir():
+        entry.unlink()
+    root = config_tree.root
+    write_portable_ignore(config_tree)
+    write_directory_keepers(config_tree)
+
+    _git("init", "-q", str(root))
+    _git("-C", str(root), "add", ".")
+    _git("-C", str(root), "add", "-f", ".gitignore")
+    _git("-C", str(root), "commit", "-q", "-m", "initial")
+    clone = tmp_path / "clone"
+    _git("clone", "-q", str(root), str(clone))
+
+    assert (clone / "bundles").is_dir()

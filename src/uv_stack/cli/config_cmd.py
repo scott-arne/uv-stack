@@ -7,7 +7,11 @@ import rich_click as click
 from uv_stack.cli._render import echo
 from uv_stack.config import ConfigRoot
 from uv_stack.operations.init import init_config_root
-from uv_stack.operations.portable import next_steps, write_portable_ignore
+from uv_stack.operations.portable import (
+    next_steps,
+    write_directory_keepers,
+    write_portable_ignore,
+)
 
 
 @click.group()
@@ -43,12 +47,21 @@ def config_portable(config_root: ConfigRoot, dry_run: bool) -> None:
     so a clone of the root rebuilds them rather than inheriting them.
     """
     result = write_portable_ignore(config_root, dry_run=dry_run)
+    keepers = write_directory_keepers(config_root, dry_run=dry_run)
     suffix = " (dry run; nothing written)" if dry_run else ""
     echo(f"{result.path}: {result.outcome}{suffix}")
     echo("")
     for line in result.block.splitlines():
         echo(f"  {line}")
     echo("")
+    if keepers:
+        # Named rather than left silent because the untracking sequence below
+        # stages .gitignore alone: in that branch these are files the user has
+        # to add themselves, and this is where they find out they exist.
+        echo(f"Placeholders so empty directories survive a clone{suffix}:")
+        for keeper in keepers:
+            echo(f"  {keeper}")
+        echo("")
     echo("Next:")
     if dry_run:
         # The steps are printed under --dry-run because seeing the whole

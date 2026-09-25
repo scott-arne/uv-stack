@@ -104,10 +104,19 @@ def test_render_reports_every_offender_across_profile_and_inline(config_tree: Co
 def test_render_output_is_unchanged_for_a_stack_without_references(
     config_tree: ConfigRoot,
 ):
+    """Expansion is a no-op on a stack that references nothing.
+
+    Anchored to the rendered text as well: on its own the equality is a
+    comparison of the function against itself, which two identically empty or
+    identically truncated renders would satisfy.
+    """
     stack = ResolvedStack(profiles=["ds", "chem"], inline=["umap-learn"])
-    assert render_requirements_in(
-        stack, config_tree, "main", Variables((), {})
-    ) == render_requirements_in(stack, config_tree, "main", None)
+    expanded = render_requirements_in(stack, config_tree, "main", Variables((), {}))
+    assert expanded == render_requirements_in(stack, config_tree, "main", None)
+    assert "# Profile: ds" in expanded
+    assert "# Profile: chem" in expanded
+    assert "umap-learn" in expanded
+    assert f"-r {config_tree.env_local_path('main')}" in expanded
 
 
 def test_rendered_output_never_adds_requirement_lines(config_tree: ConfigRoot):
@@ -137,3 +146,33 @@ def test_render_refuses_hostile_variable_value(config_tree: ConfigRoot):
     with pytest.raises(ConfigError) as excinfo:
         render_requirements_in(stack, config_tree, "main", variables)
     assert "backslash" in excinfo.value.message
+
+
+def test_a_refusal_across_profiles_names_the_profile_each_entry_came_from(
+    config_tree: ConfigRoot,
+):
+    """The flattened expansion must not cost the user the filename.
+
+    Expanding as one sequence is deliberate -- it reports every offender at
+    once instead of stopping at the first bad profile -- but on its own it
+    leaves a user with three profiles a list of entries and no way to tell
+    which file holds each.
+    """
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=/home/me/code\n")
+    config_tree.profile_path("ds").write_text(
+        "includes:\n  - -r ${DEV}/a.txt\n  - -c ${DEV}/c.txt\n"
+    )
+    config_tree.profile_path("chem").write_text("includes:\n  - -c ${DEV}/b.txt\n")
+    stack = ResolvedStack(profiles=["ds", "chem"], inline=[])
+    with pytest.raises(ConfigError) as excinfo:
+        render_requirements_in(
+            stack, config_tree, "main", config_tree.load_variables()
+        )
+    message = excinfo.value.message
+    ds_path = str(config_tree.profile_path("ds"))
+    chem_path = str(config_tree.profile_path("chem"))
+    assert "Refused 3 requirement entries" in message
+    assert f"'-r ${{DEV}}/a.txt' (in {ds_path}):" in message
+    assert f"'-c ${{DEV}}/c.txt' (in {ds_path}):" in message
+    assert f"'-c ${{DEV}}/b.txt' (in {chem_path}):" in message

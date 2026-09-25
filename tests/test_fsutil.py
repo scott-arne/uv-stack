@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import builtins
 import contextlib
 import errno
+import io
 import os
 import stat
 import time
@@ -18,6 +20,7 @@ from uv_stack.fsutil import (
     atomic_write_new,
     name_lock,
     read_text_utf8,
+    read_text_utf8_nofollow,
 )
 
 
@@ -1871,3 +1874,199 @@ def test_read_text_utf8_still_names_the_file_on_bad_bytes_when_exact(tmp_path: P
     with pytest.raises(ConfigError) as excinfo:
         read_text_utf8(path, exact_newlines=True)
     assert str(path) in excinfo.value.message
+
+
+def test_read_text_utf8_nofollow_reads_a_regular_file_verbatim(tmp_path: Path):
+    path = tmp_path / "f.txt"
+    path.write_bytes(b"a\r\nb\rc\n")
+    assert read_text_utf8_nofollow(path) == "a\r\nb\rc\n"
+
+
+def test_read_text_utf8_nofollow_reports_an_absent_path_as_none(tmp_path: Path):
+    # Distinct from an empty file, which reads as "". A caller splicing into a
+    # file it may also have to create needs the two apart.
+    assert read_text_utf8_nofollow(tmp_path / "missing.txt") is None
+    (tmp_path / "empty.txt").write_bytes(b"")
+    assert read_text_utf8_nofollow(tmp_path / "empty.txt") == ""
+
+
+@pytest.mark.skipif(not _O_NOFOLLOW, reason="requires O_NOFOLLOW")
+def test_read_text_utf8_nofollow_refuses_a_link_to_a_readable_file(tmp_path: Path):
+    """The difference from read_text_utf8, and the reason this exists.
+
+    require_regular_file accepts a symlink to a regular file and read_text_utf8
+    then returns the target's bytes, so a caller that tested the path and found
+    no link still reads through one planted immediately afterwards — with the
+    invoking user's permissions, reaching a file the planter may not be able to
+    read at all.
+    """
+    target = tmp_path / "secret.txt"
+    target.write_text("BEGIN PRIVATE KEY\n")
+    path = tmp_path / "f.txt"
+    path.symlink_to(target)
+
+    with pytest.raises(ConfigError) as excinfo:
+        read_text_utf8_nofollow(path)
+    assert str(path) in excinfo.value.message
+    assert "PRIVATE" not in excinfo.value.message
+    # The contrast is the point: the same path through the old read discloses.
+    assert read_text_utf8(path) == "BEGIN PRIVATE KEY\n"
+
+
+@pytest.mark.skipif(not _O_NOFOLLOW, reason="requires O_NOFOLLOW")
+def test_read_text_utf8_nofollow_refuses_a_dangling_link(tmp_path: Path):
+    # A dangling link is not exists(), so a caller guarding its read with one
+    # would read nothing and report the path absent — then create a regular
+    # file over the link. O_NOFOLLOW refuses before the question arises.
+    path = tmp_path / "f.txt"
+    path.symlink_to(tmp_path / "nowhere.txt")
+    with pytest.raises(ConfigError) as excinfo:
+        read_text_utf8_nofollow(path)
+    assert str(path) in excinfo.value.message
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
+@pytest.mark.skipif(not _O_NOFOLLOW, reason="requires O_NOFOLLOW")
+def test_read_text_utf8_nofollow_refuses_a_fifo_without_hanging(tmp_path: Path):
+    # The check is on the descriptor, and O_NONBLOCK is what lets the open
+    # return at all: a read-only open of a FIFO waits for a writer, and no test
+    # here will ever supply one.
+    path = tmp_path / "f.txt"
+    os.mkfifo(path)
+    with pytest.raises(ConfigError) as excinfo:
+        read_text_utf8_nofollow(path)
+    assert str(path) in excinfo.value.message
+
+
+def test_read_text_utf8_nofollow_names_the_file_on_bad_bytes(tmp_path: Path):
+    path = tmp_path / "f.txt"
+    path.write_bytes(b"\xff\xfe\n")
+    with pytest.raises(ConfigError) as excinfo:
+        read_text_utf8_nofollow(path)
+    assert str(path) in excinfo.value.message
+
+
+def test_read_text_utf8_nofollow_refuses_everything_without_both_guards(
+    tmp_path, monkeypatch
+):
+    """Without the open guards nothing present is read, and absence still reports.
+
+    There is no open on this arm that can refuse a symlink, so the function
+    makes no open at all: a link planted between a name check and a read would
+    otherwise be followed to a file the invoking user can read and the planter
+    cannot. A plain regular file is refused with the rest, because "it looked
+    like a regular file a moment ago" is precisely the evidence this arm has no
+    way to hold onto. Only a name with nothing at it reports absent, which is
+    what leaves the one caller able to create the file it manages.
+
+    Absence is decided by lstat, so a dangling link raises rather than
+    reporting absent — reporting absent would have the caller create over it.
+
+    Patch the module-level ``_FASTPATH_AVAILABLE``, not the ``os`` constants:
+    availability is computed once at import, so an ``os``-level substitution
+    arrives too late and the guarded arm runs instead.
+    """
+    from uv_stack import fsutil
+
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
+
+    absent = tmp_path / "absent.txt"
+    assert fsutil.read_text_utf8_nofollow(absent) is None
+
+    regular = tmp_path / "f.txt"
+    regular.write_bytes(b"a\r\nb\n")
+    with pytest.raises(ConfigError) as excinfo:
+        fsutil.read_text_utf8_nofollow(regular)
+    assert str(regular) in excinfo.value.message
+    # The reason is the platform, not the file: a user whose .gitignore is an
+    # ordinary file has nothing to fix about it.
+    assert "platform" in excinfo.value.message
+    assert "O_NOFOLLOW" in (excinfo.value.hint or "")
+
+    # The assertion that would have caught the original defect: the target's
+    # bytes must not be reachable through the link.
+    target = tmp_path / "secret.txt"
+    target.write_bytes(b"BEGIN PRIVATE KEY\n")
+    to_regular = tmp_path / "to-regular.txt"
+    to_regular.symlink_to(target)
+    with pytest.raises(ConfigError) as excinfo:
+        fsutil.read_text_utf8_nofollow(to_regular)
+    assert "PRIVATE" not in excinfo.value.message
+
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    to_directory = tmp_path / "to-directory.txt"
+    to_directory.symlink_to(directory)
+    with pytest.raises(ConfigError):
+        fsutil.read_text_utf8_nofollow(to_directory)
+
+    dangling = tmp_path / "dangling.txt"
+    dangling.symlink_to(tmp_path / "nowhere.txt")
+    with pytest.raises(ConfigError):
+        fsutil.read_text_utf8_nofollow(dangling)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform lacks mkfifo")
+def test_read_text_utf8_nofollow_refuses_a_fifo_without_guards_and_without_hanging(
+    tmp_path, monkeypatch
+):
+    """Split out because a regression here hangs the suite instead of failing it.
+
+    The old arm called ``require_regular_file`` before its open for exactly
+    this: without ``O_NONBLOCK`` a read-only open of a FIFO waits for a writer
+    no test will supply. The arm makes no open now, so the hazard is gone — but
+    a reintroduced open would park forever, so every route to one is made to
+    fail loudly rather than trusted not to be taken.
+
+    Patching ``os.open`` alone does not cover it, which is why there are three.
+    ``read_text_utf8`` — the call the removed arm made — reads through
+    ``Path.open``, and that reaches the C-level ``_io.open`` without ever
+    looking up the Python-visible ``os.open``. ``os.lstat`` is deliberately
+    left alone: it is what decides presence on this arm.
+
+    The patches are scoped to the one call rather than to the test so that an
+    assertion failing below is still reported by an unpatched pytest.
+    """
+    from uv_stack import fsutil
+
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
+
+    def _no_open(*args, **kwargs):
+        raise AssertionError("the guardless arm must not open anything")
+
+    path = tmp_path / "f.txt"
+    os.mkfifo(path)
+    with monkeypatch.context() as no_opens:
+        no_opens.setattr(os, "open", _no_open)
+        no_opens.setattr(io, "open", _no_open)
+        no_opens.setattr(builtins, "open", _no_open)
+        with pytest.raises(ConfigError) as excinfo:
+            fsutil.read_text_utf8_nofollow(path)
+
+    assert str(path) in excinfo.value.message
+    # The blanket refusal, not the old "not a regular file" by name: this arm
+    # no longer inspects the type it found, only that something was found.
+    assert "platform" in excinfo.value.message
+
+
+def test_read_text_utf8_nofollow_propagates_a_non_absence_lstat_error(
+    tmp_path, monkeypatch
+):
+    """The guardless arm splits errors exactly as the guarded one does.
+
+    ``FileNotFoundError`` is absence and answers ``None``; every other
+    ``OSError`` is the caller's to handle. Widening that to ``except OSError``
+    would report an unsearchable directory as an absent file, and the one
+    caller's answer to absent is to create.
+    """
+    from uv_stack import fsutil
+
+    monkeypatch.setattr(fsutil, "_FASTPATH_AVAILABLE", False)
+
+    def _denied(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    with monkeypatch.context() as denied:
+        denied.setattr(os, "lstat", _denied)
+        with pytest.raises(PermissionError):
+            fsutil.read_text_utf8_nofollow(tmp_path / "f.txt")

@@ -318,6 +318,30 @@ def test_status_reports_a_malformed_variables_file_as_a_config_error(
     assert "variables.txt" in status.message
 
 
+def test_status_is_ok_after_an_upgrade_on_a_root_that_uses_variables(
+    config_tree: ConfigRoot,
+):
+    """The two renders have to agree, or a portable root is never 'ok'.
+
+    ``upgrade`` writes the expanded ``requirements.in`` and ``status`` renders
+    it again to compare. Render either side with the references left literal
+    and every root that uses a variable reports 'sources changed' forever,
+    however freshly it was built. Only failure states were pinned before.
+    """
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text("DEV=/home/me/code\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${DEV}/mypkg\n")
+    _built(config_tree)
+    # The generated file holds the machine-specific path, never the reference.
+    generated = config_tree.env_requirements_in("main").read_text()
+    assert "-e /home/me/code/mypkg" in generated
+    assert "${DEV}" not in generated
+    status = env_status(
+        config_tree, RecordingRunner(responder=_existing_env_responder), "main"
+    )
+    assert status.state == "ok"
+
+
 def test_status_reports_an_undefined_variable_as_a_config_error(
     config_tree: ConfigRoot,
 ):

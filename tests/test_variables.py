@@ -50,8 +50,21 @@ _ADMITTED_WITH_REFERENCES = [
     "--index-url ${HOST}/simple",
 ]
 
+#: Entries whose only reference sits in a comment, plus one that carries a real
+#: reference alongside a comment. Kept out of _ADMITTED_WITH_REFERENCES because
+#: the invariant tests there describe a reference uv actually reads: the rows
+#: below expand to text uv discards, and the second one legitimately names a
+#: distribution ('pkg') that no value can change.
+_ADMITTED_WITH_COMMENTS = [
+    "-e ${DEV}/pkg # do not use -r here",
+    "pkg # see ${DEV} for the path",
+    "# install ${DEV}/pkg manually",
+    "${DEV}/pkg # plain note",
+]
+
 _ADMITTED = [
     *_ADMITTED_WITH_REFERENCES,
+    *_ADMITTED_WITH_COMMENTS,
     "numpy",
     "-e /absolute/path",
     "-r /abs/reqs.txt",
@@ -71,6 +84,10 @@ _REFUSED = [
     ("--requirement=${DEV}/reqs.txt", "misplaced-reference"),
     ("-e ${DEV}/safe\n-r ${DEV}/reqs.txt", "multiline-entry"),
     ("-e ${DEV/pkg", "malformed-reference"),
+    # A '#' inside a token is ordinary text to uv, so this entry's reference is
+    # code and condition 2 still judges it. Pinned here so the comment rule
+    # above cannot be widened into a substring search.
+    ("pkg#egg=thing ${DEV}", "misplaced-reference"),
 ]
 
 
@@ -127,6 +144,59 @@ def test_recursive_includes_fail_only_the_include_condition(entry):
     assert "condition 3" in explanation
     assert "condition 1" not in explanation
     assert "condition 2" not in explanation
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "--no-index -r ${DEV}/reqs.txt",
+        "--no-index -c ${DEV}/constraints.txt",
+        "--no-index -r${DEV}/reqs.txt",
+        "--no-index --requirement=${DEV}/reqs.txt",
+        "--index-url https://example.invalid/simple -r ${DEV}/reqs.txt",
+        "--pre --no-index -r ${DEV}/reqs.txt",
+    ],
+)
+def test_a_recursive_include_is_caught_behind_a_preceding_option(entry):
+    # Condition 3 is judged over every token, not just the first: uv reads
+    # '--no-index -r <file>' as a boolean option followed by a real include
+    # and does read that file, so a first-token-only test admits exactly the
+    # machine-local second requirements file the condition exists to refuse.
+    problem = placement_problem(entry)
+    assert problem is not None, entry
+    assert "condition 3" in problem[1]
+
+
+def test_a_recursive_option_inside_a_comment_is_not_an_include():
+    # The whole-sequence scan above must not reach past the comment marker: uv
+    # discards everything from '#' to the end of the line, so this entry opens
+    # no second requirements file at all.
+    assert placement_problem("-e ${DEV}/pkg # do not use -r here") is None
+
+
+def test_a_hash_inside_a_token_does_not_start_a_comment():
+    # The counterexample that fixes the comment rule at a token boundary. A
+    # '#' in mid-token is ordinary text to uv -- 'pkg#egg=thing' is one
+    # requirement -- so the reference after it is code and stays refused.
+    problem = placement_problem("pkg#egg=thing ${DEV}")
+    assert problem is not None
+    assert problem[0] == "misplaced-reference"
+
+
+def test_a_comment_does_not_rescue_a_trailing_backslash():
+    # Continuation is judged on the raw entry on purpose: the backslash ends
+    # the physical line whether or not a comment precedes it, so a code-portion
+    # reading would admit an entry that swallows the next requirement.
+    kind, _ = placement_problem("-e ${DEV}/pkg # note \\")
+    assert kind == "continuation-entry"
+
+
+def test_a_malformed_reference_inside_a_comment_is_still_named():
+    # The other deliberate asymmetry. uv would never read this text, so the
+    # typo cannot hurt it; naming it anyway is a judgment call about which
+    # mistake a user would rather hear about.
+    kind, _ = placement_problem("pkg # see ${DEV for the path")
+    assert kind == "malformed-reference"
 
 
 def test_multiline_is_refused_even_without_a_reference():
@@ -443,3 +513,45 @@ def test_expansion_problem_is_none_for_a_safe_substitution():
     # Placement refuses entries ending in a backslash, so expansion_problem
     # deliberately does not re-judge them.
     assert expansion_problem("${DEV}\\", "/home/me/dev\\") is None
+
+
+def test_check_placement_names_each_offenders_own_file():
+    """One error still lists every offender, and now says where each one lives.
+
+    The flattened call in render_requirements_in exists so a user sees the
+    whole list rather than one item per run; without a per-entry source that
+    list names entries and no files.
+    """
+    with pytest.raises(ConfigError) as excinfo:
+        check_placement(
+            ["-r ${DEV}/a.txt", "good-pkg", "${DEV}"],
+            sources=["/cfg/profiles/ds.yaml", None, "/cfg/profiles/chem.yaml"],
+        )
+    message = excinfo.value.message
+    assert "Refused 2 requirement entries" in message
+    assert "'-r ${DEV}/a.txt' (in /cfg/profiles/ds.yaml):" in message
+    assert "'${DEV}' (in /cfg/profiles/chem.yaml):" in message
+
+
+def test_check_placement_refuses_misaligned_sources():
+    """A short sources list would report the last entries with no file.
+
+    The ValueError is deliberate: zip would truncate silently, and a caller
+    would claim the feature worked while showing no file for entries that do
+    have one. Better to fail loudly than to lie.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        check_placement(["pkg-a", "pkg-b", "pkg-c"], sources=["a.yaml", "b.yaml"])
+    assert "sources has 2 items for 3 entries" in str(excinfo.value)
+
+
+def test_check_placement_refuses_both_source_and_sources():
+    """Passing both source and sources would give contradictory blame.
+
+    The header composes from source and each offender line from sources, so
+    accepting both would name two different files for one refusal. The source
+    docstring already tells multi-file callers to use sources instead.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        check_placement(["pkg"], source="whole.yaml", sources=["entry.yaml"])
+    assert "both source and sources" in str(excinfo.value)

@@ -29,12 +29,14 @@ _LINK_FALLBACK_ERRNOS = frozenset(
 #: absent getattr yields 0, which does not weaken the guard — it removes it,
 #: and an identity recheck afterwards comes too late to make up for it: it can
 #: reject what the open returned, not stop the open from following a symlink
-#: or hanging on a FIFO. Every caller that can decline the open therefore
-#: skips it entirely rather than take it unguarded; what each gives up by
-#: skipping differs, and is stated at the call site. name_lock's create is the
-#: one open that cannot be declined — there is no lock without it — so it
-#: passes both constants for whatever they are worth on the platform and
-#: rejects a non-regular target after the fact.
+#: or hanging on a FIFO. Callers answer that in one of two ways. Most can
+#: decline the open, and skip it entirely rather than take it unguarded; what
+#: each gives up by skipping differs, and is stated at the call site.
+#: read_text_utf8_nofollow declines too, and what it gives up is reading an
+#: existing file at all rather than reading one it cannot prove it opened.
+#: name_lock's create is the one open that cannot be declined at all — there is
+#: no lock without it — so it passes both constants for whatever they are worth
+#: on the platform and rejects a non-regular target after the fact.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 _FASTPATH_AVAILABLE = bool(_O_NOFOLLOW) and bool(_O_NONBLOCK)
@@ -105,13 +107,25 @@ _LOCK_CONTENDED_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCE
 _LOCK_UNOBTAINABLE_ERRNOS = frozenset({errno.ENOENT, errno.EACCES, errno.EPERM})
 
 
+#: What an ``O_NOFOLLOW`` open reports when a symlink is the final component.
+#: POSIX and Linux say ELOOP; the BSDs, and so historically macOS, say EMLINK.
+#: Both are accepted because which one arrives is the platform's choice, not a
+#: property of the link, and reading through a link on the platform that
+#: answers the other way is the failure this set exists to prevent.
+_NOFOLLOW_SYMLINK_ERRNOS = frozenset({errno.ELOOP, errno.EMLINK})
+
+
 def nofollow_read_flags() -> int | None:
     """Open flags for a read that must not follow a symlink or block.
 
     ``O_NOFOLLOW`` refuses a symlink at the path and ``O_NONBLOCK`` keeps the
-    open from blocking on a FIFO. Both are required for the read to be safe,
-    so a platform missing either gets ``None`` rather than a weaker flag set —
-    the caller declines the read instead of making an unsafe one.
+    open from blocking on a FIFO. Both are required for the read to be safe, so
+    a platform missing either gets ``None`` rather than a weaker flag set.
+
+    ``None`` says that the guarantee is unavailable and nothing more. What to do
+    about it is the caller's to decide, and every caller declines the read —
+    raising, or skipping an optional check and taking the safe alternative.
+    None of them takes it unguarded.
 
     :returns: Flags for :func:`os.open`, or ``None`` where this platform lacks
         the guards the read needs.
@@ -175,6 +189,96 @@ def read_text_utf8(path: Path, *, exact_newlines: bool = False) -> str:
             f"Cannot read {path}: not valid UTF-8.",
             hint="Re-save the file as UTF-8 text.",
         ) from error
+
+
+def read_text_utf8_nofollow(path: Path) -> str | None:
+    """Read ``path`` as UTF-8 verbatim, refusing a symlink.
+
+    Decoding and byte-exact newline handling are :func:`read_text_utf8` with
+    ``exact_newlines=True``; the refusal of a non-regular file is
+    :func:`require_regular_file`. What differs on the guarded arm is that both
+    are decided on an open descriptor rather than on the name, so neither
+    answer can go stale between the test and the read. Neither helper is called
+    on the other arm, which makes no open and so has nothing to decide.
+
+    That is the whole of its purpose. A caller that tests a path and then opens
+    it has made two syscalls, and a symlink planted between them is resolved by
+    the second: the caller reads a file it never agreed to read, with the
+    invoking user's permissions rather than the planter's, and whatever it does
+    with the content next is done on the planter's behalf. ``O_NOFOLLOW``
+    leaves no window — either the open got something that is not a symlink, or
+    it got nothing.
+
+    Where :func:`nofollow_read_flags` yields ``None`` that open cannot be made,
+    so none is made: anything standing at ``path`` is refused, and only a name
+    with nothing at it still reports absent. A plain regular file is refused
+    along with the rest, because without the guards there is no proving that
+    the thing opened is the thing that was stat'd — "it looked like a regular
+    file a moment ago" is the reasoning this function exists to stop resting
+    on. POSIX mandates both constants, so no POSIX platform pays for that.
+
+    :param path: The file to read.
+    :returns: The decoded text, or ``None`` when nothing is at ``path``.
+    :raises ConfigError: When a symlink stands at ``path``, when what is there
+        is not a regular file, when the bytes are not valid UTF-8, or — on a
+        platform lacking the guard constants — when anything at all stands at
+        ``path``.
+    """
+    flags = nofollow_read_flags()
+    if flags is None:
+        # Both guards or none, per nofollow_read_flags. POSIX requires both
+        # constants, so no POSIX platform reaches this arm; where one is absent
+        # — Windows has no O_NOFOLLOW — it is the only arm there is, and the
+        # suite drives it by patching the module-level _FASTPATH_AVAILABLE.
+        # Patching the os constants does not work: availability is decided once
+        # at import, so the substitution arrives too late to change it and the
+        # test exercises the guarded arm instead.
+        #
+        # Absence is settled on the name because exists() resolves the link: a
+        # dangling one answers False, and returning None for it would tell the
+        # caller to create over a link the user made on purpose.
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return None
+        raise ConfigError(
+            f"Cannot read {path} safely on this platform.",
+            hint=(
+                "This platform lacks O_NOFOLLOW or O_NONBLOCK, so a read here "
+                "cannot prove it opened the file it stat'd rather than a "
+                "symlink planted since. Move that path aside to have a fresh "
+                "file written in its place."
+            ),
+        )
+
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        if error.errno not in _NOFOLLOW_SYMLINK_ERRNOS:
+            raise
+        raise ConfigError(
+            f"Symlinked file: {path}",
+            hint="Replace it with a regular file.",
+        ) from error
+
+    with os.fdopen(fd, encoding="utf-8", newline="") as handle:
+        # On the descriptor, so a swap after the open cannot make this true
+        # about a file other than the one about to be read. O_NONBLOCK is why
+        # a FIFO reaches the check at all instead of parking the open.
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ConfigError(
+                f"Not a regular file: {path}",
+                hint="Remove or rename whatever is at that path.",
+            )
+        try:
+            return handle.read()
+        except UnicodeDecodeError as error:
+            raise ConfigError(
+                f"Cannot read {path}: not valid UTF-8.",
+                hint="Re-save the file as UTF-8 text.",
+            ) from error
 
 
 class Published(NamedTuple):
@@ -294,6 +398,26 @@ def link_or_copy_no_replace(
         raise
 
 
+def relax_to_conventional_mode(path: str | Path) -> None:
+    """Widen a ``mkstemp`` file from 0600 to the conventional file mode.
+
+    ``mkstemp`` creates 0600, which is the wrong mode to publish: a generated
+    file has to be readable like the hand-authored sources beside it, and a
+    root shared with a second account otherwise yields files only the writer
+    can read. The process umask is honoured, so a caller wanting the private
+    mode gets it by setting one.
+
+    Call it on the temporary file, before publication — the published name has
+    to appear with its final mode already on it.
+
+    :param path: The temporary file.
+    :raises OSError: When the mode cannot be changed.
+    """
+    umask = os.umask(0)
+    os.umask(umask)
+    os.chmod(path, 0o666 & ~umask)
+
+
 def atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically.
 
@@ -349,12 +473,7 @@ def atomic_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
-        # mkstemp creates the file 0600; relax it to the conventional file mode
-        # (honoring the process umask) so generated config files are readable
-        # like the hand-authored sources alongside them.
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(tmp_name, 0o666 & ~umask)
+        relax_to_conventional_mode(tmp_name)
         os.replace(tmp_name, path)
     except BaseException:
         if os.path.exists(tmp_name):
@@ -388,9 +507,7 @@ def atomic_write_new(path: Path, text: str) -> os.stat_result:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
-        umask = os.umask(0)
-        os.umask(umask)
-        os.chmod(tmp_name, 0o666 & ~umask)
+        relax_to_conventional_mode(tmp_name)
         return link_or_copy_no_replace(tmp_name, path).stat
     finally:
         if os.path.exists(tmp_name):
@@ -641,10 +758,12 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         below it, so the whole directory degrades rather than refusing or raising. All of that
         assumes both open guards, and so does every promise above it. POSIX requires both, and
         ``fcntl`` — which gates this function entirely — ships only where POSIX does, so the
-        guardless arm is defensive rather than reachable; the suite drives it by substituting the
-        constants. Which shape it refuses there is deliberately not promised here: the open resolves
-        a symlink that the ``lstat`` behind it does not, so the two halves of that arm disagree
-        about what is standing at the path, and no single rule covers both.
+        guardless create is defensive rather than reachable, and nothing in the suite drives it
+        either: that open takes the module constants directly, so patching ``_FASTPATH_AVAILABLE`` —
+        the substitution that reaches the read-only retry — leaves it exactly as it was. Which shape
+        it refuses there is therefore neither promised nor tested, deliberately: the open resolves a
+        symlink that the ``lstat`` behind it does not, so the two halves of that arm disagree about
+        what is standing at the path, and no single rule covers both.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
         symlink planted at ``path``, a socket or a device node the kernel will

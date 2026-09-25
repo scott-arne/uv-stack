@@ -138,11 +138,140 @@ def _children(directory: Path) -> tuple[list[Path], list[Finding]]:
         return [], [_unparseable(directory, str(error))]
 
 
+def _scaffold_directory_problem(name: str, path: Path) -> Finding | None:
+    """Probe one of the root's own directories, distinguishing three answers.
+
+    Absent and unreadable are not the same finding. ``os.path.isdir`` collapses
+    both into ``False``, and stat'ing a directory needs search permission on its
+    *parent* rather than on itself, so a whole config root one ``chmod`` from
+    usable would report every directory under it absent. That answer is not
+    merely imprecise: it is the one thing certainly untrue about a directory the
+    kernel declined to describe, and ``doctor --fix`` acts on it by running a
+    ``mkdir`` that fails for the same reason the stat did.
+
+    So a residual errno gets an ``unparseable-source`` warn, and this probe is
+    where it has to come from. Nothing downstream picks the path up: the scans
+    below are guarded by ``os.path.isdir``, which answers ``False`` for exactly
+    the errno that made the stat fail, so :func:`_children` never runs on it and
+    no walk names it. A root whose ``profiles/`` is a self-referential symlink
+    otherwise produces no findings whatsoever — a clean bill of health for a
+    directory doctor never managed to look at.
+
+    The warn describes a directory rather than a file, which is what
+    :func:`_children` already does with the same helper.
+
+    This warn overlaps the scan's on an unsearchable root, which fails this stat
+    *and* the listings :func:`_scan_sources` does, rendering the same errno for
+    the same path both times. :func:`_without_repeats` collapses the pair, which
+    is the right place for it: the scan's warn is not redundant in general —
+    a directory that stats but cannot be opened reaches only that one — so
+    neither probe may be silenced, and conditioning either on what the other
+    found would couple two checks that have no business knowing about each
+    other.
+
+    :param name: The directory's short name, for the missing-directory message.
+    :param path: The directory to probe.
+    :returns: A ``missing-dir`` error when nothing, or something that is not a
+        directory, is at ``path``; an ``unparseable-source`` warn when the probe
+        failed for any other reason; ``None`` when a directory is there.
+    """
+    try:
+        if stat.S_ISDIR(os.stat(path).st_mode):
+            return None
+    except (FileNotFoundError, NotADirectoryError):
+        # ENOENT and ENOTDIR are the two errnos that genuinely mean nothing is
+        # there: the last component is missing, or a component above it is not
+        # a directory, so no directory can be at the path either way.
+        pass
+    except OSError as error:
+        return _unparseable(path, str(error))
+    return Finding(
+        "error",
+        f"Missing {name} directory: {path}",
+        fix=f"Create {path} (or run 'stack config init').",
+        kind="missing-dir",
+        path=path,
+    )
+
+
+def _is_root_directory(child: Path, config: ConfigRoot) -> bool:
+    """Whether ``child`` is one of the config root's own directories.
+
+    Asked of the filesystem, not answered by transforming the name. On a
+    case-insensitive filesystem ``Envs`` IS ``envs`` — the directory every
+    other read in the program resolves — and treating it as an unknown
+    top-level entry ends in a ``mv`` that moves that directory into itself.
+
+    Casefolding the name instead would be the mirror bug named in the comment
+    below: on a case-sensitive filesystem ``Envs`` is a different directory,
+    and a real misplaced env inside it has to stay reportable. Asking leaves
+    each platform's answer to that platform.
+
+    :param child: A top-level entry of the config root.
+    :param config: The configuration root, for the known directory paths.
+    :returns: ``True`` when ``child`` is one of the root's own directories.
+    """
+    if child.name in _KNOWN_TOP_LEVEL:
+        return True
+    return any(
+        _same_directory(child, config.root / known) for known in _KNOWN_TOP_LEVEL
+    )
+
+
+def _same_directory(left: Path, right: Path) -> bool:
+    """Whether two paths name one directory, answering False when unknowable.
+
+    ``samefile`` raises when either side is absent, which for this question is
+    simply "no" — a root that has no ``lib/`` cannot have a case variant of one.
+
+    :param left: First path.
+    :param right: Second path.
+    :returns: ``True`` only when the filesystem says both name one directory.
+    """
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def _without_repeats(findings: list[Finding]) -> list[Finding]:
+    """Drop any finding exactly equal to one already reported.
+
+    Two findings agreeing on level, message, fix, kind, path and dest are
+    indistinguishable by construction: the CLI renders them as the same line,
+    so the second tells a reader nothing except that something went wrong
+    twice — which it did not. :func:`repair` would also act on both, attempting
+    the same move or write a second time on a tree the first one changed.
+
+    A general guard, not a patch for one pair. The pair that motivated it is an
+    unsearchable root, where the scaffold-directory stat and the listing
+    :func:`_scan_sources` does both fail with the same errno on the same path
+    and both render it through :func:`_unparseable`; independent probes reaching
+    one conclusion is the shape, and nothing stops another pair from taking it.
+
+    Comparison is by ``==`` over a list rather than through a ``set`` or
+    ``dict.fromkeys``, because :class:`Finding` is a plain mutable dataclass: it
+    has ``__eq__`` and no ``__hash__``. The list scan is quadratic in a sequence
+    that is a handful of items long on any tree worth diagnosing.
+
+    :param findings: The findings collected, in the order they were produced.
+    :returns: The same findings with later exact repeats removed, first
+        occurrence kept, order otherwise untouched.
+    """
+    unique: list[Finding] = []
+    for finding in findings:
+        if finding not in unique:
+            unique.append(finding)
+    return unique
+
+
 def diagnose(config: ConfigRoot) -> list[Finding]:
     """Inspect the config tree and return findings.
 
     :param config: The configuration root to inspect.
-    :returns: A list of :class:`Finding` (empty if everything looks correct).
+    :returns: A list of :class:`Finding` (empty if everything looks correct),
+        in the order the probes ran, with exact repeats dropped by
+        :func:`_without_repeats`.
     """
     findings: list[Finding] = []
 
@@ -150,6 +279,11 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
     # cannot act on with False, rather than the pathlib one, which re-raises
     # anything but a missing path. A directory this user cannot search is a
     # thing to report, not a reason to abort before reporting anything at all.
+    #
+    # The root's own probe keeps that spelling deliberately. Unlike the three
+    # below, nothing else in the run would name an unstattable root: the early
+    # return is there because no later check can say anything useful, so the
+    # imprecise error is the only report there is, and it carries a fix.
     if not os.path.isdir(config.root):
         findings.append(
             Finding(
@@ -167,16 +301,14 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
         ("bundles", config.bundles_dir),
         ("envs", config.envs_dir),
     ):
-        if not os.path.isdir(directory):
-            findings.append(
-                Finding(
-                    "error",
-                    f"Missing {name} directory: {directory}",
-                    fix=f"Create {directory} (or run 'stack config init').",
-                    kind="missing-dir",
-                    path=directory,
-                )
-            )
+        # _scaffold_directory_problem, not the isdir spelling: these three sit
+        # under a root that may be listable without being searchable, and
+        # calling them missing then contradicts the unparseable-source warns
+        # the same run emits about the same paths -- with a mkdir that cannot
+        # succeed. The probe says which of the three answers it got.
+        problem = _scaffold_directory_problem(name, directory)
+        if problem is not None:
+            findings.append(problem)
 
     # Leftover pre-YAML config files (clean break: these are no longer read).
     # Walked rather than globbed: glob answers a directory it cannot read with
@@ -230,7 +362,7 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
     root_children, walk_findings = _children(config.root)
     findings += walk_findings
     for child in root_children:
-        if not os.path.isdir(child) or child.name in _KNOWN_TOP_LEVEL:
+        if not os.path.isdir(child) or _is_root_directory(child, config):
             continue
         child_entries, walk_findings = _children(child)
         findings += walk_findings
@@ -334,7 +466,7 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
 
     findings.extend(_portability_findings(config))
 
-    return findings
+    return _without_repeats(findings)
 
 
 @dataclass
@@ -754,11 +886,12 @@ def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
         with name_lock(config.stem_lock_path(stem), stem):
             return _convert_under_stem_lock(config, finding, description, stem)
     except ConfigError as error:
-        # Nothing inside the block raises ConfigError, so this is the lock
-        # itself: contended past its timeout, or standing on something
-        # name_lock refuses. Skip this one finding and say why. Letting it out
-        # would abort the whole pass — repair() catches only OSError — and cost
-        # every later finding its fix over one unavailable stem. The hint
+        # Either the lock — contended past its timeout, or standing on
+        # something name_lock refuses — or the source read inside, which
+        # refuses bytes that are not UTF-8. Both describe themselves, so this
+        # skips the one finding and says why. Letting it out would abort the
+        # whole pass — repair() catches only OSError — and cost every later
+        # finding its fix over one unavailable stem. The hint
         # carries the actionable half of every one of these — which process to
         # look for, what not to delete — and the skip line is the only place
         # the user ever sees this error, so fold it in rather than drop it.
@@ -814,6 +947,29 @@ def _convert_under_stem_lock(
             reason=f"{finding.path.name}.bak already exists",
         )
     includes = read_clean_lines(finding.path)
+    # A conversion is a durable writer of human-typed entries, so it owes the
+    # same placement rule init, create, and edit enforce on their own writes.
+    # Without it the pass reports a fix and leaves a generated YAML that every
+    # later command refuses -- naming that file, while the legacy one the user
+    # actually wrote sits renamed to '.bak'. Judged with placement_problem
+    # rather than check_placement: a repair pass must not abort because the
+    # thing it diagnoses is broken, so a refused entry skips this one finding.
+    refused = [
+        (entry, problem[1])
+        for entry in includes
+        if (problem := placement_problem(entry)) is not None
+    ]
+    if refused:
+        entry, explanation = refused[0]
+        noun = "entry" if len(refused) == 1 else "entries"
+        return RepairAction(
+            finding, description, applied=False,
+            reason=(
+                f"{finding.path.name} holds {len(refused)} {noun} uv-stack will "
+                f"not write, starting with {entry!r}: {explanation}. Fix them "
+                "there, then re-run"
+            ),
+        )
     # Publish the YAML with atomic_write_new; capture stat for identity check.
     try:
         dest_stat = atomic_write_new(
@@ -1091,31 +1247,80 @@ def _editable_target(entry: str) -> str | None:
     ``=``, and the value carries no URL scheme. Anything else is a remote
     install with no path to check.
 
+    The operand is extracted verbatim from the original entry to preserve
+    interior whitespace exactly as written — uv reads ``-e ./my  pkg`` as the
+    single path ``my  pkg`` with two spaces, and ``split()`` would discard the
+    run length. In both the attached (``-e=PATH``) and separated (``-e PATH``)
+    forms, the operand runs to the end of the entry, except that it stops at
+    the first whitespace run preceding a token that begins with ``-`` or ``#``.
+    A requirements file treats ``#`` as a comment marker at the start of a line
+    or after whitespace, so ``-e ./pkg # note`` installs from ``./pkg``, while
+    a ``#`` inside a token is ordinary text and ``-e ./pkg#1`` installs from
+    ``./pkg#1``.
+
     A trailing PEP 508 extras suffix is dropped from the operand.
 
     :param entry: One expanded requirement entry.
     :returns: The path operand, or ``None``.
     """
-    parts = entry.split()
-    if not parts:
+    stripped = entry.strip()
+    if not stripped:
         return None
+    parts = stripped.split()
     # uv is what consumes these entries, so its parser sets the boundary: it
     # accepts '-e=PATH' and '--editable=PATH' as readily as the separated
     # forms, but refuses '-ePATH' with "Expected '=' or whitespace". Reading a
     # path out of the glued form would report a missing checkout for an entry
     # that cannot install for an entirely different reason.
-    flag, attached, operand = parts[0].partition("=")
+    flag, attached, operand_start = parts[0].partition("=")
     if flag not in ("-e", "--editable"):
         return None
     # An attached '=' with nothing after it is still a separator to uv, which
     # reads '-e= PATH' exactly as '-e PATH'. Treating the empty operand as the
     # value would drop a checkout doctor is supposed to be watching.
-    if attached and operand:
-        target = operand
+    if attached and operand_start:
+        # The attached form: everything after the '=' in the original entry.
+        # The operand_start from partition is only what sat in the first
+        # token, so we slice the stripped entry to get the whole remainder.
+        remainder = stripped[len(flag) + 1 :]
     elif len(parts) >= 2:
-        target = parts[1]
+        # The separated form: everything after the flag and its trailing
+        # whitespace. We slice from the original entry rather than rejoining
+        # split() to preserve interior whitespace exactly as written.
+        flag_text = parts[0]
+        remainder = stripped[len(flag_text) :].lstrip()
+        # When the remainder begins with a comment, the operand is empty. The
+        # lstrip() ensures a leading '#' here genuinely followed whitespace, so
+        # it is a comment marker per the requirements file line semantics rather
+        # than ordinary text inside a token. In '-e=#note' the '#' is glued to
+        # the '=' with no space, so the attached branch keeps it as a path. uv
+        # sees a bare '-e' when the separated operand is only a comment, which
+        # is a malformed entry, not a checkout.
+        if remainder.startswith("#"):
+            return None
     else:
         return None
+    # uv reads everything after the flag as one path, but '-e ./my pkg --opt'
+    # stops the path at the option, and '-e ./pkg # note' stops the path at the
+    # comment. We scan the remainder for the first whitespace run followed by
+    # a token starting with '-' or '#', and cut there. A requirements file
+    # treats '#' as a comment marker at the start of a line or after whitespace,
+    # not inside a token, so './pkg#1' keeps its '#'. An option or comment
+    # cannot be part of a path uv would accept here, and a path that genuinely
+    # begins with '-' is the first token, so this rule applies only to later
+    # tokens.
+    target = remainder
+    for index, char in enumerate(remainder):
+        if char.isspace():
+            after = index
+            while after < len(remainder) and remainder[after].isspace():
+                after += 1
+            # The cut lands before the whitespace run rather than before the
+            # '-' or '#': the run separates the two tokens and belongs to
+            # neither, so keeping it would leave the path with a trailing space.
+            if after < len(remainder) and remainder[after] in ("-", "#"):
+                target = remainder[:index]
+                break
     if "://" in target or target.startswith("git+"):
         return None
     # pip reads '-e ./pkg[dev]' as the path './pkg' carrying extras, so probing
@@ -1320,6 +1525,30 @@ def _ignore_block_findings(config: ConfigRoot) -> list[Finding]:
     ]
 
 
+def _variables_blame(config: ConfigRoot, error: UvStackError | OSError) -> Path:
+    """Name the variables file a failed load was actually about.
+
+    ``load_variables`` reads two files and consults the environment, so the
+    call doctor made identifies none of them. Built from the declaration path
+    unconditionally, the finding told a reader to fix ``variables.txt`` when
+    the fault was in ``variables.local.txt`` -- and pointed a ``--json``
+    consumer at the wrong one, with the message naming the real file only in
+    its tail.
+
+    :param config: The configuration root, for the fallback.
+    :param error: Whatever escaped the load.
+    :returns: The file the raiser blamed, the file the kernel named, or the
+        declaration file. The last is the fallback rather than nothing because
+        an environment override belongs to no file at all, and the declaration
+        file is what admitted the name; the message says which variable it was.
+    """
+    if isinstance(error, ConfigError) and error.path is not None:
+        return error.path
+    if isinstance(error, OSError) and isinstance(error.filename, str):
+        return Path(error.filename)
+    return config.variables_path()
+
+
 def _portability_findings(config: ConfigRoot) -> list[Finding]:
     """Every portability check, ordered so a broken root still reports usefully.
 
@@ -1337,7 +1566,7 @@ def _portability_findings(config: ConfigRoot) -> list[Finding]:
     try:
         variables = config.load_variables()
     except (UvStackError, OSError) as error:
-        findings.append(_unparseable(config.variables_path(), str(error)))
+        findings.append(_unparseable(_variables_blame(config, error), str(error)))
         return findings
 
     references = _reference_findings(config, entries, variables)

@@ -42,6 +42,12 @@ RECURSIVE_OPTIONS = frozenset({"-r", "--requirement", "-c", "--constraint"})
 #: How much of an entry to quote when reporting a malformed reference.
 _FRAGMENT_WINDOW = 24
 
+#: A comment marker: a ``#`` that *begins* a whitespace-separated token, so it
+#: sits at the start of the entry or directly after whitespace. The preceding
+#: whitespace is part of the match so that slicing at :attr:`re.Match.start`
+#: drops the separator along with the comment.
+_COMMENT_RE = re.compile(r"(?:^|\s)#")
+
 
 @dataclass(frozen=True)
 class Variables:
@@ -116,13 +122,31 @@ def _first_token(entry: str) -> str:
     return tokens[0] if tokens else ""
 
 
+def _code_portion(entry: str) -> str:
+    """The part of ``entry`` uv actually reads, with any comment cut away.
+
+    A requirements file treats ``#`` as a comment marker at the start of a line
+    or after whitespace — exactly a token that begins with one — and discards it
+    along with the rest of the line. A ``#`` inside a token is ordinary text, so
+    ``pkg#egg=thing`` stays one requirement rather than becoming a bare ``pkg``.
+    This is the same definition of a comment :func:`expansion_problem` uses on
+    the other side of substitution.
+
+    :param entry: One requirement entry, a single physical line.
+    :returns: The text before the comment marker, or the whole entry when there
+        is none. The empty string when the entry is nothing but a comment.
+    """
+    match = _COMMENT_RE.search(entry)
+    return entry if match is None else entry[: match.start()]
+
+
 def _is_recursive_include(token: str) -> bool:
     """Whether ``token`` is a requirements-file or constraints-file option.
 
     Covers the bare (``-r``), attached-short (``-rFILE``), and attached-long
     (``--requirement=FILE``) spellings; pip accepts all three.
 
-    :param token: The entry's first token.
+    :param token: One whitespace-separated token of an entry.
     :returns: ``True`` when the token opens a recursive include.
     """
     if token in RECURSIVE_OPTIONS:
@@ -159,6 +183,26 @@ def placement_problem(entry: str) -> tuple[str, str] | None:
       message distinguishes an entry that fails one condition from one that
       fails several.
 
+    Only the last of the four is judged on the entry's code portion — the text
+    before any comment marker, per :func:`_code_portion`. uv discards a comment
+    entirely, so a reference inside one occupies no position and opens no
+    include; judging the raw entry refuses ``-e ${DEV}/pkg # do not use -r
+    here``, which is a correct line.
+
+    The first three deliberately stay on the raw entry. The asymmetry is not an
+    oversight:
+
+    - a comment cannot contain a newline, so ``multiline-entry`` reads the same
+      either way;
+    - a trailing backslash inside a comment still continues the *physical*
+      line, so ``-e ${DEV}/pkg # note \\`` swallows the requirement written
+      after it. Judging continuation on the code portion would admit exactly
+      that;
+    - a malformed ``${`` in a comment cannot hurt uv, which never reads it.
+      Naming it anyway is a judgment call and not a consequence: a typo in a
+      reference is worth hearing about wherever it was written, and a user who
+      meant the line to be inert loses nothing by fixing it.
+
     :param entry: One requirement entry, unexpanded.
     :returns: ``(kind, explanation)`` or ``None``.
     """
@@ -181,37 +225,75 @@ def placement_problem(entry: str) -> tuple[str, str] | None:
             "malformed-reference",
             f"'{fragment}' is not a well-formed reference; write ${{NAME}}",
         )
-    if not referenced_names(entry):
+    # Everything from here down reads the code portion, for the reason given in
+    # the docstring: a reference uv never reads cannot be misplaced. Computed
+    # once so the four reads below cannot disagree about where the comment
+    # starts.
+    code = _code_portion(entry)
+    if not referenced_names(code):
         return None
 
-    token = _first_token(entry)
+    token = _first_token(code)
     failed = []
-    if ownership_name(entry) is not None:
+    if ownership_name(code) is not None:
         failed.append(1)
     if not (token.startswith("-") or "/" in token or "\\" in token):
         failed.append(2)
-    if _is_recursive_include(token):
+    # Judged over every token, not just the first. uv reads an option line as
+    # one option, so a value-taking option swallows a trailing '-r' -- but a
+    # BOOLEAN one does not: uv reads '--no-index -r ${DEV}/reqs.txt' as
+    # --no-index followed by a real include, and does read that file. pip is
+    # looser still and accepts a recursive option after any option at all. A
+    # first-token-only test therefore admits exactly the machine-local second
+    # requirements file condition 3 exists to refuse. This is the same
+    # whole-sequence reading expansion_problem already applies. It stops at the
+    # comment, which is what keeps the scan from reading prose as an option.
+    if any(_is_recursive_include(other) for other in code.split()):
         failed.append(3)
     if not failed:
         return None
     return ("misplaced-reference", "; ".join(_CONDITION_TEXT[number] for number in failed))
 
 
-def check_placement(entries: Sequence[str], *, source: str | None = None) -> None:
+def check_placement(
+    entries: Sequence[str],
+    *,
+    source: str | None = None,
+    sources: Sequence[str | None] | None = None,
+) -> None:
     """Refuse a multiline, continuation, malformed, or misplaced entry.
 
     Reports every offender at once, naming the condition each one failed, so a
     caller fixing a profile sees the whole list rather than one item per run.
 
     :param entries: The entries as written, unexpanded.
-    :param source: The file the entries came from, for the message.
+    :param source: The one file the entries came from, for the message. For a
+        caller whose sequence spans several files, use ``sources`` instead.
+    :param sources: The file each entry came from, positionally aligned with
+        ``entries``, or ``None`` for an entry with no single file. Lets a
+        flattened sequence keep per-entry blame while still reporting every
+        offender in one error.
     :raises ConfigError: When any entry is refused.
+    :raises ValueError: When both ``source`` and ``sources`` are given — the
+        header would name one file and the offender lines another. Also when
+        ``sources`` is given and is not the same length as ``entries`` — a
+        misalignment would attach the wrong file to a refusal, which is worse
+        than attaching none.
     """
+    if source is not None and sources is not None:
+        raise ValueError("cannot pass both source and sources")
+    if sources is not None and len(sources) != len(entries):
+        raise ValueError(
+            f"sources has {len(sources)} items for {len(entries)} entries"
+        )
     problems: list[str] = []
-    for entry in entries:
+    for index, entry in enumerate(entries):
         problem = placement_problem(entry)
-        if problem is not None:
-            problems.append(f"  {entry!r}: {problem[1]}")
+        if problem is None:
+            continue
+        origin = sources[index] if sources is not None else None
+        held_by = f" (in {origin})" if origin else ""
+        problems.append(f"  {entry!r}{held_by}: {problem[1]}")
     if not problems:
         return
     where = f" in {source}" if source else ""
@@ -341,7 +423,12 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
     return None
 
 
-def expand_all(entries: Sequence[str], variables: Variables) -> list[str]:
+def expand_all(
+    entries: Sequence[str],
+    variables: Variables,
+    *,
+    sources: Sequence[str | None] | None = None,
+) -> list[str]:
     """Substitute every reference in ``entries``.
 
     Three checks run in order over the whole sequence, so one error names every
@@ -357,12 +444,15 @@ def expand_all(entries: Sequence[str], variables: Variables) -> list[str]:
 
     :param entries: The entries as written.
     :param variables: The declared names and this machine's values.
+    :param sources: The file each entry came from, positionally aligned with
+        ``entries``, for the placement message. A caller flattening several
+        files into one sequence passes it so the refusal still names them.
     :returns: The expanded entries, positionally aligned with ``entries``.
     :raises ConfigError: On a refused entry, an undeclared name, a declared
         name with no value on this machine, or a value whose substitution
         would change which options an entry carries.
     """
-    check_placement(entries)
+    check_placement(entries, sources=sources)
 
     undeclared: list[str] = []
     undefined: list[str] = []
