@@ -333,7 +333,7 @@ def write_portable_ignore(
     can read and the planter cannot. It is not race-free in general, because
     ``O_NOFOLLOW`` declines a symlink and nothing else: where the guards exist,
     a *regular* file renamed over the path between the check and the open is
-    read as though it were the original. A second hard link no longer reaches
+    read as though it were the original. A second hard link no longer survives
     the read, but it is the link count that refuses it, not ``O_NOFOLLOW``.
     The price of the second arm is that a guardless platform
     cannot refresh an ignore file that is already there, only create one that
