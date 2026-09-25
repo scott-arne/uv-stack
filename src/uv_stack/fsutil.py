@@ -23,6 +23,17 @@ _LINK_FALLBACK_ERRNOS = frozenset(
     | ({getattr(errno, "ENOTSUP")} if hasattr(errno, "ENOTSUP") else set())  # noqa: B009
 )
 
+#: Platform policy for the three availability constants in this package
+#: (_FASTPATH_AVAILABLE here, _LOCK_AVAILABLE below, _PTY_AVAILABLE in
+#: runner.py): a missing facility that invalidates a *guarantee* fails closed,
+#: and one that costs only *convenience* degrades. That is why these three do
+#: not agree and should not be made to. Failing closed on the lock would turn
+#: every create into an error on a mount that cannot lock; degrading the
+#: no-follow read would hand back bytes it cannot prove came from the file it
+#: stat'd. The package declares POSIX in its classifiers accordingly: Windows
+#: has none of these facilities, and there write_portable_ignore can create an
+#: absent ignore file but not refresh one that is already there.
+
 #: True only where BOTH guard flags exist. Opening a target whose type is not
 #: known in advance needs both: O_NOFOLLOW so a symlinked target is never
 #: opened, O_NONBLOCK so a FIFO target never blocks the open. Where either is
