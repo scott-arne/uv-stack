@@ -118,6 +118,38 @@ def test_an_env_directory_without_a_stack_txt_is_not_a_finding(
     assert diagnose(config_tree) == []
 
 
+def test_an_env_like_directory_with_no_stack_txt_is_reported(config_tree: ConfigRoot):
+    """Generated artifacts and no stack.txt is a broken env, not a stray directory.
+
+    list_envs keys on stack.txt, so this one is absent from every listing in
+    the program while 'stack env sync' answers that no such env exists and its
+    own compiled lock sits right beside it. The test above stays silent on a
+    directory holding only notes, and the marker is the whole difference: it
+    is what says somebody meant an env here.
+    """
+    env = config_tree.env_dir("stale")
+    env.mkdir()
+    (env / "requirements.in").write_text("numpy\n")
+
+    findings = diagnose(config_tree)
+
+    assert _kinds(findings) == ["missing-stack-txt"]
+    assert findings[0].level == "error"
+    assert findings[0].path == env / "stack.txt"
+
+
+def test_a_legacy_profiles_txt_is_not_also_a_missing_stack_txt(config_tree: ConfigRoot):
+    # Both findings fit this directory and they disagree: one says rename the
+    # file that is there, the other says create the one that is not. The
+    # rename is the entire remedy, so it is the only finding.
+    env = config_tree.env_dir("legacy")
+    env.mkdir()
+    (env / "profiles.txt").write_text("@standard\n")
+    (env / "requirements.in").write_text("numpy\n")
+
+    assert _kinds(diagnose(config_tree)) == ["legacy-profiles-txt"]
+
+
 def test_env_missing_python_txt_flagged(config_tree: ConfigRoot):
     config_tree.env_python_path("main").unlink()
     messages = [f.message for f in diagnose(config_tree)]

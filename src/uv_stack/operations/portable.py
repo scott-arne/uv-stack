@@ -515,11 +515,22 @@ def write_directory_keepers(config: ConfigRoot, *, dry_run: bool = False) -> lis
     and the block read it from — does not travel, so a ``profiles/`` holding
     only that one is gone after a clone exactly as a truly empty one would be.
 
-    The test is over bare names and goes no deeper. An ``envs/`` holding a
-    single ``envs/<name>/`` whose every file the block ignores still counts as
-    non-empty, because answering that properly means reimplementing gitignore
-    matching, and a command that prints git advice rather than running git is
-    the wrong place for a second implementation of it.
+    The test is over bare names and goes no deeper, so an ``envs/`` whose
+    every child is an empty or generated-only ``envs/<name>/`` counts as
+    non-empty and is gone after a clone all the same. That shape is
+    reachable — a bare ``mkdir envs/foo`` is enough — and it is left alone on
+    its cost, not on any difficulty. Neither ``stack.txt`` nor ``python.txt``
+    is ignored, so an env with either one travels and carries ``envs/`` with
+    it; a root that reaches this therefore has no usable env in it, and what
+    the clone loses is the empty directory alone, which its own ``stack
+    doctor`` reports and repairs.
+
+    Closing it means reading paths rather than names, and that is a second
+    implementation of the block's own matching: gitignore's ``*`` does not
+    cross a separator where :mod:`fnmatch`'s does, and erring the loose way
+    puts placeholders in directories that would have travelled — a tracked
+    file nothing ever removes, which is the outcome this test exists to
+    avoid.
 
     A scaffold directory that is itself a symlink is skipped. Not only because
     ``is_dir`` and ``iterdir`` both follow the final component, so the answers

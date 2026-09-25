@@ -5,9 +5,10 @@ locking works at all; the path is resolved the same way ``name_lock`` resolves
 it, so a ``.locks`` that is a symlink to a directory sends the write to that
 directory. It returns a list of findings the CLI prints with suggested fixes. It
 flags missing directories, legacy names (``*.in``, ``*.bundle``,
-``profiles.txt``), env-like directories left at the root, envs missing their
-source files, and a config root whose filesystem cannot serve the advisory locks
-that serialize concurrent creates.
+``profiles.txt``), env-like directories left at the root or left without the
+``stack.txt`` that gets them listed, envs missing their source files, and a
+config root whose filesystem cannot serve the advisory locks that serialize
+concurrent creates.
 
 It also reports portability problems: declared variables with no value here,
 references that are undeclared, malformed, or in an entry that may not hold
@@ -401,7 +402,8 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
         for env_dir in env_children:
             if not os.path.isdir(env_dir):
                 continue
-            if os.path.exists(env_dir / "profiles.txt"):
+            has_profiles_txt = os.path.exists(env_dir / "profiles.txt")
+            if has_profiles_txt:
                 findings.append(
                     Finding(
                         "warn",
@@ -426,6 +428,29 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                         f"Env '{env_dir.name}' has a stack.txt that is not a regular file",
                         fix=f"Replace {stack_txt} with a regular file, or remove {env_dir}.",
                         kind="unusable-env",
+                        path=stack_txt,
+                    )
+                )
+            # An absent stack.txt is not a broken env on its own -- a
+            # directory parked under envs/ holding notes is simply not one,
+            # and saying otherwise reports a user's own file as a defect. A
+            # marker is what distinguishes the two: it means a sync ran here,
+            # so this is an env that list_envs drops while its compiled lock
+            # sits beside it and 'stack env sync' answers that it does not
+            # exist. Skipped when profiles.txt is there, because the legacy
+            # finding above already names the remedy and this one would
+            # contradict it -- create the file, against rename the one you
+            # have. Report-only for unusable-env's reason: doctor cannot guess
+            # what the file was meant to contain.
+            elif not has_profiles_txt and any(
+                os.path.lexists(env_dir / marker) for marker in _ENV_MARKERS
+            ):
+                findings.append(
+                    Finding(
+                        "error",
+                        f"Env-like directory with no stack.txt: {env_dir.name}",
+                        fix=f"Create {stack_txt}, or remove {env_dir}.",
+                        kind="missing-stack-txt",
                         path=stack_txt,
                     )
                 )
