@@ -54,8 +54,10 @@ def _lock_supported() -> bool:
 #: True only where fcntl.flock exists. Where it does not, name_lock is a no-op
 #: and the writers fall back to their post-publish collision checks alone: the
 #: both-processes-survive race stays closed, while the killed-mid-window case
-#: and the adopter residual do not. Same degrade-silently posture as
-#: _FASTPATH_AVAILABLE above and _PTY_AVAILABLE in runner.py.
+#: and the adopter residual do not. That is a silent degrade, and so is
+#: _PTY_AVAILABLE's in runner.py. _FASTPATH_AVAILABLE above is the one that
+#: declines instead, because a guard it cannot apply is a guarantee it cannot
+#: make. The split is deliberate, not an oversight.
 _LOCK_AVAILABLE = _lock_supported()
 
 #: Read at call time, not bound as a default argument, so a test can shorten it.
@@ -756,14 +758,16 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
         parent it will not resolve — a loop, or a chain past its link budget. A FIFO is the shape
         that never escapes, at any mode. A parent this user may not search hides whatever stands
         below it, so the whole directory degrades rather than refusing or raising. All of that
-        assumes both open guards, and so does every promise above it. POSIX requires both, and
-        ``fcntl`` — which gates this function entirely — ships only where POSIX does, so the
-        guardless create is defensive rather than reachable, and nothing in the suite drives it
-        either: that open takes the module constants directly, so patching ``_FASTPATH_AVAILABLE`` —
-        the substitution that reaches the read-only retry — leaves it exactly as it was. Which shape
-        it refuses there is therefore neither promised nor tested, deliberately: the open resolves a
-        symlink that the ``lstat`` behind it does not, so the two halves of that arm disagree about
-        what is standing at the path, and no single rule covers both.
+        assumes both open guards, as does every promise above it bar the two about their absence:
+        the guardless no-op, and the guardless platform where an unopenable regular file goes
+        unrefused. POSIX requires both, and ``fcntl`` — which gates this function entirely — ships
+        only where POSIX does, so the guardless create is defensive rather than reachable, and
+        nothing in the suite drives it either: that open takes the module constants directly, so
+        patching ``_FASTPATH_AVAILABLE`` — the substitution that reaches the read-only retry —
+        leaves it exactly as it was. Which shape it refuses there is therefore neither promised nor
+        tested, deliberately: the open resolves a symlink that the ``lstat`` behind it does not, so
+        the two halves of that arm disagree about what is standing at the path, and no single rule
+        covers both.
     :raises OSError: If the lock file cannot be opened for a reason that is
         neither of those and not a permission problem. An over-long name, a
         symlink planted at ``path``, a socket or a device node the kernel will
