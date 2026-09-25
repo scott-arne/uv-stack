@@ -1388,6 +1388,15 @@ def test_an_undeclared_reference_in_a_stack_txt_is_found(config_tree: ConfigRoot
     assert finding.path == config_tree.env_stack_path("main")
 
 
+def test_a_reference_only_in_a_comment_is_not_undeclared(config_tree: ConfigRoot):
+    # Doctor must agree with the renderer about what an entry references. uv
+    # discards the comment, so a name there is prose, and reporting it would
+    # send the user to declare a variable nothing reads.
+    config_tree.profile_path("dev").write_text("includes:\n  - numpy  # not ${NOPE}\n")
+    kinds = {f.kind for f in diagnose(config_tree)}
+    assert "undeclared-variable" not in kinds
+
+
 @pytest.mark.parametrize("entry", ["-e ${UV-ROOT}/pkg", "-e ${1ROOT}/pkg", "-e ${ROOT"])
 def test_a_malformed_reference_is_an_error(config_tree: ConfigRoot, entry):
     # A hyphen, a leading digit, and an unterminated opener: three ways to

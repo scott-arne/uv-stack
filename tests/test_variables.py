@@ -26,6 +26,11 @@ def test_referenced_names_ignores_a_bare_dollar():
     assert referenced_names("pkg @ https://host/$path") == []
 
 
+def test_referenced_names_skips_a_comment():
+    # uv discards the comment, so a name there is prose and not a reference.
+    assert referenced_names("${DEV}/pkg.whl  # rebuilt from ${SRC}") == ["DEV"]
+
+
 def test_reference_requires_braces():
     # Only '${' opens a reference; a bare '$DEV' is ordinary text.
     assert referenced_names("-e $DEV/pkg") == []
@@ -306,6 +311,35 @@ def test_a_backslash_in_a_value_survives_substitution():
     assert expand_all([r"-e ${DEV}\pkg"], variables) == [r"-e C:\dev\pkg"]
 
 
+def test_a_reference_only_in_a_comment_needs_no_declaration():
+    """Placement admits the entry, so expansion must not then refuse it.
+
+    The two judged different views of the same line: placement read the code
+    portion and expansion read the whole of it, so an entry could be legal at
+    one stage and illegal at the next over a name that is only ever prose.
+    """
+    entry = "numpy  # see ${DEV} for the path"
+    assert placement_problem(entry) is None
+    assert expand_all([entry], _vars()) == [entry]
+
+
+def test_expansion_leaves_a_comment_byte_for_byte():
+    # uv discards the comment, so there is nothing in it to substitute -- and
+    # the run of spaces proves the tail is carried over rather than rebuilt.
+    entry = "--find-links ${DEV}/wheels  #  built   in ${DEV}  "
+    assert expand_all([entry], _vars(DEV="/opt/d")) == [
+        "--find-links /opt/d/wheels  #  built   in ${DEV}  "
+    ]
+
+
+def test_a_reference_in_the_code_portion_still_needs_declaration():
+    # The negative control for the two above: comment-awareness must not have
+    # turned the declaration requirement off for the part uv actually reads.
+    with pytest.raises(ConfigError) as excinfo:
+        expand_all(["${DEV}/pkg.whl"], _vars())
+    assert "DEV" in excinfo.value.message
+
+
 def test_expand_all_refuses_a_misplaced_reference_before_checking_names():
     # Placement runs first: the message is about placement, not about 'NOPE'
     # being undeclared.
@@ -469,6 +503,18 @@ def test_a_value_may_not_leave_a_reference_behind():
     )
     with pytest.raises(ConfigError) as excinfo:
         expand_all(["-e ${DEV}/pkg"], variables)
+    assert "unsubstituted" in excinfo.value.message
+
+
+def test_a_comment_does_not_excuse_a_reference_left_in_the_code():
+    # The guard reads the code portion so a ${...} in the comment is not
+    # mistaken for residue; this is the other half of that, proving the
+    # exemption did not extend to the part uv actually reads.
+    variables = Variables(
+        declared=("DEV", "OTHER"), values={"DEV": "/a/${OTHER}/b", "OTHER": "/zzz"}
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        expand_all(["-e ${DEV}/pkg  # nested"], variables)
     assert "unsubstituted" in excinfo.value.message
 
 

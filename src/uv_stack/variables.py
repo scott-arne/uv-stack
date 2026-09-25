@@ -74,11 +74,19 @@ class Variables:
 def referenced_names(text: str) -> list[str]:
     """Names referenced by ``text``, de-duplicated, in first-appearance order.
 
+    Only the code portion is read, per :func:`_code_portion`. uv discards a
+    comment, so a ``${...}`` there is prose: substituting it would rewrite text
+    uv never sees, and requiring it declared would refuse an entry that
+    :func:`placement_problem` — which has judged the code portion since it
+    learned about comments — admits. Every caller wants that reading: the two
+    declaration checks and doctor's undeclared-variable report all ask what the
+    entry references *as an entry*.
+
     :param text: Any string that may hold references.
     :returns: The referenced names.
     """
     names: list[str] = []
-    for match in REFERENCE_RE.finditer(text):
+    for match in REFERENCE_RE.finditer(_code_portion(text)):
         name = match.group(1)
         if name not in names:
             names.append(name)
@@ -138,6 +146,23 @@ def _code_portion(entry: str) -> str:
     """
     match = _COMMENT_RE.search(entry)
     return entry if match is None else entry[: match.start()]
+
+
+def _expand_code(entry: str, values: Mapping[str, str]) -> str:
+    """Substitute every reference in ``entry``'s code portion.
+
+    The comment is carried over verbatim rather than rebuilt, so its spacing
+    survives. Substituting inside it would be wrong twice over: uv discards it,
+    and :func:`referenced_names` does not report the names in it, so the
+    declaration and definition checks above have not vouched for them — a
+    ``sub`` over the whole line would raise :class:`KeyError` on the first one.
+
+    :param entry: One requirement entry, a single physical line.
+    :param values: This machine's values, keyed by name.
+    :returns: The entry with its code portion expanded.
+    """
+    code = _code_portion(entry)
+    return REFERENCE_RE.sub(lambda match: values[match.group(1)], code) + entry[len(code) :]
 
 
 def _is_recursive_include(token: str) -> bool:
@@ -361,11 +386,14 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
       reference whose distribution name came from a machine-local value,
       breaking the invariant that expansion never changes what a requirement
       is named;
-    - it leaves a ``${...}`` behind. Substitution is single-pass and values
-      are opaque, so ``DEV=/a/${OTHER}/b`` leaves ``${OTHER}`` in the result.
-      uv expands environment variables in requirements files, so the residual
-      reference resolves against the environment and bypasses this module's
-      declared-name and undefined-value checks.
+    - it leaves a ``${...}`` behind in the code portion. Substitution is
+      single-pass and values are opaque, so ``DEV=/a/${OTHER}/b`` leaves
+      ``${OTHER}`` in the result. uv expands environment variables in
+      requirements files, so the residual reference resolves against the
+      environment and bypasses this module's declared-name and undefined-value
+      checks. A ``${...}`` in the comment is not a residue: nothing there was
+      ever substituted, because uv discards the comment before it expands
+      anything.
 
     The first five checks ask whether the substitution *introduced* the syntax,
     not whether the result already held it: an entry written that way was
@@ -412,13 +440,18 @@ def expansion_problem(entry: str, expanded: str) -> str | None:
             f"expansion changed the ownership name from {ownership_name(entry)!r} "
             f"to {ownership_name(expanded)!r}"
         )
-    # Every ${...} in an admitted entry is either a well-formed reference (and
-    # therefore substituted) or already refused by _malformed_fragment, so no
-    # opener may survive expansion. This is NOT an introduced-vs-already-there
-    # check: every entry with a reference contains OPENER before substitution,
-    # so "OPENER in expanded and OPENER not in entry" would be dead code. The
-    # invariant is that expansion removes every opener.
-    if OPENER in expanded:
+    # Every ${...} in an admitted entry's code portion is either a well-formed
+    # reference (and therefore substituted) or already refused by
+    # _malformed_fragment, so none may survive expansion there. Asking this of
+    # the *result's* code portion is safe because the comment check above has
+    # already refused any value that introduced a marker, so the portion still
+    # ends where it did going in.
+    #
+    # This is NOT an introduced-vs-already-there check: every entry with a
+    # reference contains OPENER before substitution, so "OPENER in expanded and
+    # OPENER not in entry" would be dead code. The invariant is that expansion
+    # removes every opener uv would go on to act on.
+    if OPENER in _code_portion(expanded):
         return f"expansion left an unsubstituted reference in {expanded!r}"
     return None
 
@@ -436,6 +469,12 @@ def expand_all(
     not in the machine), then undeclared names, then declared names with no
     local value. The order matters for the message a user sees on a freshly
     cloned root: a typo in a profile should not read as a missing local value.
+
+    All three checks and the substitution itself read the entry's code
+    portion, the same view :func:`placement_problem` judges. An entry may
+    therefore mention a name in its comment without declaring it: uv discards
+    the comment, so the name is prose, and the alternative was an entry legal
+    at placement and refused one step later.
 
     Substitution is a single pass; a value is opaque text, so a ``${...}``
     inside one is not itself a reference. The replacement is supplied as a
@@ -487,10 +526,7 @@ def expand_all(
             ),
         )
 
-    expanded = [
-        REFERENCE_RE.sub(lambda match: variables.values[match.group(1)], entry)
-        for entry in entries
-    ]
+    expanded = [_expand_code(entry, variables.values) for entry in entries]
 
     # Placement was judged on the entries as written. This is the same
     # judgement applied to what the values actually produced, and it is the
