@@ -114,6 +114,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   while its own compiled lock sat beside it. A directory under `envs/` with no
   such marker is still not reported: it is not a broken environment, it is not
   an environment.
+- An unreadable `bundles/` no longer fails a command that resolved a bare
+  profile token. The shadow warning -- the one saying a name matches both a
+  profile and a bundle -- probed `bundles/<name>.yaml` to decide whether to
+  print, and that probe raises rather than answering no when the directory
+  cannot be searched, so `stack status`, `stack show env`, and `stack upgrade`
+  exited 1 over a directory none of them needed to read. The warning is now
+  skipped when the probe cannot answer; the resolution it decorated is
+  unchanged, and `stack doctor` still reports the directory.
 - Every YAML loader failure on a profile or bundle becomes a ConfigError. Only
   `YAMLError` was converted before, so a document whose constructor raises
   something else -- a date of `2020-99-99`, or `!!bool "nope"` -- came out of
