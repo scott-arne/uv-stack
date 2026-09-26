@@ -447,7 +447,8 @@ stack doctor
 
 `doctor` never changes anything — it reports problems with a suggested `fix:`
 line for each. It covers the shape of the tree (missing directories, legacy
-file formats, environments in the wrong place) and its portability: declared
+file formats, environments in the wrong place, a name published as both a
+profile and a bundle) and its portability: declared
 variables with no value on this machine, references that are undeclared,
 malformed, or in an entry that may not hold one, editable checkouts that are
 absent, a `project-python.txt` value that will not travel, and a missing or
@@ -689,7 +690,10 @@ Closing that gap would mean rewriting uv's output behind its back.
   `micromamba run -n <name> <command>`.
 - **Name collisions.** A bare token prefers a profile over a bundle over a
   literal package. When a package name collides with one of your profile or
-  bundle names, force the package with `pkg:<name>`.
+  bundle names, force the package with `pkg:<name>`. A name that is *both* a
+  profile and a bundle still works — bare reaches the profile, `@<name>` the
+  bundle — but `stack doctor` warns about it, because otherwise you only hear
+  about it on the runs that happen to reference the name.
 - **`doctor --fix` is conservative.** It only applies safe repairs (creating
   missing directories, renaming legacy files, converting `.in`/`.bundle`
   files to YAML with a `.bak` backup). Anything destructive stays a printed

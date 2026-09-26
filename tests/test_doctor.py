@@ -47,6 +47,37 @@ def test_legacy_bundle_file_flagged(config_tree: ConfigRoot):
     assert any("Legacy bundle file:" in m and "old.bundle" in m for m in messages)
 
 
+def test_a_stem_that_is_both_a_profile_and_a_bundle_is_reported(config_tree: ConfigRoot):
+    config_tree.bundle_path("ds").write_text("includes:\n  - rich\n")
+
+    collisions = [f for f in diagnose(config_tree) if f.kind == "name-collision"]
+
+    assert len(collisions) == 1
+    # warn, not error: the resolver reports this same collision as a warning
+    # and the README documents '@ds' as the supported way to reach the bundle,
+    # so exiting 1 would fail doctor on a root the rest of the program treats
+    # as usable.
+    assert collisions[0].level == "warn"
+    assert str(config_tree.profile_path("ds")) in collisions[0].message
+    assert str(config_tree.bundle_path("ds")) in collisions[0].message
+    # The remedy is the whole value of the finding: naming the two paths
+    # without saying which one a bare token reaches leaves the reader where
+    # they started.
+    assert collisions[0].fix is not None
+    assert "@ds" in collisions[0].fix
+
+
+def test_a_legacy_in_file_is_not_a_live_name_collision(config_tree: ConfigRoot):
+    # profiles/standard.in against the fixture's bundles/standard.yaml.
+    # Widening the scan past '.yaml' would call this a collision, but nothing
+    # reads a '.in' file, so no token resolves two ways -- and the conversion
+    # that would create the real collision is already refused by the shadow
+    # guard in _fix_convert_yaml.
+    (config_tree.profiles_dir / "standard.in").write_text("numpy\n")
+
+    assert [f for f in diagnose(config_tree) if f.kind == "name-collision"] == []
+
+
 def test_legacy_profiles_txt_flagged(config_tree: ConfigRoot):
     (config_tree.env_dir("main") / "profiles.txt").write_text("ds\n")
     messages = [f.message for f in diagnose(config_tree)]
@@ -405,6 +436,23 @@ def test_repair_skips_legacy_bundle_when_profile_exists_for_stem(config_tree: Co
     # Legacy file intact, no bundles/old.yaml created.
     assert legacy.exists()
     assert not (config_tree.bundles_dir / "old.yaml").exists()
+
+
+def test_repair_leaves_a_name_collision_alone(config_tree: ConfigRoot):
+    """Report-only: both sides are valid config the user wrote.
+
+    Withdrawing either one is the destructive class of repair the README
+    excludes, and doctor has nothing to judge them by -- unlike every
+    registered repair, which either creates what is missing or renames a file
+    whose format is already obsolete.
+    """
+    config_tree.bundle_path("ds").write_text("includes:\n  - rich\n")
+
+    actions = repair(config_tree, diagnose(config_tree))
+
+    assert [a for a in actions if a.finding.kind == "name-collision"] == []
+    assert config_tree.profile_path("ds").is_file()
+    assert config_tree.bundle_path("ds").is_file()
 
 
 def test_repair_moves_misplaced_env(config_tree: ConfigRoot):

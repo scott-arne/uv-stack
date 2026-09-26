@@ -316,6 +316,8 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
     # an empty match, which would report a clean bill of health for a tree
     # doctor never saw. The isdir guard stays because an absent directory is
     # already reported above as missing-dir.
+    profile_children: list[Path] = []
+    bundle_children: list[Path] = []
     if os.path.isdir(config.profiles_dir):
         profile_children, walk_findings = _children(config.profiles_dir)
         findings += walk_findings
@@ -348,6 +350,44 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                     dest=legacy.with_suffix(".yaml"),
                 )
             )
+
+    # A stem published under both kinds. The resolver already judges this worth
+    # saying, but only once a stack names the token (see _warn_shadow); a root
+    # carrying the collision is never told on its own account, which is the
+    # gap. Read off the two walks above rather than list_profiles/list_bundles
+    # for the reason given there -- those glob, so a directory doctor could not
+    # read would answer that it holds nothing.
+    #
+    # '.yaml' on both sides because that is exactly what the resolver sees. A
+    # legacy '.in' or '.bundle' sharing a stem resolves nowhere, and the
+    # conversion that would turn it into a real collision is already refused by
+    # the shadow guard in _fix_convert_yaml.
+    bundles_by_stem = {
+        child.stem: child for child in bundle_children if child.suffix == ".yaml"
+    }
+    for profile in sorted(profile_children):
+        bundle = bundles_by_stem.get(profile.stem)
+        if profile.suffix != ".yaml" or bundle is None:
+            continue
+        # warn, not error: both files stay reachable on the documented
+        # precedence, so nothing here is broken, and the exit 1 an error earns
+        # would fail doctor on a root using the '@name' escape the README
+        # offers. The bundle is the finding's path because it is the shadowed
+        # side, and so the one the reader has to act on.
+        findings.append(
+            Finding(
+                "warn",
+                f"Name collision: {profile} and {bundle} share the stem "
+                f"'{profile.stem}'",
+                fix=(
+                    f"A bare '{profile.stem}' resolves to the profile; use "
+                    f"'@{profile.stem}' for the bundle. Rename one of them to "
+                    "remove the ambiguity."
+                ),
+                kind="name-collision",
+                path=bundle,
+            )
+        )
 
     # Env-like directories left directly under root. Membership is decided
     # from the enumerated names rather than from exists() probes, for the
