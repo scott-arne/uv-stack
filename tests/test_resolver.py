@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ResolutionError
 from uv_stack.resolver import Resolver
+
+_IS_ROOT = getattr(os, "geteuid", lambda: -1)() == 0
 
 
 def test_unqualified_profile_then_bundle_then_literal(config_tree: ConfigRoot):
@@ -134,6 +138,32 @@ def test_resolve_warns_on_profile_shadowing_bundle(config_tree: ConfigRoot):
         "'ds' matches both a profile and a bundle; using the profile "
         "(use @ds for the bundle)"
     ]
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")
+def test_an_unreadable_bundles_dir_does_not_fail_a_resolved_profile(
+    config_tree: ConfigRoot,
+):
+    """The shadow warning must not be able to fail the resolution it decorates.
+
+    ``bundle_exists`` goes through ``Path.is_file``, which raises rather than
+    answering False when ``bundles/`` cannot be searched, so every command that
+    resolves a bare profile token -- ``status``, ``show env``, ``upgrade`` --
+    used to exit 1 on a directory none of them needed to read.
+
+    Silence rather than a degraded warning: the warning's whole payload is the
+    remedy '@ds', and on this tree that exits 1 for the same reason. 'stack
+    doctor' reports the unreadable directory on its own account.
+    """
+    os.chmod(config_tree.bundles_dir, 0o000)
+    try:
+        rs = Resolver(config_tree).resolve(["ds"])
+    finally:
+        os.chmod(config_tree.bundles_dir, 0o755)
+
+    # Identical to the answer a readable bundles/ with no 'ds' bundle gives.
+    assert rs.profiles == ["ds"]
+    assert rs.warnings == []
 
 
 def test_strict_rejects_bare_literal(config_tree: ConfigRoot):

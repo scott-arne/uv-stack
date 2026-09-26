@@ -185,7 +185,29 @@ class Resolver:
             )
 
     def _warn_shadow(self, token: str) -> None:
-        if self._config.bundle_exists(token):
+        # A warning must not be able to fail the resolution it decorates. The
+        # profile has already been found, so this only chooses whether to
+        # mention the bundle -- and the answer it would give is the one the
+        # readable case gives either way. bundle_exists goes through
+        # Path.is_file, which raises rather than answering False when bundles/
+        # cannot be searched, so a bare profile token used to exit 1 out of
+        # every command that resolves one, on a directory none of them read.
+        #
+        # Silence rather than a degraded "could not check" warning: the
+        # warning's whole payload is the remedy '@token', and on a tree where
+        # this raised, the remedy exits 1 for the same reason. 'stack doctor'
+        # reports the unreadable directory on its own account.
+        #
+        # Deliberately not pushed down into bundle_exists: the same raise is
+        # load-bearing at the call sites that decide what a bare token *is*,
+        # where answering False would resolve the token to a literal package
+        # of that name, and in the scaffold guards that refuse to create a
+        # shadowing file.
+        try:
+            shadowed = self._config.bundle_exists(token)
+        except OSError:
+            return
+        if shadowed:
             self._warnings.append(
                 f"'{token}' matches both a profile and a bundle; using the "
                 f"profile (use @{token} for the bundle)"
