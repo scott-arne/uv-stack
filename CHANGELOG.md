@@ -63,6 +63,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `stack doctor` gained diagnostics for sources it cannot read or parse,
   missing editable checkouts, unsafe variable expansion, and a portable
   `.gitignore` block that is absent or stale.
+- `stack doctor` warns when a name is published as both a profile and a
+  bundle. Resolution is unchanged and still documented -- bare reaches the
+  profile, `@<name>` the bundle -- but the only report of the collision used
+  to come from the resolver, on the runs that happened to reference the name.
+  It is a warning rather than an error, and `--fix` does not touch it: both
+  files are valid, and choosing which to withdraw is not doctor's to make.
 
 ### Changed
 
