@@ -266,6 +266,33 @@ def _without_repeats(findings: list[Finding]) -> list[Finding]:
     return unique
 
 
+def _bundle_for_stem(config: ConfigRoot, stem: str, children: list[Path]) -> Path:
+    """The bundle ``stem`` reaches, spelled the way ``bundles/`` spells it.
+
+    On a case-insensitive filesystem a profile stem of ``ds`` reaches a
+    ``bundles/DS.yaml``, and reporting that collision as two ``ds.yaml`` paths
+    would read as a bug in doctor rather than as the name clash it is. The
+    exact spelling is preferred over a folded one so that a case-*sensitive*
+    filesystem holding both files names the one the stem actually opens.
+
+    :param config: The configuration root being diagnosed.
+    :param stem: A profile stem that opens a file under ``bundles/``.
+    :param children: ``bundles/`` as :func:`_children` saw it.
+    :returns: The walked child the stem reaches, or the path it resolves to
+        when the walk did not see it — which is the unreadable-directory case,
+        already reported separately, and leaves the finding itself sound
+        because ``bundle_exists`` reached the file.
+    """
+    candidates = [child for child in sorted(children) if child.suffix == ".yaml"]
+    for child in candidates:
+        if child.stem == stem:
+            return child
+    for child in candidates:
+        if child.stem.casefold() == stem.casefold():
+            return child
+    return config.bundle_path(stem)
+
+
 def diagnose(config: ConfigRoot) -> list[Finding]:
     """Inspect the config tree and return findings.
 
@@ -351,24 +378,36 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
                 )
             )
 
-    # A stem published under both kinds. The resolver already judges this worth
+    # A name published under both kinds. The resolver already judges this worth
     # saying, but only once a stack names the token (see _warn_shadow); a root
     # carrying the collision is never told on its own account, which is the
-    # gap. Read off the two walks above rather than list_profiles/list_bundles
-    # for the reason given there -- those glob, so a directory doctor could not
-    # read would answer that it holds nothing.
+    # gap.
     #
-    # '.yaml' on both sides because that is exactly what the resolver sees. A
-    # legacy '.in' or '.bundle' sharing a stem resolves nowhere, and the
-    # conversion that would turn it into a real collision is already refused by
-    # the shadow guard in _fix_convert_yaml.
-    bundles_by_stem = {
-        child.stem: child for child in bundle_children if child.suffix == ".yaml"
-    }
+    # The profile side is read off the walk above rather than list_profiles,
+    # which globs -- a directory doctor could not read would answer that it
+    # holds nothing. The bundle side opens the stem instead of looking it up
+    # among the walked names, because an intersection over those names answers
+    # for the wrong filesystem: where case folds, 'ds' opens a 'bundles/DS.yaml'
+    # that no string comparison matches, and doctor would stay silent about a
+    # bundle _warn_shadow reports as shadowed. Whether this filesystem folds is
+    # a question it is already answering.
+    #
+    # os.path.isfile rather than config.bundle_exists, which is the same stat
+    # but through Path.is_file and so raises on a bundles/ that cannot be
+    # searched -- doctor must not fail on a tree it was asked to diagnose. The
+    # two agree wherever the stat succeeds; where it does not, this reports no
+    # collision and the walk above has already reported the directory.
+    #
+    # '.yaml' on the profile side because that is what the resolver reads. A
+    # legacy '.in' sharing a stem resolves nowhere, and the conversion that
+    # would turn it into a real collision is already refused by the shadow
+    # guard in _fix_convert_yaml.
     for profile in sorted(profile_children):
-        bundle = bundles_by_stem.get(profile.stem)
-        if profile.suffix != ".yaml" or bundle is None:
+        if profile.suffix != ".yaml":
             continue
+        if not os.path.isfile(config.bundle_path(profile.stem)):
+            continue
+        bundle = _bundle_for_stem(config, profile.stem, bundle_children)
         # warn, not error: both files stay reachable on the documented
         # precedence, so nothing here is broken, and the exit 1 an error earns
         # would fail doctor on a root using the '@name' escape the README
@@ -377,7 +416,7 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
         findings.append(
             Finding(
                 "warn",
-                f"Name collision: {profile} and {bundle} share the stem "
+                f"Name collision: {profile} and {bundle} both answer to "
                 f"'{profile.stem}'",
                 fix=(
                     f"A bare '{profile.stem}' resolves to the profile; use "

@@ -16,6 +16,7 @@ from uv_stack.operations.portable import (
     render_block,
     write_portable_ignore,
 )
+from uv_stack.resolver import Resolver
 
 _IS_ROOT = getattr(os, "geteuid", lambda: -1)() == 0
 
@@ -65,6 +66,30 @@ def test_a_stem_that_is_both_a_profile_and_a_bundle_is_reported(config_tree: Con
     # they started.
     assert collisions[0].fix is not None
     assert "@ds" in collisions[0].fix
+
+
+def test_doctor_and_the_resolver_agree_about_a_case_folded_name(config_tree: ConfigRoot):
+    """Whether 'ds' reaches 'DS.yaml' is the filesystem's answer, not doctor's.
+
+    A set intersection over the walked stems answers "no" on every platform,
+    which is wrong wherever the filesystem folds case: there ``bundle_exists``
+    is True and the resolver warns, so doctor stayed silent about a bundle
+    that really was shadowed. Asserting agreement rather than a fixed verdict
+    is what lets one test cover both kinds of filesystem.
+    """
+    shouty = config_tree.bundles_dir / "DS.yaml"
+    shouty.write_text("includes:\n  - rich\n")
+
+    collisions = [f for f in diagnose(config_tree) if f.kind == "name-collision"]
+    resolver_warned = bool(Resolver(config_tree).resolve(["ds"]).warnings)
+
+    assert bool(collisions) == resolver_warned
+    if collisions:
+        # The spelling bundles/ holds, not the profile's. Where the two
+        # differ, that difference is the finding, and naming both files
+        # 'ds.yaml' would read as a bug in doctor.
+        assert str(shouty) in collisions[0].message
+        assert collisions[0].path == shouty
 
 
 def test_a_legacy_in_file_is_not_a_live_name_collision(config_tree: ConfigRoot):
