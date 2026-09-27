@@ -1982,6 +1982,10 @@ def test_a_retry_after_a_failed_uv_add_converges(
         refresh_project(
             config_tree, RecordingRunner(responder=_fail_add), options, cwd=crashed_dir
         )
+    interrupted = read_tracking(crashed_dir / "pyproject.toml")
+    assert interrupted is not None
+    assert interrupted.stack == ["standard", "@qsar"]
+    assert interrupted.pending is not None
     refresh_project(config_tree, RecordingRunner(), options, cwd=crashed_dir)
 
     # _tracked_project always writes '<parent>/proj_refresh', so the two
