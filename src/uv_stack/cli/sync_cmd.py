@@ -14,14 +14,17 @@ deliberately the all-environments form and nothing else.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import rich_click as click
 
 from uv_stack.cli._complete import complete_env_names
 from uv_stack.cli._render import console
+from uv_stack.cli.refresh_cmd import run_refresh
 from uv_stack.cli.upgrade import _checked_names, _run_upgrade
 from uv_stack.config import ConfigRoot
+from uv_stack.operations.project import RefreshOptions, union_project_stack
 from uv_stack.operations.upgrade import UpgradeOptions
 
 #: Group-level flag destinations mapped to their spelling, for the refusal
@@ -214,3 +217,57 @@ def sync_env(
         strict=strict,
         upgrade_all=upgrade_all,
     )
+
+
+@sync.command("project")
+@click.argument("tokens", nargs=-1)
+@click.option(
+    "--python",
+    "python",
+    default=None,
+    help="Override and record the project interpreter spec.",
+)
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Fail if an unqualified token falls through to a literal package.",
+)
+@click.option("--no-sync", is_flag=True, help="Apply dependency changes but do not sync.")
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print the add/remove delta and command plan; change nothing.",
+)
+@click.pass_obj
+def sync_project(
+    config: ConfigRoot,
+    tokens: tuple[str, ...],
+    python: str | None,
+    strict: bool,
+    no_sync: bool,
+    dry_run: bool,
+) -> None:
+    """Union TOKENS into this project's recorded stack and re-resolve.
+
+    TOKENS are ordinary resolver tokens: '@name' is a bundle, 'profile:name' a
+    profile, 'pkg:name' a literal, and a bare name is a profile, then a bundle,
+    then a literal package. A token already recorded is not an error — it makes
+    this a plain re-resolve.
+
+    The recorded stack is extended, never replaced, so an existing token cannot
+    be lost by forgetting to repeat it.
+    """
+    if not tokens:
+        raise click.UsageError(
+            "Give at least one TOKEN. To re-resolve the tokens this project "
+            "already records, use 'stack refresh'."
+        )
+    cwd = Path.cwd()
+    options = RefreshOptions(
+        python=python,
+        strict=strict,
+        no_sync=no_sync,
+        dry_run=dry_run,
+        stack=union_project_stack(cwd / "pyproject.toml", cwd, tokens),
+    )
+    run_refresh(config, options, cwd=cwd)

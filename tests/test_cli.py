@@ -4214,6 +4214,221 @@ def test_refresh_renders_advisories_from_a_failed_run(tmp_path: Path, monkeypatc
     assert "uv sync failed" in flat
 
 
+def _sync_project(config: ConfigRoot, *args: str):
+    return CliRunner().invoke(cli, ["--root", str(config.root), "sync", "project", *args])
+
+
+def _fake_subprocess_runner(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "uv_stack.cli.refresh_cmd.SubprocessRunner", lambda: _FakeProbeRunner()
+    )
+
+
+def test_sync_project_unions_tokens_into_the_recorded_stack(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    from uv_stack.operations.pyproject import read_tracking
+
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _fake_subprocess_runner(monkeypatch)
+
+    result = _sync_project(config_tree, "@qsar", "--python", "3.12")
+
+    assert result.exit_code == 0, result.output
+    assert "Added (1): umap-learn" in result.output
+    assert "Project refreshed." in result.output
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["standard", "@qsar"]
+    assert "umap-learn" in tracking.applied
+
+
+def test_sync_project_is_idempotent_on_the_stack(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    from uv_stack.operations.pyproject import read_tracking
+
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _fake_subprocess_runner(monkeypatch)
+
+    result = _sync_project(config_tree, "standard", "--python", "3.12")
+
+    assert result.exit_code == 0, result.output
+    # Proof the refresh ran rather than the command silently doing nothing.
+    assert "Dependencies already match the current stack." in result.output
+    assert "Project refreshed." in result.output
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["standard"]
+
+
+def test_sync_project_requires_a_token(config_tree: ConfigRoot, tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(_tracked_project_dir(tmp_path))
+
+    result = _sync_project(config_tree)
+
+    assert result.exit_code == 2
+    flat = _flat_panel(result)
+    assert "Give at least one TOKEN" in flat
+    assert "'stack refresh'" in flat
+
+
+def test_sync_project_requires_a_tracked_project(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    monkeypatch.chdir(plain)
+    # Wide enough that the tmp path is not broken mid-token.
+    monkeypatch.setenv("COLUMNS", "1000")
+
+    result = _sync_project(config_tree, "@qsar")
+
+    assert result.exit_code == 1
+    flat = _flat_panel(result)
+    assert f"No tracked project in {plain}." in flat
+    assert "stack create project" in flat
+
+
+def test_sync_project_dry_run_writes_nothing_and_says_what_would_change(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    before = (project_dir / "pyproject.toml").read_bytes()
+
+    result = _sync_project(config_tree, "@qsar", "--python", "3.12", "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "Stack would become: standard, @qsar" in result.output
+    assert "Added (1): umap-learn" in result.output
+    assert "Planned commands:" in result.output
+    assert (project_dir / "pyproject.toml").read_bytes() == before
+
+
+def test_sync_project_dry_run_reports_a_stack_change_with_an_empty_delta(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    # 'chem' is already inside 'standard': the stack grows, the delta is empty,
+    # and without the "Stack would become" line the run would read as a no-op.
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    before = (project_dir / "pyproject.toml").read_bytes()
+
+    result = _sync_project(config_tree, "chem", "--python", "3.12", "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert "Stack would become: standard, chem" in result.output
+    assert "Dependencies already match the current stack." in result.output
+    assert (project_dir / "pyproject.toml").read_bytes() == before
+
+
+def test_sync_project_passes_its_flags_and_the_union_to_refresh_project(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, RefreshResult
+
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    captured: dict = {}
+
+    def fake_refresh(config, runner, options, *, cwd):
+        captured["options"] = options
+        captured["cwd"] = cwd
+        return RefreshResult()
+
+    monkeypatch.setattr("uv_stack.cli.refresh_cmd.refresh_project", fake_refresh)
+
+    result = _sync_project(config_tree, "@qsar", "--python", "3.13", "--strict", "--no-sync")
+
+    assert result.exit_code == 0, result.output
+    options: RefreshOptions = captured["options"]
+    assert options.stack == ["standard", "@qsar"]
+    assert options.python == "3.13"
+    assert options.strict is True
+    assert options.no_sync is True
+    assert options.dry_run is False
+    assert captured["cwd"] == project_dir
+
+
+def test_sync_project_records_the_python_override(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    from uv_stack.operations.pyproject import read_tracking
+
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _fake_subprocess_runner(monkeypatch)
+
+    result = _sync_project(config_tree, "@qsar", "--python", "3.13")
+
+    assert result.exit_code == 0, result.output
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.python == "3.13"
+
+
+def test_sync_project_accepts_a_near_miss_token_with_a_warning(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    # 'standrd' is within the resolver's 0.8 near-miss cutoff of the
+    # 'standard' bundle, so it falls through to a literal package and warns.
+    from uv_stack.operations.pyproject import read_tracking
+
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    monkeypatch.setenv("COLUMNS", "1000")
+    _fake_subprocess_runner(monkeypatch)
+
+    result = _sync_project(config_tree, "standrd", "--python", "3.12")
+
+    assert result.exit_code == 0, result.output
+    assert "did you mean 'standard'?" in _flat_panel(result)
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["standard", "standrd"]
+
+
+def test_sync_project_refuses_a_near_miss_token_under_strict(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch
+):
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    monkeypatch.setenv("COLUMNS", "1000")
+    before = (project_dir / "pyproject.toml").read_bytes()
+
+    result = _sync_project(config_tree, "standrd", "--python", "3.12", "--strict")
+
+    assert result.exit_code == 1
+    flat = _flat_panel(result)
+    assert "Unqualified token 'standrd' resolved to a literal package." in flat
+    # Strict resolution fails before the pending write, so nothing changed.
+    assert (project_dir / "pyproject.toml").read_bytes() == before
+
+
+@pytest.mark.parametrize("flag", ["--dry-run", "--strict", "--upgrade"])
+def test_sync_project_refuses_group_flags_typed_before_it(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch, flag: str
+):
+    project_dir = _tracked_project_dir(tmp_path)
+    monkeypatch.chdir(project_dir)
+    monkeypatch.setenv("COLUMNS", "1000")
+    before = (project_dir / "pyproject.toml").read_bytes()
+
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "sync", flag, "project", "@qsar"]
+    )
+
+    assert result.exit_code == 2
+    flat = _flat_panel(result)
+    assert f"{flag} before 'project' would be ignored" in flat
+    assert "stack sync project --help" in flat
+    assert (project_dir / "pyproject.toml").read_bytes() == before
+
+
 def test_command_panels_separate_create_env_and_project_work():
     """Top-level help must not file project work under Environments.
 

@@ -259,6 +259,9 @@ stack refresh              # apply profile/bundle changes to this project
 stack refresh --dry-run    # see the add/remove delta first
 ```
 
+To add tokens as well, use `stack sync project TOKENS...` (see Upgrading); it
+extends the recorded stack rather than replacing it.
+
 Refresh removes only packages recorded in the table's `applied` list — the
 ones uv-stack itself added. Dependencies whose names uv-stack never applied
 are never touched. One caveat: ownership is by package name, so if you
@@ -279,6 +282,7 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack upgrade [NAMES]...` | Re-render, re-lock, and sync shared environments |
 | `stack sync` | Create, build, and recompile every environment the root declares (no prompt, keeps existing pins) |
 | `stack sync env NAME...` | The same, for only the named environments |
+| `stack sync project TOKENS...` | Add tokens to the tracked project in this directory and re-resolve it (the recorded stack is extended, never replaced) |
 | `stack refresh` | Re-resolve a tracked project against current profiles/bundles |
 | `stack status [NAMES]...` | Shared-env build state: drift, lock freshness, existence |
 | `stack diff SOURCE SOURCE` | Compare two environments -- interpreter, micromamba packages, channels, and pins -- here or across machines (`--json`, `--exit-code`) |
@@ -395,6 +399,21 @@ stack sync                      # every environment the root declares
 stack sync env main scratch     # only these
 stack sync --upgrade            # force new pins (the default preserves them)
 ```
+
+To add tokens to a tracked project and bring it up to date in one step, use
+`stack sync project` from the project root:
+
+```bash
+stack sync project @qsar             # stack ["standard"] becomes ["standard", "@qsar"]
+stack sync project @qsar --dry-run   # show the new stack and the delta first
+```
+
+It **adds** the tokens to the stack the project already records; it never
+replaces that stack, so an existing token cannot be lost by forgetting to
+repeat it. A token already recorded makes the run a plain re-resolve. The
+tokens are ordinary stack tokens, and `--python`, `--strict`, `--no-sync`,
+and `--dry-run` behave as they do for `stack refresh`, which remains the way
+to re-resolve the recorded tokens without adding any.
 
 > **Changed behavior.** `--no-upgrade` and `--upgrade-package` now genuinely
 > preserve the pins the existing lock already holds. Previously both compiled

@@ -17,6 +17,47 @@ from uv_stack.operations.project import (
 from uv_stack.runner import SubprocessRunner
 
 
+def run_refresh(config: ConfigRoot, options: RefreshOptions, *, cwd: Path) -> None:
+    """Run a refresh and print its outcome.
+
+    Shared by ``stack refresh`` and ``stack sync project``: the two differ only
+    in how they arrive at the options, and a second copy of this output would
+    be a second thing to keep in step.
+
+    :param config: Configuration root.
+    :param options: Refresh options.
+    :param cwd: The project directory.
+    """
+    try:
+        result = refresh_project(config, SubprocessRunner(), options, cwd=cwd)
+    except UvStackError as error:
+        # A failure suppresses the result these would have arrived on, so print
+        # them off the error; re-raise so the group-level handler still renders
+        # the error panel.
+        render_warnings(error.resolution_warnings)
+        raise
+    render_warnings(result.warnings)
+    if result.stack is not None:
+        # Above the delta: the union and the dependency delta are independent,
+        # so a token whose packages are all already present would otherwise
+        # print an empty delta and read as a no-op.
+        echo(f"Stack would become: {', '.join(result.stack)}")
+    if result.removed:
+        echo(f"Removed ({len(result.removed)}): {', '.join(result.removed)}")
+    if result.added:
+        echo(f"Added ({len(result.added)}): {', '.join(result.added)}")
+    if not result.removed and not result.added:
+        echo("Dependencies already match the current stack.")
+    for entry in result.skipped_removals:
+        echo(SKIPPED_REMOVAL_NOTICE.format(entry=entry))
+    if options.dry_run:
+        echo("Planned commands:")
+        for command in result.planned:
+            echo("  " + " ".join(command.args))
+        return
+    console.print("[green]Project refreshed.[/green]")
+
+
 @click.command("refresh")
 @click.option(
     "--python",
@@ -47,26 +88,4 @@ def refresh(
     profiles and bundles.
     """
     options = RefreshOptions(python=python, strict=strict, no_sync=no_sync, dry_run=dry_run)
-    try:
-        result = refresh_project(config, SubprocessRunner(), options, cwd=Path.cwd())
-    except UvStackError as error:
-        # A failure suppresses the result these would have arrived on, so print
-        # them off the error; re-raise so the group-level handler still renders
-        # the error panel.
-        render_warnings(error.resolution_warnings)
-        raise
-    render_warnings(result.warnings)
-    if result.removed:
-        echo(f"Removed ({len(result.removed)}): {', '.join(result.removed)}")
-    if result.added:
-        echo(f"Added ({len(result.added)}): {', '.join(result.added)}")
-    if not result.removed and not result.added:
-        echo("Dependencies already match the current stack.")
-    for entry in result.skipped_removals:
-        echo(SKIPPED_REMOVAL_NOTICE.format(entry=entry))
-    if dry_run:
-        echo("Planned commands:")
-        for command in result.planned:
-            echo("  " + " ".join(command.args))
-        return
-    console.print("[green]Project refreshed.[/green]")
+    run_refresh(config, options, cwd=Path.cwd())

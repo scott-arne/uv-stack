@@ -49,6 +49,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   freshly cloned config root. `stack sync env NAME...` does the same for only
   the named environments. Both accept `--dry-run`, `--stop-on-error`,
   `--strict`, and `--upgrade`.
+- `stack sync project TOKENS...` adds tokens to the tracked project in the
+  current directory and re-resolves it. The tokens are appended to the stack
+  the project already records, never replacing it, so an existing token is not
+  lost by forgetting to repeat it. The run goes through the same interrupted-run
+  recovery as `stack refresh` and accepts the same `--python`, `--strict`,
+  `--no-sync`, and `--dry-run` flags.
 - `stack diff SOURCE SOURCE` compares two environments across the four layers
   uv-stack records: the interpreter, the micromamba packages, the effective
   channel order, and the compiled pins. A source is an environment in this
