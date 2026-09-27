@@ -8,13 +8,20 @@ matching, so the output never claims more than it checked.
 
 from __future__ import annotations
 
+import errno
+import os
 import re
+import stat as stat_module
 from dataclasses import dataclass
 from pathlib import Path
 
+from uv_stack.config import ConfigRoot, load_env_from_dir
 from uv_stack.errors import ConfigError
 from uv_stack.fsutil import read_text_utf8
+from uv_stack.hints import render_positional_arg
+from uv_stack.operations.scaffold import validate_name
 from uv_stack.parse import canonical_name
+from uv_stack.render import conda_name_key, effective_conda_inputs
 
 #: All four comparisons ran and all four were empty.
 VERDICT_IDENTICAL = "identical"
@@ -239,3 +246,149 @@ def parse_lock(path: Path) -> dict[str, str | None]:
             )
         pins[identity] = version
     return pins
+
+
+def _stat_or_none(path: Path) -> os.stat_result | None:
+    """Stat ``path``, telling absence apart from an unreadable parent.
+
+    ``Path.is_file`` cannot make this distinction: on an unsearchable parent it
+    propagates ``PermissionError`` on 3.13 and answers ``False`` elsewhere, and
+    ``try/except OSError`` cannot recover the ``False`` case because there is
+    no exception to catch. A permission problem on ``envs/`` is a real error
+    for a command that has to read there.
+
+    :param path: The path to stat.
+    :returns: The stat result, or ``None`` when the path does not exist.
+    :raises ConfigError: On any other stat failure.
+    """
+    try:
+        return os.stat(path)
+    except OSError as error:
+        if error.errno in (errno.ENOENT, errno.ENOTDIR):
+            return None
+        raise ConfigError(
+            f"Cannot read {path}: {error.strerror or error}.",
+            hint="Check the permissions on the directories leading to it.",
+        ) from error
+
+
+def _is_regular(result: os.stat_result | None) -> bool:
+    """:returns: True when ``result`` describes an existing regular file."""
+    return result is not None and stat_module.S_ISREG(result.st_mode)
+
+
+def _describe(result: os.stat_result) -> str:
+    """:returns: A human name for a non-regular file's kind."""
+    mode = result.st_mode
+    if stat_module.S_ISDIR(mode):
+        return "a directory"
+    if stat_module.S_ISFIFO(mode):
+        return "a named pipe"
+    if stat_module.S_ISSOCK(mode):
+        return "a socket"
+    return "not a regular file"
+
+
+def _environment_name(config: ConfigRoot, argument: str) -> str | None:
+    """:returns: ``argument`` when it names an environment in ``config``, else None.
+
+    The name check runs first: ``ConfigRoot.env_dir`` is an unchecked join, so
+    an absolute or ``..``-bearing argument would leave ``envs/`` before
+    anything looked at it. The probe is then keyed on ``stack.txt`` rather than
+    on directory existence, so a stray ``envs/junk/`` is not an environment
+    here either — matching ``env_exists``, ``list_envs`` and ``stack status``.
+    """
+    try:
+        validate_name("environment", argument)
+    except ConfigError:
+        return None
+    if not _is_regular(_stat_or_none(config.env_dir(argument) / "stack.txt")):
+        return None
+    return argument
+
+
+def _directory_source(directory: Path, name: str, label: str, *, named: bool) -> DiffSource:
+    """Build a source from an environment directory.
+
+    :param directory: The directory holding the four sources and the lock.
+    :param name: The name to record on the loaded :class:`EnvConfig`.
+    :param label: The argument as typed, echoed in the output.
+    :param named: True for an environment in this root, whose missing lock has
+        a local remedy; False for a copied directory, whose remedy is on the
+        machine it came from.
+    :returns: A fully populated source.
+    :raises ConfigError: When the environment was never built, or when one of
+        its four sources is unreadable.
+    """
+    env = load_env_from_dir(directory, name)
+    lock = directory / "requirements.lock.txt"
+    if not _is_regular(_stat_or_none(lock)):
+        if named:
+            raise ConfigError(
+                f"Environment '{name}' has no lock at {lock}.",
+                hint=f"Build it first: stack sync env {render_positional_arg(name)}",
+            )
+        raise ConfigError(
+            f"No lock at {lock}.",
+            hint=(
+                "The directory was copied before the environment was built. "
+                "Build it on the machine it came from and copy it again."
+            ),
+        )
+    channels, dependencies = effective_conda_inputs(env)
+    packages = [
+        spec for spec in dependencies if conda_name_key(spec) not in _PRESEEDED_CONDA_KEYS
+    ]
+    return DiffSource(
+        label=label,
+        pins=parse_lock(lock),
+        python=env.python,
+        micromamba=packages,
+        channels=channels,
+    )
+
+
+def load_source(config: ConfigRoot, argument: str) -> DiffSource:
+    """Classify one ``stack diff`` argument and read it.
+
+    Tried in order: an environment in this config root, a directory containing
+    ``stack.txt``, a bare lock file.
+
+    :param config: Configuration root.
+    :param argument: The argument as typed.
+    :returns: The source, with unavailable layers left as ``None``.
+    :raises ConfigError: When the argument is none of the three, when it is an
+        existing path that is not a regular file, or when reading it fails.
+    """
+    name = _environment_name(config, argument)
+    if name is not None:
+        return _directory_source(config.env_dir(name), name, argument, named=True)
+
+    path = Path(argument)
+    if _is_regular(_stat_or_none(path / "stack.txt")):
+        return _directory_source(path, path.name or argument, argument, named=False)
+
+    result = _stat_or_none(path)
+    if result is None:
+        raise ConfigError(
+            f"No source named {argument}.",
+            hint=(
+                "Tried it as an environment in this config root, as a "
+                "directory containing stack.txt, and as a lock file path; "
+                "none of the three exists."
+            ),
+        )
+    if not stat_module.S_ISREG(result.st_mode):
+        # Reached before any read: a directory here would fail with
+        # IsADirectoryError, and a FIFO would block forever on a read that
+        # never returns.
+        raise ConfigError(
+            f"{path} is {_describe(result)}, not a lock file.",
+            hint=(
+                "Pass an environment name, a directory containing stack.txt, "
+                "or a path to a compiled lock file."
+            ),
+        )
+    return DiffSource(
+        label=argument, pins=parse_lock(path), python=None, micromamba=None, channels=None
+    )

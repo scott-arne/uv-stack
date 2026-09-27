@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import _deadline
 from uv_stack.errors import ConfigError
 
 _IS_ROOT = os.geteuid() == 0
@@ -113,3 +114,152 @@ def test_parse_lock_reports_an_unreadable_file_as_a_config_error(tmp_path):
             parse_lock(path)
     finally:
         path.chmod(0o644)
+
+
+def test_load_source_reads_an_environment_by_name(config_tree):
+    from uv_stack.operations.diff import load_source
+
+    (config_tree.env_requirements_lock("main")).write_text("numpy==2.1.0\n")
+
+    source = load_source(config_tree, "main")
+
+    assert source.label == "main"
+    assert source.pins == {"numpy": "2.1.0"}
+    assert source.python == "3.12"
+    # python and pip are reported by the interpreter layer, not here.
+    assert source.micromamba == ["graphviz"]
+    assert source.channels == ["conda-forge", "bioconda"]
+
+
+def test_load_source_reads_a_copied_directory(config_tree, tmp_path):
+    import shutil
+
+    from uv_stack.operations.diff import load_source
+
+    config_tree.env_requirements_lock("main").write_text("numpy==2.1.0\n")
+    copied = tmp_path / "elsewhere" / "main"
+    copied.parent.mkdir()
+    shutil.copytree(config_tree.env_dir("main"), copied)
+
+    source = load_source(config_tree, str(copied))
+
+    assert source.label == str(copied)
+    assert source.pins == {"numpy": "2.1.0"}
+    assert source.python == load_source(config_tree, "main").python
+
+
+def test_load_source_reads_a_bare_lock_with_no_other_layers(config_tree, tmp_path):
+    from uv_stack.operations.diff import load_source
+
+    path = _lock(tmp_path, "numpy==2.1.0\n")
+    source = load_source(config_tree, str(path))
+
+    assert source.pins == {"numpy": "2.1.0"}
+    assert source.python is None
+    assert source.micromamba is None
+    assert source.channels is None
+
+
+def test_load_source_ignores_a_stray_envs_directory(config_tree, tmp_path, monkeypatch):
+    from uv_stack.operations.diff import load_source
+
+    # The fallback cases resolve a relative argument against the working
+    # directory, so pin it to one known to hold no 'junk'.
+    monkeypatch.chdir(tmp_path)
+    (config_tree.envs_dir / "junk").mkdir()
+    with pytest.raises(ConfigError) as excinfo:
+        load_source(config_tree, "junk")
+    assert excinfo.value.message == "No source named junk."
+    assert "lock file" in (excinfo.value.hint or "")
+
+
+def test_load_source_refuses_to_escape_the_envs_directory(config_tree, tmp_path, monkeypatch):
+    from uv_stack.operations.diff import load_source
+
+    # A complete, loadable environment that is reachable from envs/ only by
+    # a '..' join. Without the name check running first, env_dir's unchecked
+    # join would find its stack.txt and read it as an environment of this root.
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "stack.txt").write_text("pkg:numpy\n")
+    (victim / "requirements.lock.txt").write_text("numpy==2.1.0\n")
+    escape = os.path.relpath(victim, config_tree.envs_dir)
+    assert (config_tree.envs_dir / escape / "stack.txt").is_file()
+    # From here the same relative string names nothing, so the directory and
+    # lock-file fallbacks cannot find the victim either.
+    deep = tmp_path / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    monkeypatch.chdir(deep)
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_source(config_tree, escape)
+    assert excinfo.value.message == f"No source named {escape}."
+
+
+def test_load_source_rejects_a_fifo_without_blocking(config_tree, tmp_path):
+    from uv_stack.operations.diff import load_source
+
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    # The defect this covers does not fail; it blocks forever in open().
+    with _deadline(5.0), pytest.raises(ConfigError) as excinfo:
+        load_source(config_tree, str(fifo))
+    assert str(fifo) in str(excinfo.value)
+    assert "named pipe" in str(excinfo.value)
+
+
+def test_load_source_rejects_a_directory_without_stack_txt(config_tree, tmp_path):
+    from uv_stack.operations.diff import load_source
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(ConfigError):
+        load_source(config_tree, str(plain))
+
+
+def test_load_source_rejects_a_dangling_symlink(config_tree, tmp_path):
+    from uv_stack.operations.diff import load_source
+
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "missing")
+    with pytest.raises(ConfigError):
+        load_source(config_tree, str(link))
+
+
+def test_load_source_names_the_missing_lock_for_a_named_environment(config_tree):
+    from uv_stack.operations.diff import load_source
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_source(config_tree, "main")
+    message = f"{excinfo.value.message} {excinfo.value.hint}"
+    assert str(config_tree.env_requirements_lock("main")) in message
+    assert "stack sync env" in message
+
+
+def test_load_source_names_the_missing_lock_for_a_copied_directory(config_tree, tmp_path):
+    import shutil
+
+    from uv_stack.operations.diff import load_source
+
+    copied = tmp_path / "elsewhere" / "main"
+    copied.parent.mkdir()
+    shutil.copytree(config_tree.env_dir("main"), copied)
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_source(config_tree, str(copied))
+    message = f"{excinfo.value.message} {excinfo.value.hint}"
+    assert str(copied / "requirements.lock.txt") in message
+    assert "stack sync env" not in message
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root searches regardless of mode")
+def test_load_source_reports_an_unreadable_envs_directory(config_tree):
+    from uv_stack.operations.diff import load_source
+
+    config_tree.envs_dir.chmod(0o000)
+    try:
+        with pytest.raises(ConfigError) as excinfo:
+            load_source(config_tree, "main")
+        assert str(config_tree.envs_dir) in str(excinfo.value)
+    finally:
+        config_tree.envs_dir.chmod(0o755)
