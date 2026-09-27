@@ -392,3 +392,76 @@ def load_source(config: ConfigRoot, argument: str) -> DiffSource:
     return DiffSource(
         label=argument, pins=parse_lock(path), python=None, micromamba=None, channels=None
     )
+
+
+def _diff_pins(a: dict[str, str | None], b: dict[str, str | None]) -> PinDiff:
+    """Compare two identity-to-version maps.
+
+    :param a: Source A's pins.
+    :param b: Source B's pins.
+    :returns: The three difference groups, each sorted by identity.
+    """
+    only_in_a = [PinEntry(name, a[name]) for name in sorted(a.keys() - b.keys())]
+    only_in_b = [PinEntry(name, b[name]) for name in sorted(b.keys() - a.keys())]
+    version_differs: list[PinChange] = []
+    for name in sorted(a.keys() & b.keys()):
+        left, right = a[name], b[name]
+        if left == right:
+            continue
+        # Unreachable for an editable: its identity embeds its target, so two
+        # editables sharing an identity also share a None version. The guard
+        # keeps the dataclass's str contract honest rather than asserting it.
+        if left is None or right is None:
+            continue
+        version_differs.append(PinChange(name, left, right))
+    return PinDiff(only_in_a=only_in_a, only_in_b=only_in_b, version_differs=version_differs)
+
+
+def diff_environments(a: DiffSource, b: DiffSource) -> EnvironmentDiff:
+    """Compare two sources across every layer both of them carry.
+
+    :param a: Source A.
+    :param b: Source B.
+    :returns: The four-layer comparison and its verdict.
+    """
+    pins = _diff_pins(a.pins, b.pins)
+    # Tested field by field rather than through a local flag so that mypy
+    # narrows all six attributes for the comparison below the return.
+    if (
+        a.python is None
+        or b.python is None
+        or a.micromamba is None
+        or b.micromamba is None
+        or a.channels is None
+        or b.channels is None
+    ):
+        verdict = VERDICT_DIFFERENT if not pins.is_empty() else VERDICT_WHERE_COMPARABLE
+        return EnvironmentDiff(
+            a=a.label,
+            b=b.label,
+            verdict=verdict,
+            python=None,
+            micromamba=None,
+            channels=None,
+            pins=pins,
+        )
+
+    micromamba = PackageDiff(
+        only_in_a=sorted(set(a.micromamba) - set(b.micromamba)),
+        only_in_b=sorted(set(b.micromamba) - set(a.micromamba)),
+    )
+    differs = (
+        not pins.is_empty()
+        or not micromamba.is_empty()
+        or a.python != b.python
+        or a.channels != b.channels
+    )
+    return EnvironmentDiff(
+        a=a.label,
+        b=b.label,
+        verdict=VERDICT_DIFFERENT if differs else VERDICT_IDENTICAL,
+        python=(a.python, b.python),
+        micromamba=micromamba,
+        channels=(a.channels, b.channels),
+        pins=pins,
+    )

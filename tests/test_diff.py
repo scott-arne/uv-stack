@@ -263,3 +263,205 @@ def test_load_source_reports_an_unreadable_envs_directory(config_tree):
         assert str(config_tree.envs_dir) in str(excinfo.value)
     finally:
         config_tree.envs_dir.chmod(0o755)
+
+
+def _source(label, pins, python=None, micromamba=None, channels=None):
+    from uv_stack.operations.diff import DiffSource
+
+    return DiffSource(
+        label=label, pins=pins, python=python, micromamba=micromamba, channels=channels
+    )
+
+
+def _env_source(label, pins, python="3.12", micromamba=None, channels=None):
+    return _source(
+        label,
+        pins,
+        python=python,
+        micromamba=micromamba or [],
+        channels=channels or ["conda-forge"],
+    )
+
+
+def test_diff_reports_identical_when_every_layer_matches():
+    from uv_stack.operations.diff import VERDICT_IDENTICAL, diff_environments
+
+    result = diff_environments(
+        _env_source("a", {"numpy": "2.1.0"}), _env_source("b", {"numpy": "2.1.0"})
+    )
+
+    assert result.verdict == VERDICT_IDENTICAL
+    assert result.pins.is_empty()
+    assert result.micromamba is not None and result.micromamba.is_empty()
+
+
+def test_diff_reports_identical_where_comparable_for_a_bare_lock():
+    from uv_stack.operations.diff import VERDICT_WHERE_COMPARABLE, diff_environments
+
+    result = diff_environments(
+        _env_source("a", {"numpy": "2.1.0"}), _source("a.lock.txt", {"numpy": "2.1.0"})
+    )
+
+    assert result.verdict == VERDICT_WHERE_COMPARABLE
+    assert result.python is None
+    assert result.micromamba is None
+    assert result.channels is None
+
+
+def test_diff_reports_a_python_only_difference():
+    from uv_stack.operations.diff import VERDICT_DIFFERENT, diff_environments
+
+    result = diff_environments(
+        _env_source("a", {"numpy": "2.1.0"}, python="3.12"),
+        _env_source("b", {"numpy": "2.1.0"}, python="3.13"),
+    )
+
+    assert result.verdict == VERDICT_DIFFERENT
+    assert result.python == ("3.12", "3.13")
+    assert result.pins.is_empty()
+
+
+def test_diff_reports_a_micromamba_only_difference():
+    from uv_stack.operations.diff import VERDICT_DIFFERENT, diff_environments
+
+    result = diff_environments(
+        _env_source("a", {}, micromamba=["gdal"]), _env_source("b", {}, micromamba=[])
+    )
+
+    assert result.verdict == VERDICT_DIFFERENT
+    assert result.micromamba is not None
+    assert result.micromamba.only_in_a == ["gdal"]
+    assert result.micromamba.only_in_b == []
+
+
+def test_diff_reports_a_channel_reorder_as_a_difference():
+    from uv_stack.operations.diff import VERDICT_DIFFERENT, diff_environments
+
+    result = diff_environments(
+        _env_source("a", {}, channels=["conda-forge", "bioconda"]),
+        _env_source("b", {}, channels=["bioconda", "conda-forge"]),
+    )
+
+    assert result.verdict == VERDICT_DIFFERENT
+    assert result.channels == (["conda-forge", "bioconda"], ["bioconda", "conda-forge"])
+
+
+def test_diff_populates_all_three_pin_groups():
+    from uv_stack.operations.diff import PinChange, PinEntry, diff_environments
+
+    result = diff_environments(
+        _env_source("a", {"numpy": "2.1.0", "rich": "13.7.0", "-e /src/tool": None}),
+        _env_source("b", {"pandas": "2.0.0", "rich": "14.0.0"}),
+    )
+
+    assert result.pins.only_in_a == [PinEntry("-e /src/tool", None), PinEntry("numpy", "2.1.0")]
+    assert result.pins.only_in_b == [PinEntry("pandas", "2.0.0")]
+    assert result.pins.version_differs == [PinChange("rich", "13.7.0", "14.0.0")]
+
+
+def test_diff_never_puts_an_editable_in_version_differs():
+    from uv_stack.operations.diff import diff_environments
+
+    result = diff_environments(
+        _env_source("a", {"-e /src/one": None}), _env_source("b", {"-e /src/two": None})
+    )
+
+    assert result.pins.version_differs == []
+    assert [entry.name for entry in result.pins.only_in_a] == ["-e /src/one"]
+    assert [entry.name for entry in result.pins.only_in_b] == ["-e /src/two"]
+
+
+def test_name_spellings_of_one_distribution_compare_identical(tmp_path):
+    from uv_stack.operations.diff import diff_environments, parse_lock
+
+    a = _source("a", parse_lock(_lock(tmp_path, "Foo_Bar==1.0\n", "a.lock.txt")))
+    b = _source("b", parse_lock(_lock(tmp_path, "foo-bar==1.0\n", "b.lock.txt")))
+
+    assert diff_environments(a, b).pins.is_empty()
+
+
+def _declare_env(
+    config, name, *, python="3.12", micromamba=(), channels=(), pins="numpy==2.1.0\n"
+):
+    directory = config.env_dir(name)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "stack.txt").write_text("standard\n")
+    (directory / "python.txt").write_text(f"{python}\n")
+    (directory / "micromamba.txt").write_text("".join(f"{entry}\n" for entry in micromamba))
+    (directory / "channels.txt").write_text("".join(f"{entry}\n" for entry in channels))
+    (directory / "requirements.lock.txt").write_text(pins)
+    return directory
+
+
+def test_an_empty_channels_file_matches_an_explicit_conda_forge(config_tree):
+    from uv_stack.operations.diff import VERDICT_IDENTICAL, diff_environments, load_source
+
+    _declare_env(config_tree, "left", channels=())
+    _declare_env(config_tree, "right", channels=("conda-forge",))
+
+    result = diff_environments(
+        load_source(config_tree, "left"), load_source(config_tree, "right")
+    )
+    assert result.verdict == VERDICT_IDENTICAL
+
+
+def test_first_wins_deduplication_makes_reordered_specs_differ(config_tree):
+    from uv_stack.operations.diff import VERDICT_DIFFERENT, diff_environments, load_source
+
+    _declare_env(config_tree, "left", micromamba=("numpy=1.26", "numpy=2.0"))
+    _declare_env(config_tree, "right", micromamba=("numpy=2.0", "numpy=1.26"))
+
+    result = diff_environments(
+        load_source(config_tree, "left"), load_source(config_tree, "right")
+    )
+    assert result.verdict == VERDICT_DIFFERENT
+    assert result.micromamba is not None
+    assert result.micromamba.only_in_a == ["numpy=1.26"]
+    assert result.micromamba.only_in_b == ["numpy=2.0"]
+
+
+def test_a_stray_pip_or_python_entry_is_not_drift(config_tree):
+    from uv_stack.operations.diff import VERDICT_IDENTICAL, diff_environments, load_source
+
+    _declare_env(config_tree, "left", micromamba=("pip", "python=3.12"))
+    _declare_env(config_tree, "right", micromamba=())
+
+    result = diff_environments(
+        load_source(config_tree, "left"), load_source(config_tree, "right")
+    )
+    assert result.verdict == VERDICT_IDENTICAL
+    assert result.micromamba is not None
+    assert result.micromamba.only_in_a == []
+
+
+def test_an_environment_matches_a_copy_of_its_own_directory(config_tree, tmp_path):
+    import shutil
+
+    from uv_stack.operations.diff import VERDICT_IDENTICAL, diff_environments, load_source
+
+    _declare_env(config_tree, "left", micromamba=("gdal",), channels=("bioconda",))
+    copied = tmp_path / "elsewhere" / "left"
+    copied.parent.mkdir()
+    shutil.copytree(config_tree.env_dir("left"), copied)
+
+    result = diff_environments(
+        load_source(config_tree, "left"), load_source(config_tree, str(copied))
+    )
+    assert result.verdict == VERDICT_IDENTICAL
+
+
+def test_an_environment_matches_its_own_lock_file_where_comparable(config_tree):
+    from uv_stack.operations.diff import (
+        VERDICT_WHERE_COMPARABLE,
+        diff_environments,
+        load_source,
+    )
+
+    _declare_env(config_tree, "left")
+    lock = config_tree.env_requirements_lock("left")
+
+    result = diff_environments(
+        load_source(config_tree, "left"), load_source(config_tree, str(lock))
+    )
+    assert result.verdict == VERDICT_WHERE_COMPARABLE
+    assert result.pins.is_empty()
