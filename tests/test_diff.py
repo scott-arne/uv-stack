@@ -487,6 +487,12 @@ def test_parse_lock_rejects_an_unnamed_line_with_whitespace(tmp_path):
         parse_lock(path)
     assert "line 2" in str(excinfo.value)
 
+    # Also reject a tab between slash-bearing parts
+    path_tab = _lock(tmp_path, "numpy==2.1.0\na/b\tc/d\n", "tab.lock")
+    with pytest.raises(ConfigError) as excinfo:
+        parse_lock(path_tab)
+    assert "line 2" in str(excinfo.value)
+
 
 def test_parse_lock_refuses_a_fifo_without_blocking(tmp_path):
     from uv_stack.operations.diff import parse_lock

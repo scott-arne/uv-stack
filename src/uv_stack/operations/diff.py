@@ -217,8 +217,7 @@ def _parse_lock_line(raw: str, path: Path, number: int) -> tuple[str, str | None
     if direct is not None:
         return canonical_name(direct.group("name")), direct.group("url")
     # Unnamed requirement: a bare path or URL that uv pip compile passes through.
-    # Match: does not begin with '-', contains no whitespace, and contains '/'.
-    if not line.startswith("-") and " " not in line and "/" in line:
+    if not line.startswith("-") and not any(ch.isspace() for ch in line) and "/" in line:
         return line, None
     raise ConfigError(
         f"{path}, line {number}: cannot parse '{line}' as a requirement.",
@@ -255,17 +254,20 @@ def parse_lock(path: Path) -> dict[str, str | None]:
                 f"{path} is {_describe(result)}, not a lock file.",
                 hint="Replace it with a compiled lock file.",
             )
+        handle = os.fdopen(fd, "rb")
+    except Exception:
+        os.close(fd)
+        raise
 
+    with handle:
         try:
-            raw_bytes = os.read(fd, result.st_size)
+            raw_bytes = handle.read()
             text = raw_bytes.decode("utf-8")
         except UnicodeDecodeError as error:
             raise ConfigError(
                 f"Cannot read {path}: not valid UTF-8.",
                 hint="Re-save the file as UTF-8 text.",
             ) from error
-    finally:
-        os.close(fd)
 
     pins: dict[str, str | None] = {}
     for number, raw in enumerate(text.splitlines(), 1):
