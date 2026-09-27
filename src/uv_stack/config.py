@@ -175,6 +175,50 @@ def _parse_local_values(path: Path, declared: list[str], declared_path: Path) ->
     return values
 
 
+def load_env_from_dir(directory: Path, name: str) -> EnvConfig:
+    """Load an environment's four source files from a directory.
+
+    Split out of :meth:`ConfigRoot.load_env` so a *copied* environment
+    directory — the unit that travels between machines — reads through the
+    identical contract: the same regular-file checks, the same UTF-8 handling,
+    and the same ``3.12`` default. A second reader would lose all three.
+
+    :param directory: The directory holding the four source files.
+    :param name: The name to record on the returned config.
+    :returns: The environment's declared interpreter, stack entries,
+        micromamba packages and channels.
+    :raises ConfigError: When any of the four sources is present but is not a
+        regular file, or when one of them is not valid UTF-8.
+    """
+    # Ahead of the reads, per require_regular_file's own contract:
+    # read_clean_lines and first_clean_line both test is_file(), which answers
+    # False for a directory or a dangling symlink named channels.txt exactly as
+    # it does for an absent one. Absence is a supported state for all three --
+    # python.txt falls back to 3.12, the other two to no entries -- so the
+    # unreadable path does not fail, it silently becomes the default, and sync
+    # then builds against the wrong interpreter or generates an
+    # environment.yml with no channels while doctor reports the root clean.
+    # stack.txt is checked too. For ConfigRoot.load_env that is a no-op, since
+    # require_env has already held it to the same rule, but a copied directory
+    # has no such caller, and there a directory named stack.txt would read as
+    # an empty stack. On a genuinely absent path each call is a no-op, which is
+    # what keeps an optional file optional.
+    for source in (
+        directory / "stack.txt",
+        directory / "python.txt",
+        directory / "micromamba.txt",
+        directory / "channels.txt",
+    ):
+        require_regular_file(source)
+    return EnvConfig(
+        name=name,
+        python=first_clean_line(directory / "python.txt", default="3.12"),
+        stack=read_clean_lines(directory / "stack.txt"),
+        micromamba=read_clean_lines(directory / "micromamba.txt"),
+        channels=read_clean_lines(directory / "channels.txt"),
+    )
+
+
 class ConfigRoot:
     """Resolves and reads a uv-stack configuration tree.
 
@@ -508,28 +552,4 @@ class ConfigRoot:
             them is not valid UTF-8.
         """
         self.require_env(name)
-        # Ahead of the reads, per require_regular_file's own contract:
-        # read_clean_lines and first_clean_line both test is_file(), which
-        # answers False for a directory or a dangling symlink named
-        # channels.txt exactly as it does for an absent one. Absence is a
-        # supported state for all three -- python.txt falls back to 3.12, the
-        # other two to no entries -- so the unreadable path does not fail, it
-        # silently becomes the default, and sync then builds against the
-        # wrong interpreter or generates an environment.yml with no channels
-        # while doctor reports the root clean. stack.txt is not in the list
-        # because require_env has already held it to the same rule. On a
-        # genuinely absent path each call is a no-op, which is what keeps an
-        # optional file optional.
-        for source in (
-            self.env_python_path(name),
-            self.env_micromamba_path(name),
-            self.env_channels_path(name),
-        ):
-            require_regular_file(source)
-        return EnvConfig(
-            name=name,
-            python=first_clean_line(self.env_python_path(name), default="3.12"),
-            stack=read_clean_lines(self.env_stack_path(name)),
-            micromamba=read_clean_lines(self.env_micromamba_path(name)),
-            channels=read_clean_lines(self.env_channels_path(name)),
-        )
+        return load_env_from_dir(self.env_dir(name), name)
