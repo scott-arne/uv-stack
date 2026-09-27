@@ -92,7 +92,7 @@ create the `main` environment (Python 3.12 by default), compiled a pinned
 
 From now on, changing what's installed is the same two steps: edit a source
 file (a profile, a bundle, or stack.txt), then run stack upgrade main. For a
-freshly cloned config root, use stack converge to build the environments first.
+freshly cloned config root, use stack sync to build the environments first.
 Check what needs rebuilding at any time with stack status.
 
 ## What you define
@@ -277,7 +277,8 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack create bundle NAME TOKEN...` | Write a new bundle YAML (`--description`, `--tag`) |
 | `stack edit KIND [NAME]` | Open a profile, bundle, env source, or project file in your editor and validate it when the editor exits |
 | `stack upgrade [NAMES]...` | Re-render, re-lock, and sync shared environments |
-| `stack converge [NAMES]...` | Create, build, and recompile every environment the root declares (no prompt, keeps existing pins) |
+| `stack sync` | Create, build, and recompile every environment the root declares (no prompt, keeps existing pins) |
+| `stack sync env NAME...` | The same, for only the named environments |
 | `stack refresh` | Re-resolve a tracked project against current profiles/bundles |
 | `stack status [NAMES]...` | Shared-env build state: drift, lock freshness, existence |
 | `stack list env\|profile\|bundle` | Tables of what exists (`--tag` filters, `--json` for scripts) |
@@ -386,12 +387,12 @@ environment the batch never reached. Those appear only in that mode — without
 it every requested environment is attempted, so nothing is ever skipped.
 
 To bring up a whole config root instead of named environments — creating the
-missing ones, without a prompt — use `stack converge`:
+missing ones, without a prompt — use `stack sync`:
 
 ```bash
-stack converge                  # every environment the root declares
-stack converge main scratch     # only these
-stack converge --upgrade        # force new pins (the default preserves them)
+stack sync                      # every environment the root declares
+stack sync env main scratch     # only these
+stack sync --upgrade            # force new pins (the default preserves them)
 ```
 
 > **Changed behavior.** `--no-upgrade` and `--upgrade-package` now genuinely
@@ -563,7 +564,7 @@ difference. `stack status` is a single-machine command.
 git clone <url> ~/.config/python-envs
 stack doctor                                    # names the variables with no value
 $EDITOR ~/.config/python-envs/variables.local.txt
-stack converge                                  # builds every environment
+stack sync                                      # builds every environment
 ```
 
 Step two is what makes this work on a machine you have never set up: doctor
@@ -716,7 +717,7 @@ Closing that gap would mean rewriting uv's output behind its back.
   because uv expands environment variables in a requirements file and would
   resolve the leftover reference behind uv-stack's back. `DEV=/a/${OTHER}/b`
   turns every entry that references `DEV` into an error: `stack doctor` reports
-  it and `stack converge` refuses.
+  it and `stack sync` refuses.
 - **No value may contain whitespace.** That rules out a path containing a
   space, and it is what keeps expansion from splitting an already-validated
   entry into a new token. Use a symlink or move the checkout.

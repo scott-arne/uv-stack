@@ -198,7 +198,7 @@ def _explain_candidate_lock(
                 "ignores the existing pins and rewrites it: repeat the "
                 "command you ran, keeping the same environment names, and "
                 "either drop --no-upgrade/--upgrade-package from "
-                "'stack upgrade' or add --upgrade to 'stack converge'."
+                "'stack upgrade' or add --upgrade to 'stack sync env'."
             )
         elif seeded:
             error.hint = (

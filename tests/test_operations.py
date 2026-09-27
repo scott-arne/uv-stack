@@ -3222,8 +3222,8 @@ def _assert_seeded_hint(hint: str) -> None:
     # only one of the two commands reaching it. Either half going missing is
     # that defect again, pointed the other way.
     assert "drop --no-upgrade/--upgrade-package from 'stack upgrade'" in hint
-    assert "add --upgrade to 'stack converge'" in hint
-    # And no runnable bare command: 'stack converge --upgrade' on its own
+    assert "add --upgrade to 'stack sync env'" in hint
+    # And no runnable bare command: 'stack sync --upgrade' on its own
     # names no environment, so it turns a scoped repair into an unprompted
     # root-wide force-upgrade.
     assert "keeping the same environment names" in hint

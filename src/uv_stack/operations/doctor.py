@@ -1449,7 +1449,7 @@ def _expanded_entry_findings(
 
     The refusal quotes ``expand_all``'s own message with its whitespace
     collapsed. That function formats a multi-line block because it reports
-    every refused entry at once, and a finding is one line; quoting converge's
+    every refused entry at once, and a finding is one line; quoting sync's
     words rather than paraphrasing them keeps the two diagnoses from drifting.
 
     Missing checkouts are derived, not declared: there is no checkout registry
@@ -1474,9 +1474,9 @@ def _expanded_entry_findings(
         except UvStackError as error:
             # Reachable despite the caller's guard, and by exactly one route: a
             # declared name with a value here whose substitution would rewrite
-            # the entry. Dropping it would leave a root that 'stack converge'
+            # the entry. Dropping it would leave a root that 'stack sync'
             # hard-fails on looking clean to 'stack doctor' — the one command
-            # whose job is to say otherwise before converge does.
+            # whose job is to say otherwise before sync does.
             findings.append(
                 Finding(
                     "error",

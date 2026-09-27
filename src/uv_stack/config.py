@@ -107,7 +107,7 @@ def _normalize_value(name: str, raw: str, where: str) -> str:
         # expanduser is not total: the '~user' form looks the name up in the
         # password database, and a NUL in it raises ValueError. That is
         # neither a UvStackError nor an OSError, so unconverted it reaches the
-        # CLI edge as a traceback — out of doctor, converge, and status alike,
+        # CLI edge as a traceback — out of doctor, sync, and status alike,
         # for a file the user can fix in one edit. Converting it here is the
         # trade read_text_utf8 makes for UnicodeDecodeError, and for its
         # reason too: this frame is the last one that still knows which
@@ -514,7 +514,7 @@ class ConfigRoot:
         # channels.txt exactly as it does for an absent one. Absence is a
         # supported state for all three -- python.txt falls back to 3.12, the
         # other two to no entries -- so the unreadable path does not fail, it
-        # silently becomes the default, and converge then builds against the
+        # silently becomes the default, and sync then builds against the
         # wrong interpreter or generates an environment.yml with no channels
         # while doctor reports the root clean. stack.txt is not in the list
         # because require_env has already held it to the same rule. On a

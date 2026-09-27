@@ -189,8 +189,12 @@ click.rich_click.COMMAND_GROUPS = {
         # filed under a destination it only partly serves.
         {"name": "Create", "commands": ["create"]},
         {"name": "Edit", "commands": ["edit"]},
-        {"name": "Environments", "commands": ["upgrade", "converge"]},
+        {"name": "Environments", "commands": ["upgrade"]},
         {"name": "Projects", "commands": ["refresh"]},
+        # 'sync' is cross-cutting for the same reason 'create' is: it targets
+        # environments and projects both, so filing it under either would put
+        # it under a destination it only partly serves.
+        {"name": "Sync", "commands": ["sync"]},
         {"name": "Inspection", "commands": ["list", "show", "resolve", "status"]},
         {"name": "Maintenance", "commands": ["init", "doctor", "config", "completion"]},
     ]
@@ -247,7 +251,6 @@ def _register() -> None:
     from uv_stack.cli import (
         completion_cmd,
         config_cmd,
-        converge,
         create,
         doctor,
         init_cmd,
@@ -256,12 +259,13 @@ def _register() -> None:
         resolve,
         show,
         status_cmd,
+        sync_cmd,
         upgrade,
     )
     from uv_stack.cli import edit as edit_cmd
 
     cli.add_command(upgrade.upgrade)
-    cli.add_command(converge.converge)
+    cli.add_command(sync_cmd.sync)
     cli.add_command(create.create)
     cli.add_command(edit_cmd.edit)
     cli.add_command(refresh_cmd.refresh)

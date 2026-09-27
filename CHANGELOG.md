@@ -37,16 +37,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `requirements.in` verbatim, where a continuation swallows the requirement
   written after it. `stack create env|profile|bundle`, `stack init`, and
   `stack edit` refuse one on the way in; because rendering validates too, every
-  command that renders — `upgrade`, `converge`, `status`, `show env`, `refresh`,
+  command that renders — `upgrade`, `sync`, `status`, `show env`, `refresh`,
   `create project` — now also refuses one already sitting in a `stack.txt` or a
   profile.
 
 ### Added
 
-- `stack converge [NAMES]...` creates, builds, and recompiles every environment
-  the config root declares, without a prompt and creating missing environments
-  rather than reporting them as errors, which makes it the first command to run
-  on a freshly cloned config root. It accepts `--dry-run`, `--stop-on-error`,
+- `stack sync` creates, builds, and recompiles every environment the config
+  root declares, without a prompt and creating missing environments rather
+  than reporting them as errors, which makes it the first command to run on a
+  freshly cloned config root. `stack sync env NAME...` does the same for only
+  the named environments. Both accept `--dry-run`, `--stop-on-error`,
   `--strict`, and `--upgrade`.
 - Config roots can declare variables in `variables.txt`, supply this machine's
   values in `variables.local.txt` or in an exported environment variable of the
@@ -76,7 +77,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   rendered, matching what `stack status` already did. It previously printed the
   whole description and then exited 1, while `--json` exited 0 on the same
   root.
-- The upgrade and converge batch summary reports three outcomes rather than
+- The upgrade and sync batch summary reports three outcomes rather than
   two: succeeded, failed, and skipped. A `--dry-run` batch prints the summary
   too, where it previously printed none and still exited 1 when an environment
   failed.

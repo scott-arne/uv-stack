@@ -568,7 +568,7 @@ def test_a_value_whose_expansion_fails_is_refused(config_tree: ConfigRoot):
     # os.path.expanduser is not total: the '~user' form goes to the password
     # database, and a NUL in the name raises ValueError. A ValueError is
     # neither a UvStackError nor an OSError, so unconverted this one leaves
-    # 'stack doctor', 'stack converge', and 'stack status' printing a
+    # 'stack doctor', 'stack sync', and 'stack status' printing a
     # traceback for a file the user can fix in one edit.
     config_tree.variables_path().write_text("DEV\n")
     config_tree.variables_local_path().write_text("DEV=~a\x00b/x\n")

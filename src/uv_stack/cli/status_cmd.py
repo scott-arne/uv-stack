@@ -23,7 +23,7 @@ def status(config: ConfigRoot, names: tuple[str, ...], as_json: bool) -> None:
     """Show each shared environment's build state (drift, lock, existence)."""
     for name in names:
         # compute_status joins each NAME onto <root>/envs and reads what it
-        # lands on, so the file-stem rule upgrade and converge apply to their
+        # lands on, so the file-stem rule upgrade and sync apply to their
         # own NAMEs holds here too. Refused up front rather than reported as
         # one more "config error" row: a name that cannot name an environment
         # is a bad argument, not a config that failed to load. Discovered names

@@ -249,7 +249,7 @@ def test_an_unusable_env_source_is_reported_not_defaulted(
     # read_clean_lines and first_clean_line answer for an unreadable path
     # exactly what they answer for an absent one, so none of these shapes was
     # a failure to load: the value was replaced by a default. Doctor printed
-    # "No problems detected." over a root that converge would build against
+    # "No problems detected." over a root that sync would build against
     # 3.12 instead of the configured interpreter, or generate an
     # environment.yml for with no channels at all.
     path = getattr(config_tree, accessor)("main")
@@ -2124,7 +2124,7 @@ def test_an_unsafe_expansion_is_reported_as_an_error(config_tree: ConfigRoot):
     # because the defect only exists after substitution. The expansion check is
     # therefore the first thing to meet it -- and the last. It must neither
     # carry the error out of 'stack doctor' nor drop it: no other check can see
-    # that this root is one 'stack converge' will refuse.
+    # that this root is one 'stack sync' will refuse.
     config_tree.variables_path().write_text("DEV\n")
     config_tree.variables_local_path().write_text("DEV=-r\n")
     config_tree.profile_path("dev").write_text("includes:\n  - -e ${DEV}/widget\n")
@@ -2133,13 +2133,13 @@ def test_an_unsafe_expansion_is_reported_as_an_error(config_tree: ConfigRoot):
     finding = next(f for f in findings if f.kind == "unsafe-expansion")
     assert finding.level == "error"
     assert finding.path == config_tree.profile_path("dev")
-    # The source, the entry, and the explanation -- converge's own words.
+    # The source, the entry, and the explanation -- sync's own words.
     assert finding.message.startswith(f"{config_tree.profile_path('dev')}: ")
     assert "-e ${DEV}/widget" in finding.message
     assert "-r/widget" in finding.message
-    # Converge's wording is deliberately not pinned here -- doctor quotes it
+    # Sync's wording is deliberately not pinned here -- doctor quotes it
     # verbatim so the two cannot drift, and test_variables.py owns it. What is
-    # doctor's own is the flattening: converge raises a multi-line ConfigError,
+    # doctor's own is the flattening: sync raises a multi-line ConfigError,
     # and a finding message is one line.
     assert "\n" not in finding.message
     assert finding.fix is not None

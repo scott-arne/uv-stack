@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import shutil
 import signal
 from pathlib import Path
@@ -2335,7 +2336,7 @@ def test_status_config_error_row_prints_message(tmp_path: Path, monkeypatch):
 
 
 def test_status_rejects_a_traversing_name(tmp_path: Path, monkeypatch):
-    """The file-stem rule ``upgrade`` and ``converge`` apply to their own NAMEs.
+    """The file-stem rule ``upgrade`` and ``sync`` apply to their own NAMEs.
 
     Refused up front rather than reported as one more "config error" row: a
     name that cannot name an environment is a bad argument, and a row would
@@ -4219,12 +4220,13 @@ def test_command_panels_separate_create_env_and_project_work():
     Asserts structurally against COMMAND_GROUPS: 'refresh' only ever operates
     on projects and gets its own panel; 'create' is cross-cutting (it makes
     environments, projects, profiles, and bundles) and gets its own panel;
-    'upgrade' and 'converge' are the genuinely environment-only commands.
+    'upgrade' is the genuinely environment-only command.
     """
     command_groups = rich_click.rich_click.COMMAND_GROUPS.get("stack", [])
     panels = {group["name"]: group["commands"] for group in command_groups}
     assert panels.get("Create") == ["create"], panels
-    assert panels.get("Environments") == ["upgrade", "converge"], panels
+    assert panels.get("Environments") == ["upgrade"], panels
+    assert panels.get("Sync") == ["sync"], panels
     assert panels.get("Projects") == ["refresh"], panels
 
     # Completeness: the per-panel assertions above pin what each panel holds,
@@ -5305,16 +5307,16 @@ def test_dedup_preserves_request_order(tmp_path: Path):
     assert "2 of 2 environment(s) failed." in summary
 
 
-def test_converge_runs_every_declared_environment_without_prompting(
+def test_sync_runs_every_declared_environment_without_prompting(
     tmp_path: Path, monkeypatch
 ):
     root = _two_failing_envs_root(tmp_path)
     calls: list[tuple[list[str], object]] = []
     monkeypatch.setattr(
-        "uv_stack.cli.converge._run_upgrade",
+        "uv_stack.cli.sync_cmd._run_upgrade",
         lambda config, names, options, **kw: calls.append((list(names), options)),
     )
-    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    result = CliRunner().invoke(cli, ["--root", str(root), "sync"])
     assert result.exit_code == 0, result.output
     names, options = calls[0]
     assert names == ["alpha", "beta"]
@@ -5324,42 +5326,42 @@ def test_converge_runs_every_declared_environment_without_prompting(
     assert "Upgrade all of these?" not in result.output
 
 
-def test_converge_accepts_explicit_names(tmp_path: Path, monkeypatch):
+def test_sync_env_accepts_explicit_names(tmp_path: Path, monkeypatch):
     root = _two_failing_envs_root(tmp_path)
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        "uv_stack.cli.converge._run_upgrade",
+        "uv_stack.cli.sync_cmd._run_upgrade",
         lambda config, names, options, **kw: calls.append(list(names)),
     )
-    result = CliRunner().invoke(cli, ["--root", str(root), "converge", "beta"])
+    result = CliRunner().invoke(cli, ["--root", str(root), "sync", "env", "beta"])
     assert result.exit_code == 0, result.output
     assert calls == [["beta"]]
 
 
-def test_converge_upgrade_flag_turns_off_no_upgrade(tmp_path: Path, monkeypatch):
+def test_sync_upgrade_flag_turns_off_no_upgrade(tmp_path: Path, monkeypatch):
     root = _two_failing_envs_root(tmp_path)
     captured: list[object] = []
     monkeypatch.setattr(
-        "uv_stack.cli.converge._run_upgrade",
+        "uv_stack.cli.sync_cmd._run_upgrade",
         lambda config, names, options, **kw: captured.append(options),
     )
-    CliRunner().invoke(cli, ["--root", str(root), "converge", "--upgrade"])
+    CliRunner().invoke(cli, ["--root", str(root), "sync", "--upgrade"])
     assert captured[0].no_upgrade is False
 
 
-def test_converge_passes_its_own_wording(tmp_path: Path, monkeypatch):
+def test_sync_passes_its_own_wording(tmp_path: Path, monkeypatch):
     root = _two_failing_envs_root(tmp_path)
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        "uv_stack.cli.converge._run_upgrade",
+        "uv_stack.cli.sync_cmd._run_upgrade",
         lambda config, names, options, **kw: captured.update(kw),
     )
-    CliRunner().invoke(cli, ["--root", str(root), "converge"])
-    assert captured["rule_verb"] == "Converging"
-    assert captured["all_succeeded"] == "All requested environments converged."
+    CliRunner().invoke(cli, ["--root", str(root), "sync"])
+    assert captured["rule_verb"] == "Syncing"
+    assert captured["all_succeeded"] == "All requested environments synced."
 
 
-def test_converge_passes_its_flags_through(tmp_path: Path, monkeypatch):
+def test_sync_passes_its_flags_through(tmp_path: Path, monkeypatch):
     # --strict and --stop-on-error are pure pass-throughs, and a pass-through
     # that is silently dropped looks exactly like one that works.
     root = _two_failing_envs_root(tmp_path)
@@ -5369,37 +5371,37 @@ def test_converge_passes_its_flags_through(tmp_path: Path, monkeypatch):
         captured["options"] = options
         captured.update(kw)
 
-    monkeypatch.setattr("uv_stack.cli.converge._run_upgrade", _record)
+    monkeypatch.setattr("uv_stack.cli.sync_cmd._run_upgrade", _record)
     CliRunner().invoke(
-        cli, ["--root", str(root), "converge", "--strict", "--stop-on-error"]
+        cli, ["--root", str(root), "sync", "--strict", "--stop-on-error"]
     )
     assert captured["stop_on_error"] is True
     assert captured["options"].strict is True
 
 
-def test_converge_on_a_root_with_no_environments_says_so(tmp_path: Path):
+def test_sync_on_a_root_with_no_environments_says_so(tmp_path: Path):
     root = _seeded_root(tmp_path)
-    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    result = CliRunner().invoke(cli, ["--root", str(root), "sync"])
     assert result.exit_code == 0
     assert "No environments" in result.output
 
 
-def test_converge_help_states_it_does_not_prompt():
-    result = CliRunner().invoke(cli, ["converge", "--help"])
-    assert "never prompts" in result.output
+def test_sync_help_states_it_does_not_prompt():
+    result = CliRunner().invoke(cli, ["sync", "--help"])
+    assert "never prompts" in _flat_panel(result)
     # A dry run refreshes two generated files, so the old claim was false. The
     # assertion is negative because rich wraps help text at the terminal width
     # and a positive phrase can be split across lines; its absence cannot.
     assert "change nothing" not in result.output
 
 
-def test_upgrade_help_points_at_converge():
+def test_upgrade_help_points_at_sync():
     result = CliRunner().invoke(cli, ["upgrade", "--help"])
-    assert "converge" in result.output
+    assert "'stack sync'" in _flat_panel(result)
     assert "change nothing" not in result.output
 
 
-def test_converge_dry_run_probes_and_mutates_nothing(tmp_path: Path, monkeypatch):
+def test_sync_dry_run_probes_and_mutates_nothing(tmp_path: Path, monkeypatch):
     """Pin the dry-run boundary: one read-only probe, two files, no mutation."""
     from uv_stack.commands import micromamba_python_info
     from uv_stack.config import ConfigRoot
@@ -5415,15 +5417,15 @@ def test_converge_dry_run_probes_and_mutates_nothing(tmp_path: Path, monkeypatch
     runner = RecordingRunner(responder=_probe_responder)
     # _run_upgrade builds its own runner; patch the name in the module whose
     # globals that call resolves against, which is cli.upgrade even though the
-    # command lives in cli.converge.
+    # command lives in cli.sync_cmd.
     monkeypatch.setattr("uv_stack.cli.upgrade.SubprocessRunner", lambda: runner)
 
-    result = CliRunner().invoke(cli, ["--root", str(root), "converge", "--dry-run"])
+    result = CliRunner().invoke(cli, ["--root", str(root), "sync", "--dry-run"])
     assert result.exit_code == 0, result.output
     assert [c.args for c in runner.commands] == [micromamba_python_info("main").args]
-    # The section rule carries converge's own verb, and the summary under a
-    # dry run reports the plan without claiming anything was converged.
-    assert "Converging main" in result.output
+    # The section rule carries sync's own verb, and the summary under a
+    # dry run reports the plan without claiming anything was synced.
+    assert "Syncing main" in result.output
     assert "All requested environments planned." in result.output
     # The two generated files are refreshed; nothing else is written.
     assert config.env_requirements_in("main").is_file()
@@ -5431,8 +5433,8 @@ def test_converge_dry_run_probes_and_mutates_nothing(tmp_path: Path, monkeypatch
     assert not config.env_requirements_lock("main").exists()
 
 
-def test_converge_success_summary_uses_its_own_line(tmp_path: Path, monkeypatch):
-    """The success line is converge's, not upgrade's.
+def test_sync_success_summary_uses_its_own_line(tmp_path: Path, monkeypatch):
+    """The success line is sync's, not upgrade's.
 
     Stubbing ``upgrade_env`` is what makes a successful batch reachable without
     micromamba or uv, exactly as
@@ -5447,18 +5449,18 @@ def test_converge_success_summary_uses_its_own_line(tmp_path: Path, monkeypatch)
         "uv_stack.cli.upgrade.upgrade_env",
         lambda config, runner, name, options: UpgradeResult(env_name=name),
     )
-    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    result = CliRunner().invoke(cli, ["--root", str(root), "sync"])
     assert result.exit_code == 0, result.output
-    assert "All requested environments converged." in result.output
+    assert "All requested environments synced." in result.output
     assert "All requested environments upgraded." not in result.output
 
-@pytest.mark.parametrize("command", ["upgrade", "converge"])
+@pytest.mark.parametrize("command", [["upgrade"], ["sync", "env"]])
 def test_a_dry_run_success_line_claims_a_plan_and_nothing_more(
-    tmp_path: Path, monkeypatch, command: str
+    tmp_path: Path, monkeypatch, command: list[str]
 ):
     """Neither command may report work a dry run did not do.
 
-    Both call sites supply their own past-tense line — 'upgraded', 'converged'
+    Both call sites supply their own past-tense line — 'upgraded', 'synced'
     — and under --dry-run neither is true, so the two share one that is.
     """
     from uv_stack.operations.upgrade import UpgradeResult
@@ -5469,12 +5471,76 @@ def test_a_dry_run_success_line_claims_a_plan_and_nothing_more(
         lambda config, runner, name, options: UpgradeResult(env_name=name),
     )
     result = CliRunner().invoke(
-        cli, ["--root", str(root), command, "--dry-run", "main"]
+        cli, ["--root", str(root), *command, "--dry-run", "main"]
     )
     assert result.exit_code == 0, result.output
     assert "All requested environments planned." in result.output
     assert "upgraded." not in result.output
-    assert "converged." not in result.output
+    assert "synced." not in result.output
+
+
+def _record_sync(monkeypatch) -> list[tuple[list[str], object]]:
+    """Stand in for the upgrade pipeline and record what sync handed it."""
+    calls: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(
+        "uv_stack.cli.sync_cmd._run_upgrade",
+        lambda config, names, options, **kw: calls.append((list(names), options)),
+    )
+    return calls
+
+
+def test_converge_is_gone(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "1000")
+    root = _two_failing_envs_root(tmp_path)
+    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    assert result.exit_code == 2
+    assert "No such command 'converge'" in _flat_panel(result)
+
+
+def test_sync_env_requires_a_name(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "1000")
+    root = _two_failing_envs_root(tmp_path)
+    calls = _record_sync(monkeypatch)
+    result = CliRunner().invoke(cli, ["--root", str(root), "sync", "env"])
+    assert result.exit_code == 2
+    flat = _flat_panel(result)
+    assert "Give at least one NAME" in flat
+    assert "'stack sync' with no arguments" in flat
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "flag", ["--dry-run", "--stop-on-error", "--strict", "--upgrade"]
+)
+def test_sync_refuses_group_flags_before_a_subcommand(
+    tmp_path: Path, monkeypatch, flag: str
+):
+    monkeypatch.setenv("COLUMNS", "1000")
+    root = _two_failing_envs_root(tmp_path)
+    calls = _record_sync(monkeypatch)
+    result = CliRunner().invoke(cli, ["--root", str(root), "sync", flag, "env", "beta"])
+    assert result.exit_code == 2
+    flat = _flat_panel(result)
+    assert f"{flag} before 'env' would be ignored" in flat
+    assert "stack sync env --help" in flat
+    # The group callback refuses before Click constructs the subcommand, so
+    # nothing ran with the flag silently dropped.
+    assert calls == []
+
+
+def test_sync_upgrade_reaches_both_forms(tmp_path: Path, monkeypatch):
+    root = _two_failing_envs_root(tmp_path)
+    calls = _record_sync(monkeypatch)
+    bare = CliRunner().invoke(cli, ["--root", str(root), "sync", "--upgrade"])
+    named = CliRunner().invoke(
+        cli, ["--root", str(root), "sync", "env", "alpha", "--upgrade"]
+    )
+    assert bare.exit_code == 0, bare.output
+    assert named.exit_code == 0, named.output
+    assert [(names, options.no_upgrade) for names, options in calls] == [
+        (["alpha", "beta"], False),
+        (["alpha"], False),
+    ]
 
 
 def _three_envs_root(tmp_path: Path) -> Path:
@@ -5519,7 +5585,7 @@ def _eisdir() -> OSError:
     return OSError(errno.EISDIR, "Is a directory", "envs/beta/requirements.in")
 
 
-def test_converge_continues_past_an_os_error_and_accounts_for_it(
+def test_sync_continues_past_an_os_error_and_accounts_for_it(
     tmp_path: Path, monkeypatch
 ):
     """A filesystem error from one environment must not abort the batch.
@@ -5534,7 +5600,7 @@ def test_converge_continues_past_an_os_error_and_accounts_for_it(
         "uv_stack.cli.upgrade.upgrade_env", _upgrade_env_raising(attempted, _eisdir())
     )
 
-    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    result = CliRunner().invoke(cli, ["--root", str(root), "sync"])
 
     assert result.exit_code == 1, result.output
     assert attempted == ["beta", "gamma", "main"]
@@ -5567,9 +5633,9 @@ def test_upgrade_continues_past_an_os_error_and_accounts_for_it(
     assert "1 of 3 environment(s) failed." in summary
 
 
-@pytest.mark.parametrize("command", ["upgrade", "converge"])
+@pytest.mark.parametrize("command", [["upgrade"], ["sync", "env"]])
 def test_a_dry_run_batch_rolls_its_failures_up_too(
-    tmp_path: Path, monkeypatch, command: str
+    tmp_path: Path, monkeypatch, command: list[str]
 ):
     """A plan over a whole root gets the same roll-up an execution gets.
 
@@ -5585,7 +5651,7 @@ def test_a_dry_run_batch_rolls_its_failures_up_too(
     )
 
     result = CliRunner().invoke(
-        cli, ["--root", str(root), command, "--dry-run", "beta", "gamma", "main"]
+        cli, ["--root", str(root), *command, "--dry-run", "beta", "gamma", "main"]
     )
 
     assert result.exit_code == 1, result.output
@@ -5608,7 +5674,7 @@ def test_a_dry_run_with_stop_on_error_still_reports_the_skipped(
     )
 
     result = CliRunner().invoke(
-        cli, ["--root", str(root), "converge", "--dry-run", "--stop-on-error"]
+        cli, ["--root", str(root), "sync", "--dry-run", "--stop-on-error"]
     )
 
     assert result.exit_code == 1, result.output
@@ -5633,7 +5699,7 @@ def test_os_error_with_stop_on_error_skips_remaining_environments(
     )
 
     result = CliRunner().invoke(
-        cli, ["--root", str(root), "converge", "--stop-on-error"]
+        cli, ["--root", str(root), "sync", "--stop-on-error"]
     )
 
     assert result.exit_code == 1, result.output
@@ -5662,7 +5728,7 @@ def test_broken_pipe_error_is_not_recorded_as_an_environment_failure(
         _upgrade_env_raising(attempted, BrokenPipeError()),
     )
 
-    result = CliRunner().invoke(cli, ["--root", str(root), "converge"])
+    result = CliRunner().invoke(cli, ["--root", str(root), "sync"])
 
     assert result.exit_code == 128 + int(signal.SIGPIPE)
     assert attempted == ["beta"]
@@ -5700,7 +5766,7 @@ def _assert_untouched(victim: Path) -> None:
     assert not (victim / "environment.yml").exists()
 
 
-def test_converge_rejects_an_absolute_environment_name(tmp_path: Path):
+def test_sync_env_rejects_an_absolute_environment_name(tmp_path: Path):
     """An absolute NAME must not escape the config root.
 
     ``ConfigRoot.env_dir`` joins the name onto ``<root>/envs``, and an
@@ -5713,7 +5779,7 @@ def test_converge_rejects_an_absolute_environment_name(tmp_path: Path):
     victim = _escape_victim(tmp_path)
 
     result = CliRunner().invoke(
-        cli, ["--root", str(root), "converge", "--dry-run", str(victim)]
+        cli, ["--root", str(root), "sync", "env", "--dry-run", str(victim)]
     )
 
     _assert_untouched(victim)
@@ -5735,13 +5801,13 @@ def test_upgrade_rejects_an_absolute_environment_name(tmp_path: Path):
     assert "Invalid environment name" in result.output
 
 
-def test_converge_rejects_a_dotdot_bearing_environment_name(tmp_path: Path):
+def test_sync_env_rejects_a_dotdot_bearing_environment_name(tmp_path: Path):
     """A '../'-bearing NAME must not escape the config root either."""
     root = _seeded_root(tmp_path)
     victim = _escape_victim(tmp_path)
 
     result = CliRunner().invoke(
-        cli, ["--root", str(root), "converge", "--dry-run", "../../victim"]
+        cli, ["--root", str(root), "sync", "env", "--dry-run", "../../victim"]
     )
 
     _assert_untouched(victim)
@@ -5749,25 +5815,37 @@ def test_converge_rejects_a_dotdot_bearing_environment_name(tmp_path: Path):
     assert "Invalid environment name" in result.output
 
 
-def test_converge_refuses_the_whole_batch_before_any_environment_runs(tmp_path: Path):
+def test_sync_env_refuses_the_whole_batch_before_any_environment_runs(tmp_path: Path):
     """One bad NAME stops the batch; the good ones must not have run first.
 
     Validating inside the per-environment loop would pass every test above,
-    since each passes a single name — but it would converge 'main' and only
+    since each passes a single name — but it would sync 'main' and only
     then refuse, leaving half a batch applied for a request that was refused.
     """
     root = _env_root(tmp_path)
     victim = _escape_victim(tmp_path)
 
     result = CliRunner().invoke(
-        cli, ["--root", str(root), "converge", "--dry-run", "main", str(victim)]
+        cli, ["--root", str(root), "sync", "env", "--dry-run", "main", str(victim)]
     )
 
     # The section rule is the batch's first visible act, and it precedes any
     # per-environment failure, so it is the signal that survives whatever
     # 'main' would have gone on to do.
-    assert "Converging main" not in result.output
+    assert "Syncing main" not in result.output
     assert not (root / "envs" / "main" / "requirements.in").exists()
     assert not (root / "envs" / "main" / "environment.yml").exists()
     _assert_untouched(victim)
     assert result.exit_code == 1
+
+
+def test_no_converge_references_survive():
+    """The rename shipped without an alias, so a survivor is a dead path."""
+    root = Path(__file__).resolve().parent.parent
+    pattern = re.compile(r"\bconverge\b")
+    offenders = []
+    for target in [root / "README.md", root / "CHANGELOG.md", *(root / "src").rglob("*.py")]:
+        for number, line in enumerate(target.read_text(encoding="utf-8").splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{target.relative_to(root)}:{number}")
+    assert offenders == []
