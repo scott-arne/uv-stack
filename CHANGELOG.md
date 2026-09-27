@@ -49,6 +49,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   freshly cloned config root. `stack sync env NAME...` does the same for only
   the named environments. Both accept `--dry-run`, `--stop-on-error`,
   `--strict`, and `--upgrade`.
+- `stack diff SOURCE SOURCE` compares two environments across the four layers
+  uv-stack records: the interpreter, the micromamba packages, the effective
+  channel order, and the compiled pins. A source is an environment in this
+  config root, a copy of another machine's `envs/<name>/` directory, or a bare
+  `requirements.lock.txt`, which carries pins only and is reported as such
+  rather than as matching. It exits 0 on a difference unless given
+  `--exit-code`, and `--json` emits the comparison for scripts.
 - Config roots can declare variables in `variables.txt`, supply this machine's
   values in `variables.local.txt` or in an exported environment variable of the
   same name, and reference them as `${NAME}` in profiles, bundles, and

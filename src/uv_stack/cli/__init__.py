@@ -195,7 +195,7 @@ click.rich_click.COMMAND_GROUPS = {
         # environments and projects both, so filing it under either would put
         # it under a destination it only partly serves.
         {"name": "Sync", "commands": ["sync"]},
-        {"name": "Inspection", "commands": ["list", "show", "resolve", "status"]},
+        {"name": "Inspection", "commands": ["list", "show", "resolve", "status", "diff"]},
         {"name": "Maintenance", "commands": ["init", "doctor", "config", "completion"]},
     ]
 }
@@ -252,6 +252,7 @@ def _register() -> None:
         completion_cmd,
         config_cmd,
         create,
+        diff_cmd,
         doctor,
         init_cmd,
         list_cmd,
@@ -272,6 +273,7 @@ def _register() -> None:
     cli.add_command(list_cmd.list_resources)
     cli.add_command(show.show)
     cli.add_command(resolve.resolve)
+    cli.add_command(diff_cmd.diff)
     cli.add_command(init_cmd.init)
     cli.add_command(doctor.doctor)
     cli.add_command(config_cmd.config)

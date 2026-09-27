@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 from tests.conftest import _deadline
+from uv_stack.cli import cli
 from uv_stack.errors import ConfigError
 
 _IS_ROOT = os.geteuid() == 0
@@ -552,7 +555,197 @@ def test_diff_pin_only_drift_is_different():
         _env_source("a", {"numpy": "2.1.0"}),
         _env_source("b", {"numpy": "2.2.0"}),
     )
-    
+
     assert result.verdict == VERDICT_DIFFERENT
     assert len(result.pins.version_differs) == 1
     assert result.pins.version_differs[0].name == "numpy"
+
+
+def _run(config, *args):
+    return CliRunner().invoke(cli, ["--root", str(config.root), *args])
+
+
+def test_diff_json_payload_for_two_environments(config_tree):
+    _declare_env(
+        config_tree,
+        "left",
+        micromamba=("gdal",),
+        channels=("bioconda",),
+        pins="numpy==2.1.0\nrich==13.7.0\n",
+    )
+    _declare_env(config_tree, "right", pins="rich==14.0.0\n-e /src/tool\n")
+
+    result = _run(config_tree, "diff", "left", "right", "--json")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {
+        "a": "left",
+        "b": "right",
+        "verdict": "different",
+        "python": {"a": "3.12", "b": "3.12"},
+        "micromamba": {"only_in_a": ["gdal"], "only_in_b": []},
+        "channels": {"a": ["conda-forge", "bioconda"], "b": ["conda-forge"]},
+        "pins": {
+            "only_in_a": [{"name": "numpy", "version": "2.1.0"}],
+            "only_in_b": [{"name": "-e /src/tool", "version": None}],
+            "version_differs": [{"name": "rich", "a": "13.7.0", "b": "14.0.0"}],
+        },
+    }
+
+
+def test_diff_json_payload_for_an_identical_pair(config_tree):
+    _declare_env(config_tree, "left")
+    _declare_env(config_tree, "right")
+
+    result = _run(config_tree, "diff", "left", "right", "--json")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {
+        "a": "left",
+        "b": "right",
+        "verdict": "identical",
+        "python": {"a": "3.12", "b": "3.12"},
+        "micromamba": {"only_in_a": [], "only_in_b": []},
+        "channels": {"a": ["conda-forge"], "b": ["conda-forge"]},
+        "pins": {"only_in_a": [], "only_in_b": [], "version_differs": []},
+    }
+
+
+def test_diff_json_sorts_every_difference_collection(config_tree):
+    # Each side lists its entries out of order, so a collection that merely
+    # preserved input order would fail here.
+    _declare_env(
+        config_tree,
+        "left",
+        micromamba=("zlib", "gdal"),
+        pins="zope==1.0\nattrs==1.0\ntyper==1.0\nclick==8.0\n",
+    )
+    _declare_env(config_tree, "right", pins="yarl==1.0\nanyio==1.0\ntyper==2.0\nclick==8.1\n")
+
+    payload = json.loads(_run(config_tree, "diff", "left", "right", "--json").output)
+
+    assert payload["micromamba"]["only_in_a"] == ["gdal", "zlib"]
+    assert [entry["name"] for entry in payload["pins"]["only_in_a"]] == ["attrs", "zope"]
+    assert [entry["name"] for entry in payload["pins"]["only_in_b"]] == ["anyio", "yarl"]
+    differs = payload["pins"]["version_differs"]
+    assert [change["name"] for change in differs] == ["click", "typer"]
+
+
+def test_diff_json_does_not_sort_channels(config_tree):
+    # Sorted, these would read bioconda first; the effective order is the
+    # resolution priority the comparison reports on, so it must survive.
+    _declare_env(config_tree, "left", channels=("bioconda",))
+    _declare_env(config_tree, "right", channels=("bioconda",))
+
+    payload = json.loads(_run(config_tree, "diff", "left", "right", "--json").output)
+
+    assert payload["channels"]["a"] == ["conda-forge", "bioconda"]
+    assert payload["channels"]["b"] == ["conda-forge", "bioconda"]
+    assert payload["verdict"] == "identical"
+
+
+def test_diff_json_nulls_every_layer_a_bare_lock_cannot_see(config_tree):
+    _declare_env(config_tree, "left")
+    lock = config_tree.env_requirements_lock("left")
+
+    payload = json.loads(_run(config_tree, "diff", "left", str(lock), "--json").output)
+
+    assert payload["python"] is None
+    assert payload["micromamba"] is None
+    assert payload["channels"] is None
+    assert payload["verdict"] == "identical-where-comparable"
+
+
+def test_diff_exits_zero_by_default_when_sources_differ(config_tree):
+    _declare_env(config_tree, "left", pins="numpy==2.1.0\n")
+    _declare_env(config_tree, "right", pins="numpy==2.2.0\n")
+
+    result = _run(config_tree, "diff", "left", "right")
+
+    assert result.exit_code == 0, result.output
+    assert "Verdict: different" in result.output
+
+
+def test_diff_exit_code_flag_exits_one_when_sources_differ(config_tree):
+    _declare_env(config_tree, "left", pins="numpy==2.1.0\n")
+    _declare_env(config_tree, "right", pins="numpy==2.2.0\n")
+
+    result = _run(config_tree, "diff", "left", "right", "--exit-code")
+
+    # CliRunner also reports 1 for an uncaught exception, so pin that the
+    # comparison rendered in full before the deliberate exit.
+    assert result.exit_code == 1
+    assert "Verdict: different" in result.output
+
+
+def test_diff_exit_code_flag_exits_zero_when_only_a_layer_was_unseen(config_tree):
+    _declare_env(config_tree, "left")
+    lock = config_tree.env_requirements_lock("left")
+
+    result = _run(config_tree, "diff", "left", str(lock), "--exit-code")
+
+    assert result.exit_code == 0, result.output
+    assert "Verdict: identical-where-comparable" in result.output
+
+
+@pytest.mark.parametrize("extra", [[], ["--exit-code"]])
+def test_diff_exits_one_on_a_missing_source(config_tree, tmp_path, monkeypatch, extra):
+    # 'nope' is tried as a path relative to the working directory, so pin it
+    # to one known to hold nothing of that name. The wide console keeps the
+    # error panel from folding the message.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COLUMNS", "1000")
+    _declare_env(config_tree, "left")
+
+    result = _run(config_tree, "diff", "left", "nope", *extra)
+
+    assert result.exit_code == 1
+    assert "No source named nope." in result.output
+
+
+def test_diff_says_which_layers_a_bare_lock_hid(config_tree):
+    _declare_env(config_tree, "left")
+    lock = config_tree.env_requirements_lock("left")
+
+    output = _run(config_tree, "diff", "left", str(lock)).output
+
+    assert "not compared" in output
+
+
+def test_diff_renders_a_bracketed_identity_intact(config_tree, monkeypatch):
+    # Wide enough that rich never wraps the cell, so a missing '[extra]' can
+    # only mean it was parsed as markup.
+    monkeypatch.setenv("COLUMNS", "1000")
+    _declare_env(config_tree, "left", pins="-e /src/tool[extra]\n")
+    _declare_env(config_tree, "right", pins="numpy==2.1.0\n")
+
+    output = _run(config_tree, "diff", "left", "right").output
+
+    assert "/src/tool[extra]" in output
+
+
+def test_diff_renders_a_bracketed_label_intact(config_tree, tmp_path):
+    import shutil
+
+    _declare_env(config_tree, "left")
+    copied = tmp_path / "from[laptop]" / "left"
+    copied.parent.mkdir()
+    shutil.copytree(config_tree.env_dir("left"), copied)
+
+    output = _run(config_tree, "diff", "left", str(copied)).output
+
+    assert "from[laptop]" in output
+
+
+def test_diff_labels_an_unnamed_requirement_as_versionless(config_tree, monkeypatch):
+    # An archive path has no version but is not editable, so the label must
+    # not claim it is.
+    monkeypatch.setenv("COLUMNS", "1000")
+    _declare_env(config_tree, "left", pins="./wheels/tool-1.0.tar.gz\n")
+    _declare_env(config_tree, "right", pins="numpy==2.1.0\n")
+
+    output = _run(config_tree, "diff", "left", "right").output
+
+    assert "./wheels/tool-1.0.tar.gz" in output
+    assert "(no version)" in output
+    assert "(editable)" not in output

@@ -281,6 +281,7 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack sync env NAME...` | The same, for only the named environments |
 | `stack refresh` | Re-resolve a tracked project against current profiles/bundles |
 | `stack status [NAMES]...` | Shared-env build state: drift, lock freshness, existence |
+| `stack diff SOURCE SOURCE` | Compare two environments -- interpreter, micromamba packages, channels, and pins -- here or across machines (`--json`, `--exit-code`) |
 | `stack list env\|profile\|bundle` | Tables of what exists (`--tag` filters, `--json` for scripts) |
 | `stack show env\|profile\|bundle [NAME]` | Details for one item (`NAME` defaults to `main` for envs) |
 | `stack show project` | The tracked project in this directory: tokens, applied packages, pending state |
@@ -440,6 +441,30 @@ $ stack list profile --tag data       # only profiles tagged 'data'
 $ stack show env main                 # python, tokens, channels, resolved packages
 ```
 
+### Comparing environments
+
+```bash
+stack diff dev prod                       # two environments here
+stack diff dev ../laptop/envs/dev         # this machine vs another, all layers
+stack diff dev ../from-laptop.lock.txt    # pins only, and it says so
+stack diff dev prod --json
+stack diff dev prod --exit-code           # exit 1 when they differ
+```
+
+Each source is an environment in this config root, a copy of an `envs/<name>/`
+directory, or a compiled `requirements.lock.txt`. An environment or a copied
+directory carries four layers -- the interpreter from `python.txt`, the
+micromamba packages, the effective channel order, and the compiled pins -- and
+`diff` compares all four. A bare lock file carries pins only, so against one
+the other three are reported as not compared rather than as matching.
+
+The verdict is one of three values. `identical` means every layer matched;
+`identical-where-comparable` means the pins matched but a bare lock hid the
+other layers; `different` means at least one layer differs. `diff` exits 0 in
+all three cases -- a difference is a finding, not a failure -- and exits 1 for
+`different` only under `--exit-code`. A source that cannot be read exits 1
+either way.
+
 ### Checking your setup
 
 ```bash
@@ -467,7 +492,7 @@ lock is present, and whether your sources changed since the last build
 does not match `python.txt`, the state becomes `python changed` and the Python
 column shows both the configured and actual versions (e.g. `3.12 (env 3.14.0)`).
 `--json` makes every inspection command (`list`, `show`, `resolve`, `status`,
-`doctor`) script-friendly.
+`diff`, `doctor`) script-friendly.
 
 ### Typo protection
 
@@ -554,9 +579,10 @@ one profile describe paths that differ per machine.
 **Compiled locks deliberately do not travel.** A lock is resolved for one
 platform and one interpreter, and uv-stack compiles per machine rather than
 committing a lock that is only correct where it was produced. The consequence
-is worth stating plainly: two machines converged from the same sources will
-have compatible environments, not identical pins, and nothing reports the
-difference. `stack status` is a single-machine command.
+is worth stating plainly: two machines converged from the same sources will have
+compatible environments, not identical pins. `stack status` is a single-machine
+command; `stack diff` reports the difference between two machines once one of
+them has copied the other's environment directory (see below).
 
 ### Bring-up on a new machine
 
@@ -570,6 +596,15 @@ stack sync                                      # builds every environment
 Step two is what makes this work on a machine you have never set up: doctor
 reads the declared list and reports what is missing before anything tries to
 build.
+
+To check the result against a machine that is already set up, copy that
+machine's `envs/<name>/` directory here by any means, including its
+`requirements.lock.txt` -- the clone deliberately left the lock behind -- and
+compare:
+
+```bash
+stack diff main ../other/envs/main
+```
 
 ### Making a root committable
 
