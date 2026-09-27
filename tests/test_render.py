@@ -176,3 +176,30 @@ def test_a_refusal_across_profiles_names_the_profile_each_entry_came_from(
     assert f"'-r ${{DEV}}/a.txt' (in {ds_path}):" in message
     assert f"'-c ${{DEV}}/c.txt' (in {ds_path}):" in message
     assert f"'-c ${{DEV}}/b.txt' (in {chem_path}):" in message
+
+
+def test_effective_conda_inputs_prepends_and_dedupes_channels():
+    from uv_stack.render import effective_conda_inputs
+
+    env = EnvConfig(
+        name="x", python="3.12", stack=[], micromamba=[], channels=["conda-forge", "bioconda"]
+    )
+    channels, _ = effective_conda_inputs(env)
+    assert channels == ["conda-forge", "bioconda"]
+
+
+def test_effective_conda_inputs_is_first_wins_by_name_key():
+    from uv_stack.render import effective_conda_inputs
+
+    env = EnvConfig(
+        name="x", python="3.12", stack=[], micromamba=["numpy=1.26", "numpy=2.0"], channels=[]
+    )
+    _, dependencies = effective_conda_inputs(env)
+    assert dependencies == ["python=3.12", "pip", "numpy=1.26"]
+
+
+def test_conda_name_key_strips_every_qualifier():
+    from uv_stack.render import conda_name_key
+
+    assert conda_name_key("conda-forge::numpy>=1.26") == "numpy"
+    assert conda_name_key("pip==24.0") == "pip"

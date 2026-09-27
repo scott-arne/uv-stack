@@ -93,6 +93,47 @@ def render_requirements_in(
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+def conda_name_key(spec: str) -> str:
+    """Return the package-name key a conda spec de-duplicates on.
+
+    A spec's name is the leading token before any version or channel
+    qualifier, so ``pip`` and ``pip==24.0`` collapse to one entry.
+
+    :param spec: A ``micromamba.txt`` entry as written.
+    :returns: The bare package name.
+    """
+    return spec.split("=", 1)[0].split("<", 1)[0].split(">", 1)[0].split("::", 1)[-1].strip()
+
+
+def effective_conda_inputs(env: EnvConfig) -> tuple[list[str], list[str]]:
+    """Normalize an env's channels and micromamba packages as the renderer does.
+
+    Shared with ``stack diff`` so the comparison cannot drift from what
+    actually gets built: the raw files are the wrong thing to compare, because
+    an empty ``channels.txt`` and one listing ``conda-forge`` render
+    identically, while ``["numpy=1.26", "numpy=2.0"]`` and the reverse order
+    render differently.
+
+    :param env: The environment config.
+    :returns: ``(channels, dependencies)`` in priority order, where
+        ``dependencies`` begins with ``python=<spec>`` and ``pip``.
+    """
+    channels = ["conda-forge"]
+    for channel in env.channels:
+        if channel not in channels:
+            channels.append(channel)
+
+    dependencies = [f"python={env.python}", "pip"]
+    seen = {"python", "pip"}
+    for pkg in env.micromamba:
+        key = conda_name_key(pkg)
+        if key in seen:
+            continue
+        seen.add(key)
+        dependencies.append(pkg)
+    return channels, dependencies
+
+
 def render_environment_yml(env: EnvConfig) -> str:
     """Render a micromamba ``environment.yml`` for a named environment.
 
@@ -108,21 +149,7 @@ def render_environment_yml(env: EnvConfig) -> str:
     :param env: The environment config (name, python, channels, packages).
     :returns: File text ending with a trailing newline.
     """
-    channels = ["conda-forge"]
-    for channel in env.channels:
-        if channel not in channels:
-            channels.append(channel)
-
-    dependencies = [f"python={env.python}", "pip"]
-    seen = {"python", "pip"}
-    for pkg in env.micromamba:
-        # A package spec's name is the leading token before any version or
-        # channel qualifier, so ``pip`` and ``pip==24.0`` collapse to one entry.
-        key = pkg.split("=", 1)[0].split("<", 1)[0].split(">", 1)[0].split("::", 1)[-1].strip()
-        if key in seen:
-            continue
-        seen.add(key)
-        dependencies.append(pkg)
+    channels, dependencies = effective_conda_inputs(env)
 
     lines = [
         _HEADER,
