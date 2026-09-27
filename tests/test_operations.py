@@ -1796,6 +1796,137 @@ def test_refresh_dry_run_plans_without_mutation(
     assert tracking is not None and "rdkit" in tracking.applied  # unchanged
 
 
+def test_refresh_options_stack_overrides_the_recorded_stack(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+
+    refresh_project(
+        config_tree,
+        RecordingRunner(),
+        RefreshOptions(python="3.12", stack=["standard", "@qsar"]),
+        cwd=project_dir,
+    )
+
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["standard", "@qsar"]
+    assert "umap-learn" in tracking.applied
+    assert tracking.pending is None
+
+
+def test_refresh_leaves_the_recorded_stack_alone_by_default(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+
+    refresh_project(
+        config_tree, RecordingRunner(), RefreshOptions(python="3.12"), cwd=project_dir
+    )
+
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["standard"]
+
+
+def test_refresh_dry_run_returns_the_target_stack(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    before = (project_dir / "pyproject.toml").read_bytes()
+    rec = RecordingRunner()
+
+    result = refresh_project(
+        config_tree,
+        rec,
+        RefreshOptions(python="3.12", stack=["standard", "@qsar"], dry_run=True),
+        cwd=project_dir,
+    )
+
+    assert result.stack == ["standard", "@qsar"]
+    assert result.added == ["umap-learn"]
+    assert rec.commands == []
+    assert (project_dir / "pyproject.toml").read_bytes() == before
+
+
+def test_refresh_dry_run_reports_a_stack_change_with_an_empty_delta(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    # 'chem' is already inside 'standard', so the stack grows while the
+    # dependency delta stays empty -- the case RefreshResult.stack exists for.
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+
+    result = refresh_project(
+        config_tree,
+        RecordingRunner(),
+        RefreshOptions(python="3.12", stack=["standard", "chem"], dry_run=True),
+        cwd=project_dir,
+    )
+
+    assert result.stack == ["standard", "chem"]
+    assert result.added == []
+    assert result.removed == []
+
+
+def test_refresh_dry_run_leaves_stack_none_without_an_override(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+
+    result = refresh_project(
+        config_tree,
+        RecordingRunner(),
+        RefreshOptions(python="3.12", dry_run=True),
+        cwd=project_dir,
+    )
+
+    assert result.stack is None
+
+
+def test_union_project_stack_appends_only_new_tokens(tmp_path):
+    from uv_stack.operations.project import union_project_stack
+
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+
+    assert union_project_stack(pyproject, project_dir, ["@qsar"]) == ["standard", "@qsar"]
+    assert union_project_stack(pyproject, project_dir, ["standard"]) == ["standard"]
+    assert union_project_stack(pyproject, project_dir, ["@qsar", "@qsar"]) == [
+        "standard",
+        "@qsar",
+    ]
+
+
+def test_union_project_stack_requires_a_tracked_project(tmp_path):
+    from uv_stack.operations.project import union_project_stack
+
+    project_dir = tmp_path / "untracked"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text('[project]\nname = "x"\n')
+
+    with pytest.raises(ConfigError) as excinfo:
+        union_project_stack(project_dir / "pyproject.toml", project_dir, ["@qsar"])
+    assert excinfo.value.message == f"No tracked project in {project_dir}."
+    assert "stack create project" in (excinfo.value.hint or "")
+
+
 def test_refresh_python_flag_overrides_and_records(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):
