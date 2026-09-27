@@ -95,33 +95,33 @@ def _render(result: EnvironmentDiff) -> None:
     else:
         left, right = result.python
         if left == right:
-            echo(f"python: identical ({left})")
+            echo(f"declared python: identical ({left})")
         else:
             render_table(
-                "python",
+                "declared python",
                 [("Source", "left"), ("Version", "left")],
                 [("A", left), ("B", right)],
             )
 
     if result.micromamba is not None:
         if result.micromamba.is_empty():
-            echo("micromamba packages: identical")
+            echo("declared micromamba packages: identical")
         else:
             rows: list[tuple[str, ...]] = [
                 (entry, "A") for entry in result.micromamba.only_in_a
             ]
             rows += [(entry, "B") for entry in result.micromamba.only_in_b]
             render_table(
-                "micromamba packages", [("Package", "left"), ("Only in", "left")], rows
+                "declared micromamba packages", [("Package", "left"), ("Only in", "left")], rows
             )
 
     if result.channels is not None:
         left_channels, right_channels = result.channels
         if left_channels == right_channels:
-            echo("channels: identical")
+            echo("declared channels: identical")
         else:
             render_table(
-                "channels",
+                "declared channels",
                 [("A", "left"), ("B", "left")],
                 [
                     (one or "", two or "")
@@ -158,12 +158,16 @@ def _render(result: EnvironmentDiff) -> None:
 )
 @click.pass_obj
 def diff(config: ConfigRoot, sources: tuple[str, str], as_json: bool, exit_code: bool) -> None:
-    """Compare two environments: interpreter, conda packages, channels, and pins.
+    """Compare two environments' declared configuration and resolved pins.
 
     Each SOURCE is an environment in this config root, a path to a copied
     envs/<name>/ directory, or a path to a compiled lock file. A bare lock file
     carries pins only; the other three layers are reported as not compared
     rather than as matching.
+
+    The interpreter, conda packages and channels are compared as declared, so a
+    match means the two are configured the same way, not that what is installed
+    is the same. The pins are compared as resolved.
 
     Exits 0 even when the sources differ — a difference is a finding, not a
     failure. Pass '--exit-code' to exit 1 on a difference instead.

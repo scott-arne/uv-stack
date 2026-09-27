@@ -458,6 +458,12 @@ micromamba packages, the effective channel order, and the compiled pins -- and
 `diff` compares all four. A bare lock file carries pins only, so against one
 the other three are reported as not compared rather than as matching.
 
+The interpreter, micromamba packages, and channels are declarations, not what
+is installed: two machines that both declare `3.12` can run different patch
+releases. So a match on those layers means the two environments are
+configured the same way; only the pins, which are resolved, prove that the
+same Python distributions are installed.
+
 The verdict is one of three values. `identical` means every layer matched;
 `identical-where-comparable` means the pins matched but a bare lock hid the
 other layers; `different` means at least one layer differs. `diff` exits 0 in

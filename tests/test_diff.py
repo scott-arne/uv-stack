@@ -749,3 +749,34 @@ def test_diff_labels_an_unnamed_requirement_as_versionless(config_tree, monkeypa
     assert "./wheels/tool-1.0.tar.gz" in output
     assert "(no version)" in output
     assert "(editable)" not in output
+
+
+def test_diff_calls_matching_declared_layers_declared(config_tree):
+    # python.txt, micromamba.txt and channels.txt are declarations that can
+    # realize different patch versions, so a match must not read as a claim
+    # about what is installed.
+    _declare_env(config_tree, "left", micromamba=("gdal",))
+    _declare_env(config_tree, "right", micromamba=("gdal",))
+
+    output = _run(config_tree, "diff", "left", "right").output
+
+    assert "declared python: identical (3.12)" in output
+    assert "declared micromamba packages: identical" in output
+    assert "declared channels: identical" in output
+    assert "pins: identical" in output
+
+
+def test_diff_titles_differing_declared_layers_declared(config_tree, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "1000")
+    _declare_env(
+        config_tree, "left", python="3.12", micromamba=("gdal",), channels=("bioconda",)
+    )
+    _declare_env(config_tree, "right", python="3.13")
+
+    output = _run(config_tree, "diff", "left", "right").output
+
+    assert "declared python" in output
+    # Rich may wrap long titles, so normalize whitespace for the assertion.
+    normalized = " ".join(output.split())
+    assert "declared micromamba packages" in normalized
+    assert "declared channels" in output
