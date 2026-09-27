@@ -465,3 +465,88 @@ def test_an_environment_matches_its_own_lock_file_where_comparable(config_tree):
     )
     assert result.verdict == VERDICT_WHERE_COMPARABLE
     assert result.pins.is_empty()
+
+
+def test_parse_lock_admits_an_unnamed_archive_path(tmp_path):
+    from uv_stack.operations.diff import parse_lock
+
+    path = _lock(tmp_path, "numpy==2.1.0\n/Users/me/ldclient-2024.1.4.tar.gz\n")
+    result = parse_lock(path)
+    
+    assert result == {
+        "numpy": "2.1.0",
+        "/Users/me/ldclient-2024.1.4.tar.gz": None,
+    }
+
+
+def test_parse_lock_rejects_an_unnamed_line_with_whitespace(tmp_path):
+    from uv_stack.operations.diff import parse_lock
+
+    path = _lock(tmp_path, "numpy==2.1.0\nsee docs/README for details\n")
+    with pytest.raises(ConfigError) as excinfo:
+        parse_lock(path)
+    assert "line 2" in str(excinfo.value)
+
+
+def test_parse_lock_refuses_a_fifo_without_blocking(tmp_path):
+    from uv_stack.operations.diff import parse_lock
+
+    fifo = tmp_path / "pipe.lock"
+    os.mkfifo(fifo)
+    # parse_lock called directly on a FIFO must refuse it, not block.
+    with _deadline(5.0), pytest.raises(ConfigError) as excinfo:
+        parse_lock(fifo)
+    assert "named pipe" in str(excinfo.value)
+
+
+def test_load_source_refuses_a_fifo_env_lock_without_blocking(config_tree):
+    from uv_stack.operations.diff import load_source
+
+    lock_path = config_tree.env_requirements_lock("main")
+    os.mkfifo(lock_path)
+    # A FIFO at the env's lock path must refuse it, not block.
+    with _deadline(5.0), pytest.raises(ConfigError) as excinfo:
+        load_source(config_tree, "main")
+    assert "named pipe" in str(excinfo.value)
+
+
+def test_load_source_names_a_non_regular_env_lock(config_tree):
+    from uv_stack.operations.diff import load_source
+
+    lock_path = config_tree.env_requirements_lock("main")
+    lock_path.mkdir(parents=True, exist_ok=True)
+    # A directory at the lock path should be named as "a directory", not "has no lock".
+    with pytest.raises(ConfigError) as excinfo:
+        load_source(config_tree, "main")
+    assert "a directory" in str(excinfo.value)
+    assert "has no lock" not in str(excinfo.value)
+
+
+def test_diff_unnamed_requirements_compare_by_literal_token(tmp_path):
+    from uv_stack.operations.diff import diff_environments, parse_lock
+
+    # Same path on both sides should be identical
+    a = _source("a", parse_lock(_lock(tmp_path, "/path/to/pkg.tar.gz\n", "a.lock")))
+    b = _source("b", parse_lock(_lock(tmp_path, "/path/to/pkg.tar.gz\n", "b.lock")))
+    assert diff_environments(a, b).pins.is_empty()
+    
+    # Different paths should differ
+    c = _source("c", parse_lock(_lock(tmp_path, "/path/one.tar.gz\n", "c.lock")))
+    d = _source("d", parse_lock(_lock(tmp_path, "/path/two.tar.gz\n", "d.lock")))
+    diff = diff_environments(c, d)
+    assert [e.name for e in diff.pins.only_in_a] == ["/path/one.tar.gz"]
+    assert [e.name for e in diff.pins.only_in_b] == ["/path/two.tar.gz"]
+
+
+def test_diff_pin_only_drift_is_different():
+    from uv_stack.operations.diff import VERDICT_DIFFERENT, diff_environments
+
+    # Two sources differing only in one pin's version should be DIFFERENT
+    result = diff_environments(
+        _env_source("a", {"numpy": "2.1.0"}),
+        _env_source("b", {"numpy": "2.2.0"}),
+    )
+    
+    assert result.verdict == VERDICT_DIFFERENT
+    assert len(result.pins.version_differs) == 1
+    assert result.pins.version_differs[0].name == "numpy"

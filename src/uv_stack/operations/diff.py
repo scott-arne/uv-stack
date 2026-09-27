@@ -17,7 +17,6 @@ from pathlib import Path
 
 from uv_stack.config import ConfigRoot, load_env_from_dir
 from uv_stack.errors import ConfigError
-from uv_stack.fsutil import read_text_utf8
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.scaffold import validate_name
 from uv_stack.parse import canonical_name
@@ -170,6 +169,18 @@ def _editable_target(line: str) -> str | None:
     return None
 
 
+def _describe(result: os.stat_result) -> str:
+    """:returns: A human name for a non-regular file's kind."""
+    mode = result.st_mode
+    if stat_module.S_ISDIR(mode):
+        return "a directory"
+    if stat_module.S_ISFIFO(mode):
+        return "a named pipe"
+    if stat_module.S_ISSOCK(mode):
+        return "a socket"
+    return "not a regular file"
+
+
 def _parse_lock_line(raw: str, path: Path, number: int) -> tuple[str, str | None] | None:
     """Classify one lock line into exactly one grammar row.
 
@@ -205,11 +216,15 @@ def _parse_lock_line(raw: str, path: Path, number: int) -> tuple[str, str | None
     direct = _DIRECT_RE.match(line)
     if direct is not None:
         return canonical_name(direct.group("name")), direct.group("url")
+    # Unnamed requirement: a bare path or URL that uv pip compile passes through.
+    # Match: does not begin with '-', contains no whitespace, and contains '/'.
+    if not line.startswith("-") and " " not in line and "/" in line:
+        return line, None
     raise ConfigError(
         f"{path}, line {number}: cannot parse '{line}' as a requirement.",
         hint=(
-            "Expected 'name==version', 'name @ url', '-e target', an option "
-            "line, or a comment."
+            "Expected 'name==version', 'name @ url', '-e target', a path or URL, "
+            "an option line, or a comment."
         ),
     )
 
@@ -218,21 +233,40 @@ def parse_lock(path: Path) -> dict[str, str | None]:
     """Read a compiled lock file into identity-to-version pairs.
 
     :param path: The lock file.
-    :returns: Canonical identity to version, URL, or ``None`` for an editable.
-    :raises ConfigError: On an unreadable file, an unparseable line, or a
-        duplicate identity — which a compiled lock never contains, and whose
-        silent last-wins resolution would hide that the file is not one.
+    :returns: Canonical identity to version, URL, or ``None`` for an editable
+        or unnamed requirement.
+    :raises ConfigError: On an unreadable file, a non-regular file, an
+        unparseable line, or a duplicate identity — which a compiled lock never
+        contains, and whose silent last-wins resolution would hide that the
+        file is not one.
     """
     try:
-        text = read_text_utf8(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     except OSError as error:
-        # read_text_utf8 converts only a decode failure. A permission error
-        # would otherwise reach the CLI edge as a traceback for what is really
-        # "this file cannot be read".
         raise ConfigError(
             f"Cannot read {path}: {error.strerror or error}.",
             hint="Check the file's permissions, or pass a different lock file.",
         ) from error
+
+    try:
+        result = os.fstat(fd)
+        if not stat_module.S_ISREG(result.st_mode):
+            raise ConfigError(
+                f"{path} is {_describe(result)}, not a lock file.",
+                hint="Replace it with a compiled lock file.",
+            )
+
+        try:
+            raw_bytes = os.read(fd, result.st_size)
+            text = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ConfigError(
+                f"Cannot read {path}: not valid UTF-8.",
+                hint="Re-save the file as UTF-8 text.",
+            ) from error
+    finally:
+        os.close(fd)
+
     pins: dict[str, str | None] = {}
     for number, raw in enumerate(text.splitlines(), 1):
         parsed = _parse_lock_line(raw, path, number)
@@ -277,18 +311,6 @@ def _is_regular(result: os.stat_result | None) -> bool:
     return result is not None and stat_module.S_ISREG(result.st_mode)
 
 
-def _describe(result: os.stat_result) -> str:
-    """:returns: A human name for a non-regular file's kind."""
-    mode = result.st_mode
-    if stat_module.S_ISDIR(mode):
-        return "a directory"
-    if stat_module.S_ISFIFO(mode):
-        return "a named pipe"
-    if stat_module.S_ISSOCK(mode):
-        return "a socket"
-    return "not a regular file"
-
-
 def _environment_name(config: ConfigRoot, argument: str) -> str | None:
     """:returns: ``argument`` when it names an environment in ``config``, else None.
 
@@ -317,12 +339,13 @@ def _directory_source(directory: Path, name: str, label: str, *, named: bool) ->
         a local remedy; False for a copied directory, whose remedy is on the
         machine it came from.
     :returns: A fully populated source.
-    :raises ConfigError: When the environment was never built, or when one of
-        its four sources is unreadable.
+    :raises ConfigError: When the environment was never built, or when the lock
+        is not a regular file.
+    :raises OSError: When one of the four source files is unreadable.
     """
     env = load_env_from_dir(directory, name)
     lock = directory / "requirements.lock.txt"
-    if not _is_regular(_stat_or_none(lock)):
+    if _stat_or_none(lock) is None:
         if named:
             raise ConfigError(
                 f"Environment '{name}' has no lock at {lock}.",
