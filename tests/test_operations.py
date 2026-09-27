@@ -1927,6 +1927,78 @@ def test_union_project_stack_requires_a_tracked_project(tmp_path):
     assert "stack create project" in (excinfo.value.hint or "")
 
 
+def test_the_union_is_in_the_pending_record(config_tree: ConfigRoot, tmp_path, monkeypatch):
+    """A crash after the first durable write must retry against the union."""
+    from uv_stack.operations import project as project_module
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    real_write = project_module.write_tracking
+    calls = {"n": 0}
+
+    def crash_after_first_write(pyproject, tracking):
+        calls["n"] += 1
+        real_write(pyproject, tracking)
+        if calls["n"] == 1:
+            raise RuntimeError("crash after the pending write")
+
+    monkeypatch.setattr(project_module, "write_tracking", crash_after_first_write)
+
+    with pytest.raises(RuntimeError, match="crash after the pending write"):
+        refresh_project(
+            config_tree,
+            RecordingRunner(),
+            RefreshOptions(python="3.12", stack=["standard", "@qsar"]),
+            cwd=project_dir,
+        )
+
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["standard", "@qsar"]
+    assert tracking.pending is not None and "umap-learn" in tracking.pending
+
+
+def test_a_retry_after_a_failed_uv_add_converges(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """The existing crash-safety property, with a stack that differs."""
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    options = RefreshOptions(python="3.12", stack=["standard", "@qsar"])
+
+    def _fail_add(cmd: Command) -> CommandResult:
+        if "add" in cmd.args:
+            raise ToolError("add failed", command=cmd.args, returncode=1)
+        return CommandResult(returncode=0, stdout="")
+
+    crashed_root = tmp_path / "crashed"
+    crashed_root.mkdir()
+    crashed_dir = _tracked_project(crashed_root, _TRACKING)
+    with pytest.raises(ToolError):
+        refresh_project(
+            config_tree, RecordingRunner(responder=_fail_add), options, cwd=crashed_dir
+        )
+    refresh_project(config_tree, RecordingRunner(), options, cwd=crashed_dir)
+
+    # _tracked_project always writes '<parent>/proj_refresh', so the two
+    # projects need separate parents.
+    clean_root = tmp_path / "clean"
+    clean_root.mkdir()
+    clean_dir = _tracked_project(clean_root, _TRACKING)
+    refresh_project(config_tree, RecordingRunner(), options, cwd=clean_dir)
+
+    crashed = read_tracking(crashed_dir / "pyproject.toml")
+    clean = read_tracking(clean_dir / "pyproject.toml")
+    assert crashed is not None and clean is not None
+    assert crashed == clean
+    assert crashed.stack == ["standard", "@qsar"]
+    assert crashed.pending is None
+
+
 def test_refresh_python_flag_overrides_and_records(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):
