@@ -476,7 +476,6 @@ def test_parse_lock_admits_an_unnamed_archive_path(tmp_path):
     path = _lock(tmp_path, "numpy==2.1.0\n/Users/me/ldclient-2024.1.4.tar.gz\n")
     result = parse_lock(path)
 
-
     assert result == {
         "numpy": "2.1.0",
         "/Users/me/ldclient-2024.1.4.tar.gz": None,
@@ -539,7 +538,6 @@ def test_diff_unnamed_requirements_compare_by_literal_token(tmp_path):
     a = _source("a", parse_lock(_lock(tmp_path, "/path/to/pkg.tar.gz\n", "a.lock")))
     b = _source("b", parse_lock(_lock(tmp_path, "/path/to/pkg.tar.gz\n", "b.lock")))
     assert diff_environments(a, b).pins.is_empty()
-
 
     # Different paths should differ
     c = _source("c", parse_lock(_lock(tmp_path, "/path/one.tar.gz\n", "c.lock")))
