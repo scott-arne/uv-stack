@@ -101,6 +101,7 @@ def _render(result: EnvironmentDiff) -> None:
                 "declared python",
                 [("Source", "left"), ("Version", "left")],
                 [("A", left), ("B", right)],
+                overflow="fold",
             )
 
     if result.micromamba is not None:
@@ -112,7 +113,10 @@ def _render(result: EnvironmentDiff) -> None:
             ]
             rows += [(entry, "B") for entry in result.micromamba.only_in_b]
             render_table(
-                "declared micromamba packages", [("Package", "left"), ("Only in", "left")], rows
+                "declared micromamba packages",
+                [("Package", "left"), ("Only in", "left")],
+                rows,
+                overflow="fold",
             )
 
     if result.channels is not None:
@@ -127,6 +131,7 @@ def _render(result: EnvironmentDiff) -> None:
                     (one or "", two or "")
                     for one, two in zip_longest(left_channels, right_channels)
                 ],
+                overflow="fold",
             )
 
     if result.pins.is_empty():
@@ -143,7 +148,12 @@ def _render(result: EnvironmentDiff) -> None:
         pin_rows += [
             (change.name, change.a, change.b) for change in result.pins.version_differs
         ]
-        render_table("pins", [("Package", "left"), ("A", "left"), ("B", "left")], pin_rows)
+        render_table(
+            "pins",
+            [("Package", "left"), ("A", "left"), ("B", "left")],
+            pin_rows,
+            overflow="fold",
+        )
 
     echo(f"Verdict: {result.verdict}")
 

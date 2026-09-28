@@ -475,7 +475,8 @@ def test_parse_lock_admits_an_unnamed_archive_path(tmp_path):
 
     path = _lock(tmp_path, "numpy==2.1.0\n/Users/me/ldclient-2024.1.4.tar.gz\n")
     result = parse_lock(path)
-    
+
+
     assert result == {
         "numpy": "2.1.0",
         "/Users/me/ldclient-2024.1.4.tar.gz": None,
@@ -538,7 +539,8 @@ def test_diff_unnamed_requirements_compare_by_literal_token(tmp_path):
     a = _source("a", parse_lock(_lock(tmp_path, "/path/to/pkg.tar.gz\n", "a.lock")))
     b = _source("b", parse_lock(_lock(tmp_path, "/path/to/pkg.tar.gz\n", "b.lock")))
     assert diff_environments(a, b).pins.is_empty()
-    
+
+
     # Different paths should differ
     c = _source("c", parse_lock(_lock(tmp_path, "/path/one.tar.gz\n", "c.lock")))
     d = _source("d", parse_lock(_lock(tmp_path, "/path/two.tar.gz\n", "d.lock")))
@@ -686,6 +688,29 @@ def test_diff_exit_code_flag_exits_zero_when_only_a_layer_was_unseen(config_tree
 
     assert result.exit_code == 0, result.output
     assert "Verdict: identical-where-comparable" in result.output
+
+
+def test_diff_folds_long_cells_so_differences_remain_visible(config_tree, tmp_path):
+    # With ellipsis overflow (Rich's default), a long direct reference that
+    # differs only in its tail would render as "file:///...path..." on both
+    # sides, hiding the difference. Fold overflow keeps long cells readable.
+    deep = tmp_path / "a" / "b" / "c" / "d" / "e"
+    deep.mkdir(parents=True)
+    left_whl = deep / "beta-1.0-py3-none-any.whl"
+    left_whl.write_text("fake")
+    right_whl = deep / "beta-1.1-py3-none-any.whl"
+    right_whl.write_text("fake")
+    _declare_env(config_tree, "left", pins=f"beta @ file://{left_whl}\n")
+    _declare_env(config_tree, "right", pins=f"beta @ file://{right_whl}\n")
+
+    result = _run(config_tree, "diff", "left", "right")
+
+    assert result.exit_code == 0, result.output
+    # The difference is visible: no ellipsis hides it, and the distinguishing
+    # version parts (1.0 versus 1.1) are present in the folded output.
+    assert "…" not in result.output
+    assert "beta-1.0" in result.output
+    assert "beta-1.1" in result.output
 
 
 @pytest.mark.parametrize("extra", [[], ["--exit-code"]])

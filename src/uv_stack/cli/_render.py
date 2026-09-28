@@ -104,6 +104,8 @@ def render_table(
     columns: Iterable[tuple[str, Literal["default", "left", "center", "right", "full"]]],
     rows: Iterable[tuple[str, ...]],
     directory: Path | None = None,
+    *,
+    overflow: Literal["fold", "crop", "ellipsis", "ignore"] = "ellipsis",
 ) -> None:
     """Print a multi-column table, optionally headed by its directory.
 
@@ -116,6 +118,10 @@ def render_table(
     :param directory: When given, a dim ``"{title} in {directory}"`` line is
         printed above the table. User-controlled (derived from ``--root`` or
         ``UV_STACK_ROOT``), so rendered as :class:`Text` rather than markup.
+    :param overflow: How to handle cells that exceed column width. Default
+        ``"ellipsis"`` truncates with ``…``; ``"fold"`` wraps long cells so
+        differences in the tail (e.g. direct references differing only in their
+        deep path or version) remain visible.
     """
     if directory is not None:
         # A full-width line, not a table caption: captions wrap to the
@@ -123,7 +129,7 @@ def render_table(
         console.print(Text(f"{title} in {directory}", style="dim"))
     table = Table(title=Text(title))
     for header, justify in columns:
-        table.add_column(header, justify=justify)
+        table.add_column(header, justify=justify, overflow=overflow)
     for row in rows:
         # Cells carry user text (profile descriptions, tags, paths), so they
         # are wrapped as Text rather than parsed as markup.
