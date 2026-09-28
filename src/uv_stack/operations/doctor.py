@@ -558,10 +558,11 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
             Finding(
                 "warn",
                 f"Name locking is unavailable on {config.root}: concurrent "
-                "'stack create' is not serialized.",
+                "'stack create', and concurrent 'stack refresh' or 'stack sync "
+                "project' in one project, are not serialized.",
                 fix=(
                     "Move the config root to a local filesystem, or avoid running "
-                    "'stack create' concurrently against this root."
+                    "those commands concurrently against this root."
                 ),
                 kind="degraded-locks",
                 path=config.locks_dir,

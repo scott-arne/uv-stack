@@ -11,12 +11,14 @@ import os
 import re
 import tempfile
 from collections.abc import Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from uv_stack.commands import micromamba_python_path, uv_add, uv_init, uv_remove, uv_sync
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError, NewerSchemaError, UvStackError
+from uv_stack.fsutil import name_lock
 from uv_stack.hints import render_positional_arg
 from uv_stack.models import ProjectTracking
 from uv_stack.operations.pyproject import (
@@ -162,7 +164,28 @@ def init_project(
     :param cwd: Directory in which to create the project.
     :returns: Non-fatal resolution warnings for the CLI to print.
     :raises ConfigError: If a ``pyproject.toml`` exists and ``force`` is False.
+    :raises ConfigError: When another stack process holds this project's lock
+        past the timeout, or when what stands at the lock path is something
+        :func:`uv_stack.fsutil.name_lock` refuses; its docstring has the rule.
+    :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
+        neither refuses nor degrades to no locking on; its docstring has the rule.
     """
+    # The guard below is inside the lock too: two fresh creates would both
+    # pass it, and the second would then write over the first's project as
+    # if --force had been given.
+    with _project_lock(config, cwd):
+        return _init_project(config, runner, tokens, options, cwd=cwd)
+
+
+def _init_project(
+    config: ConfigRoot,
+    runner: Runner,
+    tokens: list[str],
+    options: ProjectOptions,
+    *,
+    cwd: Path,
+) -> list[str]:
+    """The body of :func:`init_project`, run under the project lock."""
     pyproject = cwd / "pyproject.toml"
     if pyproject.is_file() and not options.force:
         try:
@@ -569,16 +592,20 @@ class RefreshOptions:
     :param strict: Fail when a bare token falls through to a literal package.
     :param no_sync: Apply dependency changes but skip the final ``uv sync``.
     :param dry_run: Plan only — no probe, no uv execution, no writes.
-    :param stack: Replace the recorded stack for this run. ``None`` — the
-        default — re-resolves what the project already records, which is what
-        keeps ``stack refresh`` byte-identical in behavior.
+    :param union: Tokens to union into the recorded stack for this run (see
+        :func:`union_stack`). Tokens rather than a finished stack, because the
+        union must be taken against the stack read under the project lock; one
+        computed before it would write back whatever a concurrent run added in
+        between. ``None`` — the default — re-resolves what the project already
+        records, which is what keeps ``stack refresh`` byte-identical in
+        behavior.
     """
 
     python: str | None = None
     strict: bool = False
     no_sync: bool = False
     dry_run: bool = False
-    stack: list[str] | None = None
+    union: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -591,7 +618,7 @@ class RefreshResult:
     :param skipped_removals: Dropped entries never auto-removed (editables,
         paths, direct references).
     :param planned: The command plan (dry runs only).
-    :param stack: The target stack, on a dry run that overrode it; ``None``
+    :param stack: The target stack, on a dry run given a union; ``None``
         otherwise. The union and the dependency delta are independent — a
         token whose packages are all already present changes ``stack`` and adds
         nothing — so the CLI needs this to avoid printing an empty delta for a
@@ -608,11 +635,6 @@ class RefreshResult:
 
 def require_tracking(pyproject: Path, cwd: Path) -> ProjectTracking:
     """Read a tracked project's table, or raise the shared errors.
-
-    Extracted from :func:`refresh_project` so ``stack sync project`` — which
-    must read the recorded stack before it can compute the union — raises the
-    same message and applies the same schema guard, rather than growing a
-    second copy that drifts.
 
     :param pyproject: The project's ``pyproject.toml``.
     :param cwd: The project directory, named in the error message.
@@ -637,24 +659,31 @@ def require_tracking(pyproject: Path, cwd: Path) -> ProjectTracking:
     return tracking
 
 
-def union_project_stack(pyproject: Path, cwd: Path, tokens: Sequence[str]) -> list[str]:
-    """Return the recorded stack with ``tokens`` appended, order preserved.
+def union_stack(recorded: Sequence[str], tokens: Sequence[str]) -> list[str]:
+    """Return ``recorded`` with ``tokens`` appended, order preserved.
 
     Union, not replace: this is the sole behavioral difference from
     ``create project --force``, and the reason that command cannot simply be
     re-pointed at this use. Existing entries are never reordered or
     de-duplicated — only genuinely new tokens are appended, each once.
 
-    :param pyproject: The project's ``pyproject.toml``.
-    :param cwd: The project directory, named in the error message.
+    :param recorded: The stack the project records.
     :param tokens: The tokens to union in, in the order given.
     :returns: The target stack.
-    :raises ConfigError: When no tracked project is present.
-    :raises NewerSchemaError: When the table declares a newer schema.
     """
-    tracking = require_tracking(pyproject, cwd)
-    new = [token for token in dict.fromkeys(tokens) if token not in tracking.stack]
-    return [*tracking.stack, *new]
+    new = [token for token in dict.fromkeys(tokens) if token not in recorded]
+    return [*recorded, *new]
+
+
+def _project_lock(config: ConfigRoot, cwd: Path) -> AbstractContextManager[None]:
+    """The lock every run that writes ``cwd``'s ledger holds from first read to last write.
+
+    Without it, two runs that both read the ledger before either wrote it
+    each write back their own view, and the last one drops whatever the other
+    added. Where :func:`uv_stack.fsutil.name_lock` degrades to no locking,
+    that is the residual.
+    """
+    return name_lock(config.project_lock_path(cwd), str(cwd), action="updating project")
 
 
 def refresh_project(
@@ -702,14 +731,38 @@ def refresh_project(
     :returns: A :class:`RefreshResult`.
     :raises ConfigError: When no tracked project is present, the schema is
         newer than this uv-stack, or the pyproject cannot be written.
+    :raises ConfigError: When another stack process holds this project's lock
+        past the timeout, or when what stands at the lock path is something
+        :func:`uv_stack.fsutil.name_lock` refuses; its docstring has the rule.
+    :raises OSError: If the lock file cannot be opened for a reason ``name_lock``
+        neither refuses nor degrades to no locking on; its docstring has the rule.
     """
+    # A dry run writes nothing, so it has nothing to serialize and does not
+    # wait behind a run that may be minutes into its uv sync.
+    lock = nullcontext() if options.dry_run else _project_lock(config, cwd)
+    with lock:
+        return _refresh_project(config, runner, options, cwd=cwd)
+
+
+def _refresh_project(
+    config: ConfigRoot,
+    runner: Runner,
+    options: RefreshOptions,
+    *,
+    cwd: Path,
+) -> RefreshResult:
+    """The body of :func:`refresh_project`; every run but a dry run holds the project lock."""
     pyproject = cwd / "pyproject.toml"
     tracking = require_tracking(pyproject, cwd)
 
-    # An explicit union (stack sync project) overrides the recorded stack;
-    # stack refresh passes None and re-resolves what is recorded. Computed
-    # above the dry-run return at all times, so both paths see one value.
-    target_stack = options.stack if options.stack is not None else tracking.stack
+    # A union (stack sync project) extends the stack just read; stack refresh
+    # passes None and re-resolves what is recorded. Computed above the dry-run
+    # return at all times, so both paths see one value.
+    target_stack = (
+        union_stack(tracking.stack, options.union)
+        if options.union is not None
+        else tracking.stack
+    )
 
     resolver = Resolver(config, strict=options.strict)
     stack = resolver.resolve(target_stack)
@@ -827,7 +880,7 @@ def refresh_project(
             removed=removed,
             skipped_removals=skipped,
             planned=planned,
-            stack=target_stack if options.stack is not None else None,
+            stack=target_stack if options.union is not None else None,
         )
 
     # The temp file is created and filled before the durable write so that the

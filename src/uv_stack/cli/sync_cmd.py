@@ -24,7 +24,7 @@ from uv_stack.cli._render import console
 from uv_stack.cli.refresh_cmd import run_refresh
 from uv_stack.cli.upgrade import _checked_names, _run_upgrade
 from uv_stack.config import ConfigRoot
-from uv_stack.operations.project import RefreshOptions, union_project_stack
+from uv_stack.operations.project import RefreshOptions
 from uv_stack.operations.upgrade import UpgradeOptions
 
 #: Group-level flag destinations mapped to their spelling, for the refusal
@@ -262,12 +262,11 @@ def sync_project(
             "Give at least one TOKEN. To re-resolve the tokens this project "
             "already records, use 'stack refresh'."
         )
-    cwd = Path.cwd()
     options = RefreshOptions(
         python=python,
         strict=strict,
         no_sync=no_sync,
         dry_run=dry_run,
-        stack=union_project_stack(cwd / "pyproject.toml", cwd, tokens),
+        union=tokens,
     )
-    run_refresh(config, options, cwd=cwd)
+    run_refresh(config, options, cwd=Path.cwd())

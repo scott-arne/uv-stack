@@ -4346,7 +4346,9 @@ def test_sync_project_passes_its_flags_and_the_union_to_refresh_project(
 
     assert result.exit_code == 0, result.output
     options: RefreshOptions = captured["options"]
-    assert options.stack == ["standard", "@qsar"]
+    # The tokens, not a precomputed stack: the union has to be taken against
+    # the ledger refresh_project reads under the project lock.
+    assert options.union == ("@qsar",)
     assert options.python == "3.13"
     assert options.strict is True
     assert options.no_sync is True

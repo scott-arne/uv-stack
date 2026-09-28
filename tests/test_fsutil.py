@@ -502,6 +502,29 @@ def test_name_lock_treats_eacces_as_contention(tmp_path, monkeypatch):
     assert "another stack process" in str(excinfo.value)
 
 
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_name_lock_timeout_names_the_action(tmp_path):
+    """A caller that is not creating anything can say what it is doing instead."""
+    lock_path = tmp_path / ".locks" / "project-x.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.touch()
+
+    with _lock_held_by_another_process(lock_path):
+        with pytest.raises(ConfigError) as creating:
+            with name_lock(lock_path, "x", timeout=0.05):
+                pytest.fail("entered while another process held the lock")
+        with pytest.raises(ConfigError) as updating:
+            with name_lock(lock_path, "/p", timeout=0.05, action="updating project"):
+                pytest.fail("entered while another process held the lock")
+
+    assert creating.value.message == (
+        "Timed out waiting for another stack process to finish creating 'x'"
+    )
+    assert updating.value.message == (
+        "Timed out waiting for another stack process to finish updating project '/p'"
+    )
+
+
 #: Root bypasses the mode bits these tests rely on, so their premise cannot
 #: hold there. Checked with getattr because the expression is evaluated at
 #: collection time, on every platform, before the fcntl skip applies.

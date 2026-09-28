@@ -147,6 +147,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - An environment marker no longer hides a requirement's name from ownership
   tracking. A `/` or `\` anywhere in the entry, including inside the marker,
   made it read as a path and so as user-owned.
+- Runs that rewrite a tracked project's `[tool.uv-stack]` table -- `stack
+  refresh`, `stack sync project`, and `stack create project` -- take a
+  per-project lock, so a second run in the same project waits up to five
+  seconds and is then refused. Unserialized, the last run to write the table
+  replaced it with the view it had read at the start, so two `stack sync
+  project` runs could each drop the other's token. `--dry-run` does not wait.
+  Where the config root cannot lock, `stack doctor` says so and these runs stay
+  unserialized.
 
 ### Security
 

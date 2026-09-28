@@ -730,7 +730,9 @@ def _swapped_out(fd: int, path: Path) -> bool:
 
 
 @contextmanager
-def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterator[None]:
+def name_lock(
+    path: Path, name: str, *, timeout: float | None = None, action: str = "creating"
+) -> Iterator[None]:
     """Hold an exclusive interprocess lock at ``path`` for the duration of the block.
 
     Serializes whole create-a-name operations across processes, so a pre-check,
@@ -782,10 +784,12 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
 
     :param path: Lock file. Its parent directory is created if absent and if
         this user may create it.
-    :param name: The profile/bundle/environment name being created, for the
-        timeout message.
+    :param name: The profile/bundle/environment name being created, or the
+        project directory being updated, for the timeout message.
     :param timeout: Seconds to wait. ``None`` reads the module default at call
         time.
+    :param action: What the holder is doing to ``name``, for the timeout
+        message.
     :raises ConfigError: If the lock is still held when the timeout expires, if the timeout expires
         with ``path`` still being replaced faster than a descriptor can be confirmed on it, if
         something stands at ``path`` that this user cannot obtain a descriptor for and the kernel
@@ -874,7 +878,7 @@ def name_lock(path: Path, name: str, *, timeout: float | None = None) -> Iterato
                     if time.monotonic() >= deadline:
                         raise ConfigError(
                             "Timed out waiting for another stack process to finish "
-                            f"creating '{name}'",
+                            f"{action} '{name}'",
                             hint=(
                                 "Another stack process may be stuck; retry, or find "
                                 f"the process holding {path} (lsof) and stop it. "

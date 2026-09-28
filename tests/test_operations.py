@@ -4,6 +4,7 @@ import errno
 import os
 import shutil
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from uv_stack.commands import (
 )
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, EnvError, ToolError
+from uv_stack.fsutil import _LOCK_AVAILABLE
 from uv_stack.models import ProjectTracking
 from uv_stack.operations.create import ensure_env, env_micromamba_exists
 from uv_stack.operations.project import (
@@ -1796,7 +1798,7 @@ def test_refresh_dry_run_plans_without_mutation(
     assert tracking is not None and "rdkit" in tracking.applied  # unchanged
 
 
-def test_refresh_options_stack_overrides_the_recorded_stack(
+def test_refresh_options_union_extends_the_recorded_stack(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):
     from uv_stack.operations.project import RefreshOptions, refresh_project
@@ -1808,7 +1810,7 @@ def test_refresh_options_stack_overrides_the_recorded_stack(
     refresh_project(
         config_tree,
         RecordingRunner(),
-        RefreshOptions(python="3.12", stack=["standard", "@qsar"]),
+        RefreshOptions(python="3.12", union=("@qsar",)),
         cwd=project_dir,
     )
 
@@ -1850,7 +1852,7 @@ def test_refresh_dry_run_returns_the_target_stack(
     result = refresh_project(
         config_tree,
         rec,
-        RefreshOptions(python="3.12", stack=["standard", "@qsar"], dry_run=True),
+        RefreshOptions(python="3.12", union=("@qsar",), dry_run=True),
         cwd=project_dir,
     )
 
@@ -1873,7 +1875,7 @@ def test_refresh_dry_run_reports_a_stack_change_with_an_empty_delta(
     result = refresh_project(
         config_tree,
         RecordingRunner(),
-        RefreshOptions(python="3.12", stack=["standard", "chem"], dry_run=True),
+        RefreshOptions(python="3.12", union=("chem",), dry_run=True),
         cwd=project_dir,
     )
 
@@ -1900,29 +1902,28 @@ def test_refresh_dry_run_leaves_stack_none_without_an_override(
     assert result.stack is None
 
 
-def test_union_project_stack_appends_only_new_tokens(tmp_path):
-    from uv_stack.operations.project import union_project_stack
+def test_union_stack_appends_only_new_tokens():
+    from uv_stack.operations.project import union_stack
 
-    project_dir = _tracked_project(tmp_path, _TRACKING)
-    pyproject = project_dir / "pyproject.toml"
-
-    assert union_project_stack(pyproject, project_dir, ["@qsar"]) == ["standard", "@qsar"]
-    assert union_project_stack(pyproject, project_dir, ["standard"]) == ["standard"]
-    assert union_project_stack(pyproject, project_dir, ["@qsar", "@qsar"]) == [
-        "standard",
-        "@qsar",
-    ]
+    assert union_stack(["standard"], ["@qsar"]) == ["standard", "@qsar"]
+    assert union_stack(["standard"], ["standard"]) == ["standard"]
+    assert union_stack(["standard"], ["@qsar", "@qsar"]) == ["standard", "@qsar"]
 
 
-def test_union_project_stack_requires_a_tracked_project(tmp_path):
-    from uv_stack.operations.project import union_project_stack
+def test_a_union_requires_a_tracked_project(config_tree: ConfigRoot, tmp_path):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
 
     project_dir = tmp_path / "untracked"
     project_dir.mkdir()
     (project_dir / "pyproject.toml").write_text('[project]\nname = "x"\n')
 
     with pytest.raises(ConfigError) as excinfo:
-        union_project_stack(project_dir / "pyproject.toml", project_dir, ["@qsar"])
+        refresh_project(
+            config_tree,
+            RecordingRunner(),
+            RefreshOptions(union=("@qsar",)),
+            cwd=project_dir,
+        )
     assert excinfo.value.message == f"No tracked project in {project_dir}."
     assert "stack create project" in (excinfo.value.hint or "")
 
@@ -1950,7 +1951,7 @@ def test_the_union_is_in_the_pending_record(config_tree: ConfigRoot, tmp_path, m
         refresh_project(
             config_tree,
             RecordingRunner(),
-            RefreshOptions(python="3.12", stack=["standard", "@qsar"]),
+            RefreshOptions(python="3.12", union=("@qsar",)),
             cwd=project_dir,
         )
 
@@ -1968,7 +1969,7 @@ def test_a_retry_after_a_failed_uv_add_converges(
     from uv_stack.operations.pyproject import read_tracking
 
     monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
-    options = RefreshOptions(python="3.12", stack=["standard", "@qsar"])
+    options = RefreshOptions(python="3.12", union=("@qsar",))
 
     def _fail_add(cmd: Command) -> CommandResult:
         if "add" in cmd.args:
@@ -2001,6 +2002,189 @@ def test_a_retry_after_a_failed_uv_add_converges(
     assert crashed == clean
     assert crashed.stack == ["standard", "@qsar"]
     assert crashed.pending is None
+
+
+def _during(step: str, action: Callable[[], None]) -> Callable[[Command], CommandResult]:
+    """Build a responder that calls ``action`` while the uv ``step`` command runs.
+
+    ``flock`` binds to the open file description, so a second acquisition from
+    this same process conflicts exactly as a second process would; that is what
+    lets these tests prove the exclusion without threads.
+    """
+
+    def respond(cmd: Command) -> CommandResult:
+        if step in cmd.args:
+            action()
+        return CommandResult(returncode=0, stdout="")
+
+    return respond
+
+
+def _project_busy_message(project_dir: Path) -> str:
+    return (
+        "Timed out waiting for another stack process to finish updating "
+        f"project '{project_dir}'"
+    )
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.parametrize("step", ["remove", "add", "sync"])
+def test_a_second_run_is_refused_while_a_refresh_holds_the_project(
+    config_tree: ConfigRoot, tmp_path, monkeypatch, step
+):
+    """No second run may land between a refresh's first read and its last write."""
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_TIMEOUT", 0.05)
+    # Dropping rdkit from 'standard' makes the run issue a uv remove as well.
+    config_tree.profile_path("chem").write_text("includes:\n  - chemprop\n")
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+
+    def second_run() -> None:
+        before = pyproject.read_bytes()
+        with pytest.raises(ConfigError) as excinfo:
+            refresh_project(
+                config_tree, RecordingRunner(), RefreshOptions(python="3.12"), cwd=project_dir
+            )
+        assert excinfo.value.message == _project_busy_message(project_dir)
+        assert pyproject.read_bytes() == before
+
+    first = RecordingRunner(responder=_during(step, second_run))
+    refresh_project(config_tree, first, RefreshOptions(python="3.12"), cwd=project_dir)
+
+    assert any(step in cmd.args for cmd in first.commands)
+    tracking = read_tracking(pyproject)
+    assert tracking is not None and tracking.pending is None
+
+
+def test_a_union_extends_the_stack_recorded_when_the_run_starts(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """Options built before another run finished must not write back a stale stack.
+
+    'stack sync project' used to compute the union before refresh_project
+    ran, so a concurrent sync finishing in between had its token dropped.
+    """
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    options = RefreshOptions(python="3.12", union=("@qsar",))
+
+    refresh_project(
+        config_tree,
+        RecordingRunner(),
+        RefreshOptions(python="3.12", union=("pkg:tqdm",)),
+        cwd=project_dir,
+    )
+    refresh_project(config_tree, RecordingRunner(), options, cwd=project_dir)
+
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["standard", "pkg:tqdm", "@qsar"]
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_a_dry_run_is_not_held_up_by_a_running_refresh(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """A dry run writes nothing, so it has nothing to serialize against."""
+    from uv_stack.operations.project import RefreshOptions, RefreshResult, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_TIMEOUT", 0.05)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    planned: list[RefreshResult] = []
+
+    def dry_run() -> None:
+        planned.append(
+            refresh_project(
+                config_tree, RecordingRunner(), RefreshOptions(dry_run=True), cwd=project_dir
+            )
+        )
+
+    refresh_project(
+        config_tree,
+        RecordingRunner(responder=_during("add", dry_run)),
+        RefreshOptions(python="3.12"),
+        cwd=project_dir,
+    )
+
+    assert len(planned) == 1 and planned[0].planned
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_a_refresh_does_not_hold_up_another_project(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_TIMEOUT", 0.05)
+    # _tracked_project always writes '<parent>/proj_refresh', so the two
+    # projects need separate parents.
+    busy_root = tmp_path / "busy"
+    busy_root.mkdir()
+    busy_dir = _tracked_project(busy_root, _TRACKING)
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    other_dir = _tracked_project(other_root, _TRACKING)
+
+    def other_run() -> None:
+        refresh_project(
+            config_tree,
+            RecordingRunner(),
+            RefreshOptions(python="3.12", union=("@qsar",)),
+            cwd=other_dir,
+        )
+
+    refresh_project(
+        config_tree,
+        RecordingRunner(responder=_during("add", other_run)),
+        RefreshOptions(python="3.12"),
+        cwd=busy_dir,
+    )
+
+    other = read_tracking(other_dir / "pyproject.toml")
+    assert other is not None and other.stack == ["standard", "@qsar"]
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_create_project_force_is_refused_while_a_refresh_holds_the_project(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """``create project --force`` rewrites the same ledger, so it takes the same lock."""
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    monkeypatch.setattr("uv_stack.fsutil._LOCK_TIMEOUT", 0.05)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+
+    def forced_create() -> None:
+        before = pyproject.read_bytes()
+        with pytest.raises(ConfigError) as excinfo:
+            init_project(
+                config_tree,
+                RecordingRunner(),
+                ["standard"],
+                ProjectOptions(python="3.12", force=True),
+                cwd=project_dir,
+            )
+        assert excinfo.value.message == _project_busy_message(project_dir)
+        assert pyproject.read_bytes() == before
+
+    refresh_project(
+        config_tree,
+        RecordingRunner(responder=_during("add", forced_create)),
+        RefreshOptions(python="3.12"),
+        cwd=project_dir,
+    )
 
 
 def test_refresh_python_flag_overrides_and_records(

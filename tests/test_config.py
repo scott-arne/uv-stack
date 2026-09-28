@@ -254,6 +254,23 @@ def test_probe_lock_path_cannot_collide_with_a_user_name(config_tree):
     assert config_tree.probe_lock_path() != config_tree.env_lock_path("probe")
 
 
+def test_project_lock_path_names_the_resolved_project(config_tree, tmp_path):
+    """A project reached through a symlink takes the same lock as its target."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(project)
+    other = tmp_path / "other"
+    other.mkdir()
+
+    lock = config_tree.project_lock_path(project)
+
+    assert lock.parent == config_tree.locks_dir
+    assert lock.name.startswith("project-") and lock.suffix == ".lock"
+    assert config_tree.project_lock_path(alias) == lock
+    assert config_tree.project_lock_path(other) != lock
+
+
 def test_editor_path_is_root_scoped(tmp_path: Path):
     # editor.txt is a property of the config root, not of any one env.
     assert ConfigRoot(tmp_path).editor_path() == tmp_path / "editor.txt"

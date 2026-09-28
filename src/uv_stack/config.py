@@ -8,6 +8,7 @@ in the pure layer.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from typing import TypeVar
@@ -348,6 +349,18 @@ class ConfigRoot:
         can collide with it.
         """
         return self.locks_dir / "probe.lock"
+
+    def project_lock_path(self, project_dir: Path) -> Path:
+        """Lock covering one tracked project's ``[tool.uv-stack]`` ledger.
+
+        Keyed on a digest of the resolved directory because a path is not a
+        file name, and resolved so that a project reached through a symlink
+        takes the same lock as its target. The ``project-`` prefix keeps it
+        out of the stem, env and probe namespaces. Runs against the same
+        project under different config roots take different locks.
+        """
+        digest = hashlib.sha256(str(project_dir.resolve()).encode()).hexdigest()
+        return self.locks_dir / f"project-{digest[:16]}.lock"
 
     # -- existence -------------------------------------------------------
     def profile_exists(self, name: str) -> bool:

@@ -1408,6 +1408,9 @@ def test_diagnose_reports_degraded_locks(config_tree: ConfigRoot, monkeypatch):
     assert degraded[0].level == "warn"
     assert str(config_tree.root) in degraded[0].message
     assert "not serialized" in degraded[0].message
+    # Project runs share the degradation, so the warning must not read as if
+    # only 'stack create' were exposed.
+    assert "'stack sync project'" in degraded[0].message
     assert degraded[0].path == config_tree.locks_dir
     assert degraded[0].kind not in doctor._REPAIRS
 
