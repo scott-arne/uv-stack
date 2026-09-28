@@ -29,8 +29,9 @@ VERDICT_WHERE_COMPARABLE = "identical-where-comparable"
 #: At least one comparison that ran was non-empty.
 VERDICT_DIFFERENT = "different"
 
-#: A resolved pin. PEP 440 versions never contain ``;``, so the version group
-#: excludes it: a marker means the file is not one of uv-stack's locks.
+#: A resolved pin. The version group admits epochs and local segments so uv-stack
+#: never rewrites what uv compiled. PEP 440 versions never contain ``;``, so the
+#: group excludes it: a marker means the file is not one of uv-stack's locks.
 _PIN_RE = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)==(?P<version>[^\s;]+)$")
 #: A PEP 508 direct reference as ``uv pip compile`` writes it. PEP 508 requires
 #: whitespace before a URL requirement's ``;`` marker, so a URL is a single
