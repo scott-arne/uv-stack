@@ -16,7 +16,7 @@ from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
 from uv_stack.runner import SubprocessRunner
 
 #: The all-succeeded line for a dry run. Both commands share it because
-#: neither one upgraded or converged anything: what came out whole is the
+#: neither one upgraded or synced anything: what came out whole is the
 #: plan. Keeping their own wording here would claim work that did not happen.
 _ALL_PLANNED = "All requested environments planned."
 
@@ -62,11 +62,11 @@ def _run_upgrade(
     :param options: Upgrade options.
     :param stop_on_error: Abort the batch on the first failure.
     :param rule_verb: The verb in each environment's section rule. Supplied by
-        ``stack converge``, which runs the same pipeline under another name.
+        ``stack sync``, which runs the same pipeline under another name.
     :param all_succeeded: The line printed when nothing failed. Author-supplied
         from a call site in this package, never user input. A dry run ignores
         it in favour of :data:`_ALL_PLANNED`, since neither command upgraded
-        nor converged anything.
+        nor synced anything.
     """
     runner = SubprocessRunner()
     failures: list[tuple[str, UvStackError | OSError]] = []
@@ -251,7 +251,7 @@ def upgrade(
     failing environment and reports a ✓/✗ summary; '--stop-on-error'
     aborts at the first failure. To create a missing environment, use
     'stack create env'. To bring every environment in a config root up at once —
-    creating the missing ones, without a prompt — use 'stack converge'.
+    creating the missing ones, without a prompt — use 'stack sync'.
     """
     if all_envs and names:
         raise click.UsageError("--all cannot be combined with explicit environment NAMES.")

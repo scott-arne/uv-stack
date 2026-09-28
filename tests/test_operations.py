@@ -1796,6 +1796,213 @@ def test_refresh_dry_run_plans_without_mutation(
     assert tracking is not None and "rdkit" in tracking.applied  # unchanged
 
 
+def test_refresh_options_stack_overrides_the_recorded_stack(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+
+    refresh_project(
+        config_tree,
+        RecordingRunner(),
+        RefreshOptions(python="3.12", stack=["standard", "@qsar"]),
+        cwd=project_dir,
+    )
+
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["standard", "@qsar"]
+    assert "umap-learn" in tracking.applied
+    assert tracking.pending is None
+
+
+def test_refresh_leaves_the_recorded_stack_alone_by_default(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+
+    refresh_project(
+        config_tree, RecordingRunner(), RefreshOptions(python="3.12"), cwd=project_dir
+    )
+
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["standard"]
+
+
+def test_refresh_dry_run_returns_the_target_stack(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    before = (project_dir / "pyproject.toml").read_bytes()
+    rec = RecordingRunner()
+
+    result = refresh_project(
+        config_tree,
+        rec,
+        RefreshOptions(python="3.12", stack=["standard", "@qsar"], dry_run=True),
+        cwd=project_dir,
+    )
+
+    assert result.stack == ["standard", "@qsar"]
+    assert result.added == ["umap-learn"]
+    assert rec.commands == []
+    assert (project_dir / "pyproject.toml").read_bytes() == before
+
+
+def test_refresh_dry_run_reports_a_stack_change_with_an_empty_delta(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    # 'chem' is already inside 'standard', so the stack grows while the
+    # dependency delta stays empty -- the case RefreshResult.stack exists for.
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+
+    result = refresh_project(
+        config_tree,
+        RecordingRunner(),
+        RefreshOptions(python="3.12", stack=["standard", "chem"], dry_run=True),
+        cwd=project_dir,
+    )
+
+    assert result.stack == ["standard", "chem"]
+    assert result.added == []
+    assert result.removed == []
+
+
+def test_refresh_dry_run_leaves_stack_none_without_an_override(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+
+    result = refresh_project(
+        config_tree,
+        RecordingRunner(),
+        RefreshOptions(python="3.12", dry_run=True),
+        cwd=project_dir,
+    )
+
+    assert result.stack is None
+
+
+def test_union_project_stack_appends_only_new_tokens(tmp_path):
+    from uv_stack.operations.project import union_project_stack
+
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    pyproject = project_dir / "pyproject.toml"
+
+    assert union_project_stack(pyproject, project_dir, ["@qsar"]) == ["standard", "@qsar"]
+    assert union_project_stack(pyproject, project_dir, ["standard"]) == ["standard"]
+    assert union_project_stack(pyproject, project_dir, ["@qsar", "@qsar"]) == [
+        "standard",
+        "@qsar",
+    ]
+
+
+def test_union_project_stack_requires_a_tracked_project(tmp_path):
+    from uv_stack.operations.project import union_project_stack
+
+    project_dir = tmp_path / "untracked"
+    project_dir.mkdir()
+    (project_dir / "pyproject.toml").write_text('[project]\nname = "x"\n')
+
+    with pytest.raises(ConfigError) as excinfo:
+        union_project_stack(project_dir / "pyproject.toml", project_dir, ["@qsar"])
+    assert excinfo.value.message == f"No tracked project in {project_dir}."
+    assert "stack create project" in (excinfo.value.hint or "")
+
+
+def test_the_union_is_in_the_pending_record(config_tree: ConfigRoot, tmp_path, monkeypatch):
+    """A crash after the first durable write must retry against the union."""
+    from uv_stack.operations import project as project_module
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    project_dir = _tracked_project(tmp_path, _TRACKING)
+    real_write = project_module.write_tracking
+    calls = {"n": 0}
+
+    def crash_after_first_write(pyproject, tracking):
+        calls["n"] += 1
+        real_write(pyproject, tracking)
+        if calls["n"] == 1:
+            raise RuntimeError("crash after the pending write")
+
+    monkeypatch.setattr(project_module, "write_tracking", crash_after_first_write)
+
+    with pytest.raises(RuntimeError, match="crash after the pending write"):
+        refresh_project(
+            config_tree,
+            RecordingRunner(),
+            RefreshOptions(python="3.12", stack=["standard", "@qsar"]),
+            cwd=project_dir,
+        )
+
+    tracking = read_tracking(project_dir / "pyproject.toml")
+    assert tracking is not None
+    assert tracking.stack == ["standard", "@qsar"]
+    assert tracking.pending is not None and "umap-learn" in tracking.pending
+
+
+def test_a_retry_after_a_failed_uv_add_converges(
+    config_tree: ConfigRoot, tmp_path, monkeypatch
+):
+    """The existing crash-safety property, with a stack that differs."""
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+    from uv_stack.operations.pyproject import read_tracking
+
+    monkeypatch.delenv(PROJECT_PYTHON_ENV, raising=False)
+    options = RefreshOptions(python="3.12", stack=["standard", "@qsar"])
+
+    def _fail_add(cmd: Command) -> CommandResult:
+        if "add" in cmd.args:
+            raise ToolError("add failed", command=cmd.args, returncode=1)
+        return CommandResult(returncode=0, stdout="")
+
+    crashed_root = tmp_path / "crashed"
+    crashed_root.mkdir()
+    crashed_dir = _tracked_project(crashed_root, _TRACKING)
+    with pytest.raises(ToolError):
+        refresh_project(
+            config_tree, RecordingRunner(responder=_fail_add), options, cwd=crashed_dir
+        )
+    interrupted = read_tracking(crashed_dir / "pyproject.toml")
+    assert interrupted is not None
+    assert interrupted.stack == ["standard", "@qsar"]
+    assert interrupted.pending is not None
+    refresh_project(config_tree, RecordingRunner(), options, cwd=crashed_dir)
+
+    # _tracked_project always writes '<parent>/proj_refresh', so the two
+    # projects need separate parents.
+    clean_root = tmp_path / "clean"
+    clean_root.mkdir()
+    clean_dir = _tracked_project(clean_root, _TRACKING)
+    refresh_project(config_tree, RecordingRunner(), options, cwd=clean_dir)
+
+    crashed = read_tracking(crashed_dir / "pyproject.toml")
+    clean = read_tracking(clean_dir / "pyproject.toml")
+    assert crashed is not None and clean is not None
+    assert crashed == clean
+    assert crashed.stack == ["standard", "@qsar"]
+    assert crashed.pending is None
+
+
 def test_refresh_python_flag_overrides_and_records(
     config_tree: ConfigRoot, tmp_path, monkeypatch
 ):
@@ -3222,8 +3429,8 @@ def _assert_seeded_hint(hint: str) -> None:
     # only one of the two commands reaching it. Either half going missing is
     # that defect again, pointed the other way.
     assert "drop --no-upgrade/--upgrade-package from 'stack upgrade'" in hint
-    assert "add --upgrade to 'stack converge'" in hint
-    # And no runnable bare command: 'stack converge --upgrade' on its own
+    assert "add --upgrade to 'stack sync env'" in hint
+    # And no runnable bare command: 'stack sync --upgrade' on its own
     # names no environment, so it turns a scoped repair into an unprompted
     # root-wide force-upgrade.
     assert "keeping the same environment names" in hint

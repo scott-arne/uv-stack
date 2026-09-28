@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -568,12 +569,16 @@ class RefreshOptions:
     :param strict: Fail when a bare token falls through to a literal package.
     :param no_sync: Apply dependency changes but skip the final ``uv sync``.
     :param dry_run: Plan only — no probe, no uv execution, no writes.
+    :param stack: Replace the recorded stack for this run. ``None`` — the
+        default — re-resolves what the project already records, which is what
+        keeps ``stack refresh`` byte-identical in behavior.
     """
 
     python: str | None = None
     strict: bool = False
     no_sync: bool = False
     dry_run: bool = False
+    stack: list[str] | None = None
 
 
 @dataclass
@@ -586,6 +591,11 @@ class RefreshResult:
     :param skipped_removals: Dropped entries never auto-removed (editables,
         paths, direct references).
     :param planned: The command plan (dry runs only).
+    :param stack: The target stack, on a dry run that overrode it; ``None``
+        otherwise. The union and the dependency delta are independent — a
+        token whose packages are all already present changes ``stack`` and adds
+        nothing — so the CLI needs this to avoid printing an empty delta for a
+        run that is not a no-op.
     """
 
     warnings: list[str] = field(default_factory=list)
@@ -593,6 +603,58 @@ class RefreshResult:
     removed: list[str] = field(default_factory=list)
     skipped_removals: list[str] = field(default_factory=list)
     planned: list[Command] = field(default_factory=list)
+    stack: list[str] | None = None
+
+
+def require_tracking(pyproject: Path, cwd: Path) -> ProjectTracking:
+    """Read a tracked project's table, or raise the shared errors.
+
+    Extracted from :func:`refresh_project` so ``stack sync project`` — which
+    must read the recorded stack before it can compute the union — raises the
+    same message and applies the same schema guard, rather than growing a
+    second copy that drifts.
+
+    :param pyproject: The project's ``pyproject.toml``.
+    :param cwd: The project directory, named in the error message.
+    :returns: The recorded tracking table.
+    :raises ConfigError: When no tracked project is present.
+    :raises NewerSchemaError: When the table declares a newer schema.
+    """
+    tracking = read_tracking(pyproject)
+    if tracking is None:
+        raise ConfigError(
+            f"No tracked project in {cwd}.",
+            hint=(
+                "Run inside a project created by 'stack create project' (or "
+                "add a [tool.uv-stack] table with 'stack' tokens)."
+            ),
+        )
+    if tracking.version > 1:
+        raise NewerSchemaError(
+            NEWER_SCHEMA_MESSAGE.format(version=tracking.version),
+            hint=NEWER_SCHEMA_HINT,
+        )
+    return tracking
+
+
+def union_project_stack(pyproject: Path, cwd: Path, tokens: Sequence[str]) -> list[str]:
+    """Return the recorded stack with ``tokens`` appended, order preserved.
+
+    Union, not replace: this is the sole behavioral difference from
+    ``create project --force``, and the reason that command cannot simply be
+    re-pointed at this use. Existing entries are never reordered or
+    de-duplicated — only genuinely new tokens are appended, each once.
+
+    :param pyproject: The project's ``pyproject.toml``.
+    :param cwd: The project directory, named in the error message.
+    :param tokens: The tokens to union in, in the order given.
+    :returns: The target stack.
+    :raises ConfigError: When no tracked project is present.
+    :raises NewerSchemaError: When the table declares a newer schema.
+    """
+    tracking = require_tracking(pyproject, cwd)
+    new = [token for token in dict.fromkeys(tokens) if token not in tracking.stack]
+    return [*tracking.stack, *new]
 
 
 def refresh_project(
@@ -642,23 +704,15 @@ def refresh_project(
         newer than this uv-stack, or the pyproject cannot be written.
     """
     pyproject = cwd / "pyproject.toml"
-    tracking = read_tracking(pyproject)
-    if tracking is None:
-        raise ConfigError(
-            f"No tracked project in {cwd}.",
-            hint=(
-                "Run inside a project created by 'stack create project' (or "
-                "add a [tool.uv-stack] table with 'stack' tokens)."
-            ),
-        )
-    if tracking.version > 1:
-        raise NewerSchemaError(
-            NEWER_SCHEMA_MESSAGE.format(version=tracking.version),
-            hint=NEWER_SCHEMA_HINT,
-        )
+    tracking = require_tracking(pyproject, cwd)
+
+    # An explicit union (stack sync project) overrides the recorded stack;
+    # stack refresh passes None and re-resolves what is recorded. Computed
+    # above the dry-run return at all times, so both paths see one value.
+    target_stack = options.stack if options.stack is not None else tracking.stack
 
     resolver = Resolver(config, strict=options.strict)
-    stack = resolver.resolve(tracking.stack)
+    stack = resolver.resolve(target_stack)
     new_flat = resolver.flatten(stack)
 
     # Ownership: names owned by uv-stack — the old ledger PLUS any pending
@@ -730,14 +784,14 @@ def refresh_project(
     # attempted), and keep the dry-run path write-free.
     pending_tracking = ProjectTracking(
         version=1,
-        stack=tracking.stack,
+        stack=target_stack,
         python=spec_flag,
         applied=[*tracking.applied, *adopted],
         pending=stack_adds,
     )
     final_tracking = ProjectTracking(
         version=1,
-        stack=tracking.stack,
+        stack=target_stack,
         python=spec_flag,
         applied=[*stack_adds, *adopted],
         pending=None,
@@ -773,6 +827,7 @@ def refresh_project(
             removed=removed,
             skipped_removals=skipped,
             planned=planned,
+            stack=target_stack if options.stack is not None else None,
         )
 
     # The temp file is created and filled before the durable write so that the

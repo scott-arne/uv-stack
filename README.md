@@ -92,7 +92,7 @@ create the `main` environment (Python 3.12 by default), compiled a pinned
 
 From now on, changing what's installed is the same two steps: edit a source
 file (a profile, a bundle, or stack.txt), then run stack upgrade main. For a
-freshly cloned config root, use stack converge to build the environments first.
+freshly cloned config root, use stack sync to build the environments first.
 Check what needs rebuilding at any time with stack status.
 
 ## What you define
@@ -259,6 +259,9 @@ stack refresh              # apply profile/bundle changes to this project
 stack refresh --dry-run    # see the add/remove delta first
 ```
 
+To add tokens as well, use `stack sync project TOKENS...` (see Upgrading); it
+extends the recorded stack rather than replacing it.
+
 Refresh removes only packages recorded in the table's `applied` list — the
 ones uv-stack itself added. Dependencies whose names uv-stack never applied
 are never touched. One caveat: ownership is by package name, so if you
@@ -277,9 +280,12 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack create bundle NAME TOKEN...` | Write a new bundle YAML (`--description`, `--tag`) |
 | `stack edit KIND [NAME]` | Open a profile, bundle, env source, or project file in your editor and validate it when the editor exits |
 | `stack upgrade [NAMES]...` | Re-render, re-lock, and sync shared environments |
-| `stack converge [NAMES]...` | Create, build, and recompile every environment the root declares (no prompt, keeps existing pins) |
+| `stack sync` | Create, build, and recompile every environment the root declares (no prompt, keeps existing pins) |
+| `stack sync env NAME...` | The same, for only the named environments |
+| `stack sync project TOKENS...` | Add tokens to the tracked project in this directory and re-resolve it (the recorded stack is extended, never replaced) |
 | `stack refresh` | Re-resolve a tracked project against current profiles/bundles |
 | `stack status [NAMES]...` | Shared-env build state: drift, lock freshness, existence |
+| `stack diff SOURCE SOURCE` | Compare two environments — interpreter, micromamba packages, channels, and pins — here or across machines (`--json`, `--exit-code`) |
 | `stack list env\|profile\|bundle` | Tables of what exists (`--tag` filters, `--json` for scripts) |
 | `stack show env\|profile\|bundle [NAME]` | Details for one item (`NAME` defaults to `main` for envs) |
 | `stack show project` | The tracked project in this directory: tokens, applied packages, pending state |
@@ -386,13 +392,28 @@ environment the batch never reached. Those appear only in that mode — without
 it every requested environment is attempted, so nothing is ever skipped.
 
 To bring up a whole config root instead of named environments — creating the
-missing ones, without a prompt — use `stack converge`:
+missing ones, without a prompt — use `stack sync`:
 
 ```bash
-stack converge                  # every environment the root declares
-stack converge main scratch     # only these
-stack converge --upgrade        # force new pins (the default preserves them)
+stack sync                      # every environment the root declares
+stack sync env main scratch     # only these
+stack sync --upgrade            # force new pins (the default preserves them)
 ```
+
+To add tokens to a tracked project and bring it up to date in one step, use
+`stack sync project` from the project root:
+
+```bash
+stack sync project @qsar             # stack ["standard"] becomes ["standard", "@qsar"]
+stack sync project @qsar --dry-run   # show the new stack and the delta first
+```
+
+It **adds** the tokens to the stack the project already records; it never
+replaces that stack, so an existing token cannot be lost by forgetting to
+repeat it. A token already recorded makes the run a plain re-resolve. The
+tokens are ordinary stack tokens, and `--python`, `--strict`, `--no-sync`,
+and `--dry-run` behave as they do for `stack refresh`, which remains the way
+to re-resolve the recorded tokens without adding any.
 
 > **Changed behavior.** `--no-upgrade` and `--upgrade-package` now genuinely
 > preserve the pins the existing lock already holds. Previously both compiled
@@ -439,6 +460,37 @@ $ stack list profile --tag data       # only profiles tagged 'data'
 $ stack show env main                 # python, tokens, channels, resolved packages
 ```
 
+### Comparing environments
+
+```bash
+stack diff dev prod                       # two environments here
+stack diff dev ../laptop/envs/dev         # this machine vs another, all layers
+stack diff dev ../from-laptop.lock.txt    # pins only, and it says so
+stack diff dev prod --json
+stack diff dev prod --exit-code           # exit 1 when they differ
+```
+
+Each source is an environment in this config root, a copy of an `envs/<name>/`
+directory, or a compiled `requirements.lock.txt`. An environment or a copied
+directory carries four layers — the interpreter from `python.txt`, the
+micromamba packages, the effective channel order, and the compiled pins — and
+`diff` compares all four. A bare lock file carries pins only, so against one
+the other three are reported as not compared rather than as matching.
+
+The interpreter, micromamba packages, and channels are declarations, not what
+is installed: two machines that both declare `3.12` can run different patch
+releases. So a match on those layers means the two environments are
+configured the same way; only the pins, which are resolved, show that the
+two resolved to the same Python distributions. `diff` reads what was
+compiled, not what is installed.
+
+The verdict is one of three values. `identical` means every layer matched;
+`identical-where-comparable` means the pins matched but a bare lock hid the
+other layers; `different` means at least one layer differs. `diff` exits 0 in
+all three cases — a difference is a finding, not a failure — and exits 1 for
+`different` only under `--exit-code`. A source that cannot be read exits 1
+either way.
+
 ### Checking your setup
 
 ```bash
@@ -466,7 +518,7 @@ lock is present, and whether your sources changed since the last build
 does not match `python.txt`, the state becomes `python changed` and the Python
 column shows both the configured and actual versions (e.g. `3.12 (env 3.14.0)`).
 `--json` makes every inspection command (`list`, `show`, `resolve`, `status`,
-`doctor`) script-friendly.
+`diff`, `doctor`) script-friendly.
 
 ### Typo protection
 
@@ -553,9 +605,10 @@ one profile describe paths that differ per machine.
 **Compiled locks deliberately do not travel.** A lock is resolved for one
 platform and one interpreter, and uv-stack compiles per machine rather than
 committing a lock that is only correct where it was produced. The consequence
-is worth stating plainly: two machines converged from the same sources will
-have compatible environments, not identical pins, and nothing reports the
-difference. `stack status` is a single-machine command.
+is worth stating plainly: two machines converged from the same sources will have
+compatible environments, not identical pins. `stack status` is a single-machine
+command; `stack diff` reports the difference between two machines once one of
+them has copied the other's environment directory (see below).
 
 ### Bring-up on a new machine
 
@@ -563,12 +616,21 @@ difference. `stack status` is a single-machine command.
 git clone <url> ~/.config/python-envs
 stack doctor                                    # names the variables with no value
 $EDITOR ~/.config/python-envs/variables.local.txt
-stack converge                                  # builds every environment
+stack sync                                      # builds every environment
 ```
 
 Step two is what makes this work on a machine you have never set up: doctor
 reads the declared list and reports what is missing before anything tries to
 build.
+
+To check the result against a machine that is already set up, copy that
+machine's `envs/<name>/` directory here by any means, including its
+`requirements.lock.txt` — the clone deliberately left the lock behind — and
+compare:
+
+```bash
+stack diff main ../other/envs/main
+```
 
 ### Making a root committable
 
@@ -716,7 +778,7 @@ Closing that gap would mean rewriting uv's output behind its back.
   because uv expands environment variables in a requirements file and would
   resolve the leftover reference behind uv-stack's back. `DEV=/a/${OTHER}/b`
   turns every entry that references `DEV` into an error: `stack doctor` reports
-  it and `stack converge` refuses.
+  it and `stack sync` refuses.
 - **No value may contain whitespace.** That rules out a path containing a
   space, and it is what keeps expansion from splitting an already-validated
   entry into a new token. Use a symlink or move the checkout.

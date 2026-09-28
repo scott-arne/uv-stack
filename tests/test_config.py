@@ -568,7 +568,7 @@ def test_a_value_whose_expansion_fails_is_refused(config_tree: ConfigRoot):
     # os.path.expanduser is not total: the '~user' form goes to the password
     # database, and a NUL in the name raises ValueError. A ValueError is
     # neither a UvStackError nor an OSError, so unconverted this one leaves
-    # 'stack doctor', 'stack converge', and 'stack status' printing a
+    # 'stack doctor', 'stack sync', and 'stack status' printing a
     # traceback for a file the user can fix in one edit.
     config_tree.variables_path().write_text("DEV\n")
     config_tree.variables_local_path().write_text("DEV=~a\x00b/x\n")
@@ -587,3 +587,60 @@ def test_an_environment_value_containing_whitespace_is_refused(
     with pytest.raises(ConfigError) as excinfo:
         config_tree.load_variables()
     assert "whitespace" in excinfo.value.message
+
+
+def test_load_env_from_dir_reads_a_copied_directory(tmp_path):
+    from uv_stack.config import load_env_from_dir
+
+    source = tmp_path / "copied"
+    source.mkdir()
+    (source / "stack.txt").write_text("standard\n")
+    (source / "python.txt").write_text("3.13\n")
+    (source / "micromamba.txt").write_text("gdal\n")
+    (source / "channels.txt").write_text("bioconda\n")
+
+    env = load_env_from_dir(source, "copied")
+
+    assert env.name == "copied"
+    assert env.python == "3.13"
+    assert env.stack == ["standard"]
+    assert env.micromamba == ["gdal"]
+    assert env.channels == ["bioconda"]
+
+
+def test_load_env_from_dir_defaults_a_missing_python(tmp_path):
+    from uv_stack.config import load_env_from_dir
+
+    source = tmp_path / "copied"
+    source.mkdir()
+    (source / "stack.txt").write_text("standard\n")
+
+    assert load_env_from_dir(source, "copied").python == "3.12"
+
+
+def test_load_env_from_dir_rejects_a_directory_named_channels_txt(tmp_path):
+    from uv_stack.config import load_env_from_dir
+
+    source = tmp_path / "copied"
+    source.mkdir()
+    (source / "stack.txt").write_text("standard\n")
+    (source / "channels.txt").mkdir()
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_env_from_dir(source, "copied")
+    assert "channels.txt" in str(excinfo.value)
+
+
+def test_load_env_from_dir_rejects_a_directory_named_stack_txt(tmp_path):
+    # load_env never reaches this: require_env has already refused the shape.
+    # A copied directory has no such caller, so the helper holds stack.txt to
+    # the rule itself rather than reading the directory as an empty stack.
+    from uv_stack.config import load_env_from_dir
+
+    source = tmp_path / "copied"
+    source.mkdir()
+    (source / "stack.txt").mkdir()
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_env_from_dir(source, "copied")
+    assert "stack.txt" in str(excinfo.value)
