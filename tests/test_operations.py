@@ -3418,22 +3418,19 @@ def test_candidate_lock_survives_concurrent_lock_removal(
         candidate.unlink(missing_ok=True)
 
 
-def _assert_seeded_hint(hint: str) -> None:
+def _assert_seeded_hint(hint: str, env_name: str) -> None:
     """Pin the wording a seeded candidate earns.
 
     :param hint: The hint attached to the failed compile.
+    :param env_name: The environment whose compile failed.
     """
     assert "copy of" in hint
     assert "re-run as a full upgrade" in hint
-    # Both spellings, because one defect this replaced was advice that fit
-    # only one of the two commands reaching it. Either half going missing is
-    # that defect again, pointed the other way.
-    assert "drop --no-upgrade/--upgrade-package from 'stack upgrade'" in hint
-    assert "add --upgrade to 'stack sync env'" in hint
-    # And no runnable bare command: 'stack sync --upgrade' on its own
-    # names no environment, so it turns a scoped repair into an unprompted
-    # root-wide force-upgrade.
-    assert "keeping the same environment names" in hint
+    # One command, runnable whichever of 'stack upgrade' and 'stack sync'
+    # reached this: a defect this replaced was advice that fit only one of
+    # them. It names the environment because 'stack sync --upgrade' on its
+    # own turns a scoped repair into an unprompted root-wide force-upgrade.
+    assert f"'stack sync env --upgrade {env_name}'" in hint
     assert "new empty file" not in hint
 
 
@@ -3453,7 +3450,7 @@ def test_a_failed_compile_hint_names_the_published_lock(config_tree: ConfigRoot)
     hint = caught.value.hint
     assert hint is not None
     assert str(lock) in hint
-    _assert_seeded_hint(hint)
+    _assert_seeded_hint(hint, "main")
     assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
 
 
@@ -3477,7 +3474,7 @@ def test_a_failed_compile_hint_names_the_published_lock_recreate_branch(
     hint = caught.value.hint
     assert hint is not None
     assert str(lock) in hint
-    _assert_seeded_hint(hint)
+    _assert_seeded_hint(hint, "main")
     assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
 
 

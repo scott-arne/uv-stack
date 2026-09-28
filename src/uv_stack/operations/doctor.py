@@ -515,8 +515,8 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
             # and saying otherwise reports a user's own file as a defect. A
             # marker is what distinguishes the two: it means a sync ran here,
             # so this is an env that list_envs drops while its compiled lock
-            # sits beside it and 'stack env sync' answers that it does not
-            # exist. Skipped when profiles.txt is there, because the legacy
+            # sits beside it, and a bare 'stack sync' passes over it without a
+            # word. Skipped when profiles.txt is there, because the legacy
             # finding above already names the remedy and this one would
             # contradict it -- create the file, against rename the one you
             # have. Report-only for unusable-env's reason: doctor cannot guess

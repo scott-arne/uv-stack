@@ -124,8 +124,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `stack doctor` reports an env-like directory under `envs/` that has no
   `stack.txt` at all -- one holding a `requirements.in` or an `environment.yml`,
   so a sync ran there. It is dropped from every listing for the same reason,
-  which left `stack env sync` answering that the environment does not exist
-  while its own compiled lock sat beside it. A directory under `envs/` with no
+  which left a bare `stack sync` passing over it without a word -- or, with no
+  other environment declared, answering that there were none -- while its own
+  compiled lock sat beside it. A directory under `envs/` with no
   such marker is still not reported: it is not a broken environment, it is not
   an environment.
 - An unreadable `bundles/` no longer fails a command that resolved a bare

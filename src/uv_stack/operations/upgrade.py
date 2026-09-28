@@ -153,7 +153,7 @@ def _new_candidate_lock(lock: Path, *, seed: bool) -> tuple[Path, bool]:
 
 
 def _explain_candidate_lock(
-    error: BaseException, lock: Path, *, seeded: bool, copied: bool
+    error: BaseException, lock: Path, env_name: str, *, seeded: bool, copied: bool
 ) -> None:
     """Point a failed compile at the published lock behind the temp file.
 
@@ -167,13 +167,15 @@ def _explain_candidate_lock(
     describe a read that never happened and would send the user to fix a parse
     error in a file that may not exist, while blaming the third case on the
     mode would claim pins were ignored when there were none. Two CLI commands
-    reach this code and the spelling that escapes a seeded compile differs
-    between them, so that hint names both.
+    reach this code, so the seeded hint names one command that escapes a
+    seeded compile whichever of them ran, scoped to this environment: a bare
+    ``stack sync --upgrade`` would force-upgrade every environment in the root.
 
     :param error: The exception about to be re-raised. Anything that is not a
         :class:`ToolError`, any error that already carries a hint, and any
         error from a command other than the compile, is left alone.
     :param lock: The published lock the candidate stands in for.
+    :param env_name: The environment being compiled, named in the seeded hint.
     :param seeded: Whether seeding was REQUESTED — the same value the caller
         passed as ``seed`` to :func:`_new_candidate_lock`.
     :param copied: Whether the lock's pins actually reached the candidate — the
@@ -191,14 +193,15 @@ def _explain_candidate_lock(
         and error.command[:3] == ["uv", "pip", "compile"]
     ):
         if copied:
+            # The flag precedes the name: render_positional_arg prefixes '--'
+            # to a name starting with '-', and a flag after that separator
+            # would be read as a second environment name.
             error.hint = (
                 f"uv compiles into a copy of {lock}, so a '.tmp' path above "
                 f"names that copy, not a file you are missing. If {lock.name} "
                 "itself cannot be parsed, re-run as a full upgrade, which "
-                "ignores the existing pins and rewrites it: repeat the "
-                "command you ran, keeping the same environment names, and "
-                "either drop --no-upgrade/--upgrade-package from "
-                "'stack upgrade' or add --upgrade to 'stack sync env'."
+                "ignores the existing pins and rewrites it: 'stack sync env "
+                f"--upgrade {render_positional_arg(env_name)}'."
             )
         elif seeded:
             error.hint = (
@@ -425,7 +428,7 @@ def upgrade_env(
             except BaseException as error:
                 if tmp_lock.exists():
                     tmp_lock.unlink()
-                _explain_candidate_lock(error, lock, seeded=seeded, copied=copied)
+                _explain_candidate_lock(error, lock, env_name, seeded=seeded, copied=copied)
                 raise
         else:
             ensure_env(
@@ -452,7 +455,7 @@ def upgrade_env(
             except BaseException as error:
                 if tmp_lock.exists():
                     tmp_lock.unlink()
-                _explain_candidate_lock(error, lock, seeded=seeded, copied=copied)
+                _explain_candidate_lock(error, lock, env_name, seeded=seeded, copied=copied)
                 raise
 
         runner.run(uv_pip_sync(python, lock))
