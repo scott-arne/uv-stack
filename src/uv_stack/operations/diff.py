@@ -29,11 +29,13 @@ VERDICT_WHERE_COMPARABLE = "identical-where-comparable"
 #: At least one comparison that ran was non-empty.
 VERDICT_DIFFERENT = "different"
 
-#: A resolved pin. ``\S+`` for the version so a local version segment or an
-#: epoch survives verbatim; uv-stack never rewrites what uv compiled.
-_PIN_RE = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)==(?P<version>\S+)$")
-#: A PEP 508 direct reference as ``uv pip compile`` writes it, spaced.
-_DIRECT_RE = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)\s+@\s+(?P<url>\S.*)$")
+#: A resolved pin. PEP 440 versions never contain ``;``, so the version group
+#: excludes it: a marker means the file is not one of uv-stack's locks.
+_PIN_RE = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)==(?P<version>[^\s;]+)$")
+#: A PEP 508 direct reference as ``uv pip compile`` writes it. PEP 508 requires
+#: whitespace before a URL requirement's ``;`` marker, so a URL is a single
+#: whitespace-free token and the URL group excludes whitespace.
+_DIRECT_RE = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)\s+@\s+(?P<url>\S+)$")
 #: pip's comment rule: a ``#`` at line start or after whitespace. Deliberately
 #: not ``parse.clean_line``, which partitions at the first ``#`` and would
 #: truncate a ``#sha256=`` fragment inside a direct reference URL.
@@ -262,6 +264,12 @@ def parse_lock(path: Path) -> dict[str, str | None]:
     with handle:
         try:
             raw_bytes = handle.read()
+        except OSError as error:
+            raise ConfigError(
+                f"Cannot read {path}: {error.strerror or error}.",
+                hint="The file may be on a failing disk or network mount.",
+            ) from error
+        try:
             text = raw_bytes.decode("utf-8")
         except UnicodeDecodeError as error:
             raise ConfigError(

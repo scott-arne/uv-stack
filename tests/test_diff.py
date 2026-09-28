@@ -105,6 +105,24 @@ def test_parse_lock_rejects_a_duplicate_identity(tmp_path):
     assert "line 2" in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "line,line_num",
+    [
+        ("pkg @ https://example.invalid/pkg-1.0-py3-none-any.whl ; python_version < \"3.13\"\n", 2),
+        ("numpy==2.1.0;python_version<\"3.13\"\n", 2),
+        ("numpy==2.1.0 ; python_version < \"3.13\"\n", 2),
+    ],
+)
+def test_parse_lock_rejects_marker_bearing_lines(tmp_path, line, line_num):
+    from uv_stack.operations.diff import parse_lock
+
+    path = _lock(tmp_path, f"numpy==2.1.0\n{line}")
+    with pytest.raises(ConfigError) as excinfo:
+        parse_lock(path)
+    assert str(path) in str(excinfo.value)
+    assert f"line {line_num}" in str(excinfo.value)
+
+
 def test_parse_lock_reports_an_unreadable_file_as_a_config_error(tmp_path):
     from uv_stack.operations.diff import parse_lock
 
@@ -117,6 +135,46 @@ def test_parse_lock_reports_an_unreadable_file_as_a_config_error(tmp_path):
             parse_lock(path)
     finally:
         path.chmod(0o644)
+
+
+def test_parse_lock_reports_a_failed_read_as_a_config_error(tmp_path, monkeypatch):
+    import errno
+
+    from uv_stack.operations.diff import parse_lock
+
+    path = _lock(tmp_path, "numpy==2.1.0\n")
+
+    class FailingReader:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def read(self):
+            raise OSError(errno.EIO, "Input/output error")
+
+    original_fdopen = os.fdopen
+    def patched_fdopen(fd, mode):
+        if mode == "rb":
+            os.close(fd)
+            return FailingReader()
+        return original_fdopen(fd, mode)
+
+    monkeypatch.setattr("uv_stack.operations.diff.os.fdopen", patched_fdopen)
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse_lock(path)
+    assert str(path) in str(excinfo.value)
+
+
+def test_parse_lock_reports_invalid_utf8_as_a_config_error(tmp_path):
+    from uv_stack.operations.diff import parse_lock
+
+    path = tmp_path / "invalid.lock.txt"
+    path.write_bytes(b"numpy==2.1.0\n\xff\xfe\n")
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse_lock(path)
+    assert "not valid UTF-8" in str(excinfo.value)
 
 
 def test_load_source_reads_an_environment_by_name(config_tree):
