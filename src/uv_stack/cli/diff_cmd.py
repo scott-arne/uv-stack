@@ -170,10 +170,12 @@ def _render(result: EnvironmentDiff) -> None:
 def diff(config: ConfigRoot, sources: tuple[str, str], as_json: bool, exit_code: bool) -> None:
     """Compare two environments' declared configuration and resolved pins.
 
-    Each SOURCE is an environment in this config root, a path to a copied
-    envs/<name>/ directory, or a path to a compiled lock file. A bare lock file
-    carries pins only; the other three layers are reported as not compared
-    rather than as matching.
+    Each SOURCE is an environment in this config root, the path to an
+    envs/<name>/ directory from another machine, or the path to a compiled lock
+    file. A directory is read where it sits; keep it outside this root's envs/,
+    where it would become an environment of its own. A bare lock file carries
+    pins only; the other three layers are reported as not compared rather than
+    as matching.
 
     The interpreter, conda packages and channels are compared as declared, so a
     match means the two are configured the same way, not that what is installed

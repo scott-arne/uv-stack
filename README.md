@@ -470,9 +470,11 @@ stack diff dev prod --json
 stack diff dev prod --exit-code           # exit 1 when they differ
 ```
 
-Each source is an environment in this config root, a copy of an `envs/<name>/`
-directory, or a compiled `requirements.lock.txt`. An environment or a copied
-directory carries four layers — the interpreter from `python.txt`, the
+Each source is an environment in this config root, the path to an
+`envs/<name>/` directory from another machine, or a compiled
+`requirements.lock.txt`. A directory is read where it sits, so keep it outside
+this root's `envs/`, where it would become an environment of its own. An
+environment or such a directory carries four layers — the interpreter from `python.txt`, the
 micromamba packages, the effective channel order, and the compiled pins — and
 `diff` compares all four. A bare lock file carries pins only, so against one
 the other three are reported as not compared rather than as matching.
@@ -608,7 +610,7 @@ committing a lock that is only correct where it was produced. The consequence
 is worth stating plainly: two machines converged from the same sources will have
 compatible environments, not identical pins. `stack status` is a single-machine
 command; `stack diff` reports the difference between two machines once one of
-them has copied the other's environment directory (see below).
+them has the other's environment directory to read (see below).
 
 ### Bring-up on a new machine
 
@@ -623,10 +625,11 @@ Step two is what makes this work on a machine you have never set up: doctor
 reads the declared list and reports what is missing before anything tries to
 build.
 
-To check the result against a machine that is already set up, copy that
-machine's `envs/<name>/` directory here by any means, including its
-`requirements.lock.txt` — the clone deliberately left the lock behind — and
-compare:
+To check the result against a machine that is already set up, bring that
+machine's `envs/<name>/` directory over by any means, including its
+`requirements.lock.txt` — the clone deliberately left the lock behind. Put it
+anywhere outside this root's `envs/`, where it would become an environment of
+its own, and compare:
 
 ```bash
 stack diff main ../other/envs/main
