@@ -285,7 +285,7 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack sync project TOKENS...` | Add tokens to the tracked project in this directory and re-resolve it (the recorded stack is extended, never replaced) |
 | `stack refresh` | Re-resolve a tracked project against current profiles/bundles |
 | `stack status [NAMES]...` | Shared-env build state: drift, lock freshness, existence |
-| `stack diff SOURCE SOURCE` | Compare two environments -- interpreter, micromamba packages, channels, and pins -- here or across machines (`--json`, `--exit-code`) |
+| `stack diff SOURCE SOURCE` | Compare two environments — interpreter, micromamba packages, channels, and pins — here or across machines (`--json`, `--exit-code`) |
 | `stack list env\|profile\|bundle` | Tables of what exists (`--tag` filters, `--json` for scripts) |
 | `stack show env\|profile\|bundle [NAME]` | Details for one item (`NAME` defaults to `main` for envs) |
 | `stack show project` | The tracked project in this directory: tokens, applied packages, pending state |
@@ -472,8 +472,8 @@ stack diff dev prod --exit-code           # exit 1 when they differ
 
 Each source is an environment in this config root, a copy of an `envs/<name>/`
 directory, or a compiled `requirements.lock.txt`. An environment or a copied
-directory carries four layers -- the interpreter from `python.txt`, the
-micromamba packages, the effective channel order, and the compiled pins -- and
+directory carries four layers — the interpreter from `python.txt`, the
+micromamba packages, the effective channel order, and the compiled pins — and
 `diff` compares all four. A bare lock file carries pins only, so against one
 the other three are reported as not compared rather than as matching.
 
@@ -486,7 +486,7 @@ same Python distributions are installed.
 The verdict is one of three values. `identical` means every layer matched;
 `identical-where-comparable` means the pins matched but a bare lock hid the
 other layers; `different` means at least one layer differs. `diff` exits 0 in
-all three cases -- a difference is a finding, not a failure -- and exits 1 for
+all three cases — a difference is a finding, not a failure — and exits 1 for
 `different` only under `--exit-code`. A source that cannot be read exits 1
 either way.
 
@@ -624,7 +624,7 @@ build.
 
 To check the result against a machine that is already set up, copy that
 machine's `envs/<name>/` directory here by any means, including its
-`requirements.lock.txt` -- the clone deliberately left the lock behind -- and
+`requirements.lock.txt` — the clone deliberately left the lock behind — and
 compare:
 
 ```bash
