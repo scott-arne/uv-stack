@@ -480,8 +480,9 @@ the other three are reported as not compared rather than as matching.
 The interpreter, micromamba packages, and channels are declarations, not what
 is installed: two machines that both declare `3.12` can run different patch
 releases. So a match on those layers means the two environments are
-configured the same way; only the pins, which are resolved, prove that the
-same Python distributions are installed.
+configured the same way; only the pins, which are resolved, show that the
+two resolved to the same Python distributions. `diff` reads what was
+compiled, not what is installed.
 
 The verdict is one of three values. `identical` means every layer matched;
 `identical-where-comparable` means the pins matched but a bare lock hid the
