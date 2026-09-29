@@ -459,10 +459,22 @@ def _physical_identity(path: Path) -> tuple[int, int, tuple[str, ...]]:
 
 
 def _refuse_linked_keys(config: ConfigRoot, document: ExportDocument) -> None:
-    """Refuse two shipped keys that the target's directory links make one file.
+    """Refuse a shipped key that the target's directory links make another key's file.
 
-    :raises ConfigError: When two shipped keys would be written to one file.
+    The other key may be shipped too, or be one of the target's own definition
+    files, which the staged view would model apart from the write that changes
+    it. An existing key that differs only in letter case or Unicode
+    normalization names the same item on a folding filesystem, and is
+    overwritten like any existing file.
+
+    :raises ConfigError: When a shipped key would be written to another key's file.
     """
+    keys = [file_key("profile", name) for name in config.list_profiles()]
+    keys += [file_key("bundle", name) for name in config.list_bundles()]
+    keys += [file_key("env", name, f) for name in config.list_envs() for f in ENV_FILES]
+    existing: dict[tuple[int, int, tuple[str, ...]], list[str]] = {}
+    for key in keys:
+        existing.setdefault(_physical_identity(config.root / key), []).append(key)
     seen: dict[tuple[int, int, tuple[str, ...]], str] = {}
     for key in sorted(document.files):
         identity = _physical_identity(config.root / key)
@@ -473,6 +485,19 @@ def _refuse_linked_keys(config: ConfigRoot, document: ExportDocument) -> None:
                 hint=(
                     "The target root's directory links make them one file; remove "
                     "the link or leave one of them out of the export."
+                ),
+            )
+        others = [
+            other for other in existing.get(identity, []) if _caseless(other) != _caseless(key)
+        ]
+        if others:
+            raise ConfigError(
+                f"The document ships {key}, which on this machine is the same file "
+                f"as {others[0]}.",
+                hint=(
+                    "The target root's directory links make them one file, so writing "
+                    "one would change the other; remove the link or leave the item out "
+                    "of the export."
                 ),
             )
         seen[identity] = key

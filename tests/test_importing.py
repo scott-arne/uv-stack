@@ -503,6 +503,35 @@ def test_shipped_keys_the_target_links_together_are_refused(
         _stage(target, data)
 
 
+@pytest.mark.parametrize(("shipped", "linked"), [("other", "main"), ("main", "other")])
+def test_a_shipped_env_linked_with_an_existing_env_is_refused(
+    config_tree: ConfigRoot, tmp_path: Path, shipped: str, linked: str
+) -> None:
+    """Writing either name of two linked environments would change the other."""
+    shutil.copytree(config_tree.env_dir("main"), config_tree.env_dir("other"))
+    target = ConfigRoot(tmp_path / "target")
+    shutil.copytree(config_tree.env_dir("main"), target.env_dir("main"))
+    target.env_dir("other").symlink_to(target.env_dir("main"), target_is_directory=True)
+    pattern = (
+        rf"^The document ships envs/{shipped}/(\S+), which on this machine is the "
+        rf"same file as envs/{linked}/\1\.$"
+    )
+    with pytest.raises(ConfigError, match=pattern):
+        _stage(target, _raw(config_tree, shipped))
+
+
+def test_an_existing_file_of_a_folded_name_is_not_a_link(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    """A folding filesystem's other spelling of a shipped name is that item, not a link."""
+    target = ConfigRoot(tmp_path / "target")
+    target.profiles_dir.mkdir(parents=True)
+    target.profile_path("Utils").write_text("includes:\n  - rich\n")
+    if not target.profile_path("utils").exists():
+        pytest.skip("this filesystem does not fold letter case")
+    _stage(target, _raw(config_tree, "profile:utils"))
+
+
 def test_a_single_linked_directory_still_stages(config_tree: ConfigRoot, tmp_path: Path) -> None:
     target = ConfigRoot(tmp_path / "target")
     shared = tmp_path / "shared"
