@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -469,3 +470,43 @@ def test_a_file_where_a_directory_belongs_is_refused(
     with pytest.raises(ConfigError, match=pattern):
         _stage(target, _raw(config_tree, item))
     assert (target.root / blocker).is_file()
+
+
+@pytest.mark.parametrize(
+    ("links", "pattern"),
+    [
+        (
+            ("envs/main", "envs/other"),
+            r"^The document ships envs/main/(\S+) and envs/other/\1, "
+            r"which are the same file on this machine\.$",
+        ),
+        (
+            ("bundles", "profiles"),
+            r"^The document ships bundles/utils\.yaml and profiles/utils\.yaml, "
+            r"which are the same file on this machine\.$",
+        ),
+    ],
+)
+def test_shipped_keys_the_target_links_together_are_refused(
+    config_tree: ConfigRoot, tmp_path: Path, links: tuple[str, str], pattern: str
+) -> None:
+    shutil.copytree(config_tree.env_dir("main"), config_tree.env_dir("other"))
+    config_tree.bundle_path("utils").write_text("includes:\n  - profile:utils\n")
+    data = _raw(config_tree, "main", "other", "profile:utils", "bundle:utils")
+    target = ConfigRoot(tmp_path / "target")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    for link in links:
+        (target.root / link).parent.mkdir(parents=True, exist_ok=True)
+        (target.root / link).symlink_to(shared, target_is_directory=True)
+    with pytest.raises(ConfigError, match=pattern):
+        _stage(target, data)
+
+
+def test_a_single_linked_directory_still_stages(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    target.root.mkdir()
+    (target.root / "profiles").symlink_to(shared, target_is_directory=True)
+    _stage(target, _raw(config_tree, "profile:utils"))

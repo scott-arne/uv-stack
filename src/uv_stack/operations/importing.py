@@ -446,6 +446,38 @@ def _refuse_non_directory_blockers(config: ConfigRoot, document: ExportDocument)
             )
 
 
+def _physical_identity(path: Path) -> tuple[int, int, tuple[str, ...]]:
+    # Identifies a path by the deepest part of it that exists, so two keys the
+    # target's own directory links route to one place compare equal before
+    # either file is written.
+    tail: list[str] = []
+    while not os.path.exists(path):
+        tail.append(path.name)
+        path = path.parent
+    info = os.stat(path)
+    return info.st_dev, info.st_ino, tuple(reversed(tail))
+
+
+def _refuse_linked_keys(config: ConfigRoot, document: ExportDocument) -> None:
+    """Refuse two shipped keys that the target's directory links make one file.
+
+    :raises ConfigError: When two shipped keys would be written to one file.
+    """
+    seen: dict[tuple[int, int, tuple[str, ...]], str] = {}
+    for key in sorted(document.files):
+        identity = _physical_identity(config.root / key)
+        if identity in seen:
+            raise ConfigError(
+                f"The document ships {seen[identity]} and {key}, "
+                "which are the same file on this machine.",
+                hint=(
+                    "The target root's directory links make them one file; remove "
+                    "the link or leave one of them out of the export."
+                ),
+            )
+        seen[identity] = key
+
+
 @contextmanager
 def staged_root(
     config: ConfigRoot, document: ExportDocument, referenced: list[str]
@@ -458,6 +490,7 @@ def staged_root(
     view is exactly what a successful ``--overwrite`` import would leave.
     """
     _refuse_non_directory_blockers(config, document)
+    _refuse_linked_keys(config, document)
     directory = Path(os.path.realpath(tempfile.mkdtemp(prefix="uv-stack-staged-")))
     staged = ConfigRoot(directory)
     try:
