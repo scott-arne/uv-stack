@@ -166,3 +166,37 @@ def test_crlf_is_preserved(config_tree: ConfigRoot) -> None:
                                  "profiles/a\x00b.yaml", "profiles/ds.yaml\n"])
 def test_parse_file_key_rejects_unsafe_keys(key: str) -> None:
     assert parse_file_key(key) is None
+
+
+def test_closure_refuses_profile_reference_that_escapes_root(config_tree: ConfigRoot) -> None:
+    (config_tree.root / "outside.yaml").write_text("includes:\n  - numpy\n")
+    (config_tree.bundles_dir / "bad.yaml").write_text("includes:\n  - profile:../outside\n")
+    with pytest.raises(ConfigError) as caught:
+        closure(config_tree, ["bundle:bad"])
+    assert "../outside" in caught.value.message
+    assert "plain name" in caught.value.hint
+
+
+def test_bundle_include_with_escaping_profile_is_refused(config_tree: ConfigRoot) -> None:
+    (config_tree.root / "outside.yaml").write_text("includes:\n  - numpy\n")
+    (config_tree.bundles_dir / "bad.yaml").write_text("includes:\n  - profile:../outside\n")
+    with pytest.raises(ConfigError) as caught:
+        build_document(config_tree, ["bundle:bad"])
+    assert "../outside" in caught.value.message
+
+
+def test_bundle_include_with_escaping_bundle_is_refused(config_tree: ConfigRoot) -> None:
+    (config_tree.root / "outside2.yaml").write_text("includes:\n  - numpy\n")
+    (config_tree.bundles_dir / "bad.yaml").write_text("includes:\n  - bundle:../outside2\n")
+    with pytest.raises(ConfigError) as caught:
+        build_document(config_tree, ["bundle:bad"])
+    assert "../outside2" in caught.value.message
+
+
+def test_env_stack_with_escaping_profile_is_refused(config_tree: ConfigRoot) -> None:
+    (config_tree.root / "outside.yaml").write_text("includes:\n  - numpy\n")
+    config_tree.env_dir("bad").mkdir()
+    config_tree.env_stack_path("bad").write_text("profile:../outside\n")
+    with pytest.raises(ConfigError) as caught:
+        build_document(config_tree, ["env:bad"])
+    assert "../outside" in caught.value.message

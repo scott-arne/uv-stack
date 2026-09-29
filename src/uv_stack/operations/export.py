@@ -161,6 +161,8 @@ def closure(config: ConfigRoot, items: Iterable[str]) -> set[str]:
     One resolve over every item's tokens gives the profiles and bundles
     reached; package literals bring no file. The resolver's missing-reference
     error for a qualified reference propagates.
+
+    :raises ConfigError: When a profile or bundle reference escapes the root.
     """
     keys: set[str] = set()
     tokens: list[str] = []
@@ -176,8 +178,22 @@ def closure(config: ConfigRoot, items: Iterable[str]) -> set[str]:
         else:
             tokens.append(item)
     resolved = Resolver(config).resolve(tokens)
-    keys.update(file_key("profile", p) for p in resolved.profiles)
-    keys.update(file_key("bundle", b) for b in resolved.bundles)
+    for name in resolved.profiles:
+        key = file_key("profile", name)
+        if parse_file_key(key) is None:
+            raise ConfigError(
+                f"Profile reference '{name}' does not map to a valid file key.",
+                hint="A profile reference must be a plain name, not a path.",
+            )
+        keys.add(key)
+    for name in resolved.bundles:
+        key = file_key("bundle", name)
+        if parse_file_key(key) is None:
+            raise ConfigError(
+                f"Bundle reference '{name}' does not map to a valid file key.",
+                hint="A bundle reference must be a plain name, not a path.",
+            )
+        keys.add(key)
     return keys
 
 
