@@ -286,12 +286,20 @@ def check_document(document: ExportDocument, doc_root: ConfigRoot) -> list[str]:
     """Check that the document's items reach exactly the files it ships.
 
     :returns: The variable names the shipped files reference.
-    :raises ConfigError: When a shipped file is unreachable or a reference escapes.
+    :raises ConfigError: When a shipped file is unreachable, a reference escapes,
+        or the bundle chain is too deep to resolve.
     :raises UvStackError: The resolver's missing-reference error, relabeled.
     """
-    with _relabeled(doc_root.root, ""):
-        _refuse_escaping_references(document, doc_root)
-        reached = closure(doc_root, document.items)
+    try:
+        with _relabeled(doc_root.root, ""):
+            _refuse_escaping_references(document, doc_root)
+            reached = closure(doc_root, document.items)
+    except (RecursionError, ConfigError) as error:
+        if isinstance(error, RecursionError) or "RecursionError" in str(error):
+            raise ConfigError(
+                "The document's bundles nest too deeply to resolve.", hint=_REEXPORT_HINT
+            ) from None
+        raise
     shipped = set(document.files)
     extra = sorted(shipped - reached)
     if extra:

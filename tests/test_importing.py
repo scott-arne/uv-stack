@@ -229,3 +229,25 @@ def test_lone_surrogates_are_refused(config_tree: ConfigRoot, location: str) -> 
     text = json.dumps(data)
     with pytest.raises(ConfigError, match="not valid Unicode"):
         load_document(text)
+
+
+def test_deeply_nested_bundle_chain_is_refused() -> None:
+    """A bundle chain too deep to resolve is refused."""
+    depth = 1500
+    files = {}
+    for i in range(depth - 1):
+        files[f"bundles/b{i}.yaml"] = f"includes:\n  - bundle:b{i+1}\n"
+    files[f"bundles/b{depth-1}.yaml"] = "includes:\n  - numpy\n"
+
+    data = {
+        "format": "uv-stack-export",
+        "version": 1,
+        "created_by": "uv-stack 0.6.0",
+        "source_platform": "test",
+        "items": ["bundle:b0"],
+        "files": files,
+        "seeds": {},
+    }
+    document = load_document(json.dumps(data))
+    with document_root(document) as root, pytest.raises(ConfigError, match="nest too deeply"):
+        check_document(document, root)
