@@ -16,6 +16,7 @@ import shutil
 import tempfile
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
@@ -23,16 +24,21 @@ from pydantic import ValidationError
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
+from uv_stack.fsutil import read_text_utf8, require_regular_file
 from uv_stack.models import EXPORT_FORMAT, EXPORT_VERSION, ExportDocument
 from uv_stack.operations.diff import parse_lock_text
+from uv_stack.operations.edit import validate_bundle, validate_env, validate_profile
 from uv_stack.operations.export import (
+    ENV_FILES,
     ITEM_KINDS,
+    OPTIONAL_ENV_FILES,
     closure,
     file_entries,
     file_key,
     parse_file_key,
     reference_key,
 )
+from uv_stack.operations.scaffold import _SHADOW_HINT
 from uv_stack.resolver import Resolver
 from uv_stack.variables import referenced_names
 
@@ -337,3 +343,129 @@ def check_document(document: ExportDocument, doc_root: ConfigRoot) -> list[str]:
             "fix the reference on the source machine.",
         )
     return referenced_variables(doc_root, document.files)
+
+
+@dataclass(frozen=True)
+class ImportOptions:
+    """Options for ``stack import``.
+
+    :param overwrite: Replace different files and remove target-only ones.
+    :param strict: Validate shipped files as ``stack resolve --strict`` would.
+    """
+
+    overwrite: bool = False
+    strict: bool = False
+
+
+@dataclass(frozen=True)
+class Staged:
+    """The staged target view and the variables the import would declare."""
+
+    root: ConfigRoot
+    missing_variables: list[str]
+    variables_text: str | None
+
+
+def _shipped(document: ExportDocument, kind: str) -> list[str]:
+    return sorted({k.name for k in map(parse_file_key, document.files) if k and k.kind == kind})
+
+
+def refuse_shadowing(config: ConfigRoot, document: ExportDocument) -> None:
+    """Refuse a profile or bundle that would shadow the other kind here.
+
+    A same-name profile and bundle arriving together are allowed: the source
+    root already had them side by side.
+    """
+    profiles, bundles = set(_shipped(document, "profile")), set(_shipped(document, "bundle"))
+    for name in sorted(profiles - bundles):
+        if config.bundle_exists(name):
+            raise ConfigError(
+                f"Profile '{name}' would shadow the existing bundle: {config.bundle_path(name)}",
+                hint=_SHADOW_HINT,
+            )
+    for name in sorted(bundles - profiles):
+        if config.profile_exists(name):
+            raise ConfigError(
+                f"Bundle '{name}' would be shadowed by the existing profile: "
+                f"{config.profile_path(name)}",
+                hint=_SHADOW_HINT,
+            )
+
+
+def _copy_source(source: Path, destination: Path) -> None:
+    require_regular_file(source)
+    if source.is_file():
+        _write_plain(destination, read_text_utf8(source, exact_newlines=True))
+
+
+def _appended_variables(current: str, missing: list[str]) -> str:
+    if current and not current.endswith("\n"):
+        current += "\n"
+    return current + "".join(f"{name}\n" for name in missing)
+
+
+@contextmanager
+def staged_root(
+    config: ConfigRoot, document: ExportDocument, referenced: list[str]
+) -> Iterator[Staged]:
+    """Stage the target with the document overlaid, in a temporary root.
+
+    The copy holds every profile, bundle, and environment definition file of
+    the target, then the shipped files on top, then drops a shipped
+    environment's optional files the document does not ship, so the staged
+    view is exactly what a successful ``--overwrite`` import would leave.
+    """
+    directory = Path(os.path.realpath(tempfile.mkdtemp(prefix="uv-stack-staged-")))
+    staged = ConfigRoot(directory)
+    try:
+        for name in config.list_profiles():
+            _copy_source(config.profile_path(name), staged.profile_path(name))
+        for name in config.list_bundles():
+            _copy_source(config.bundle_path(name), staged.bundle_path(name))
+        for name in config.list_envs():
+            for filename in ENV_FILES:
+                _copy_source(config.env_dir(name) / filename, staged.env_dir(name) / filename)
+        _copy_source(config.variables_path(), staged.variables_path())
+        for key, content in document.files.items():
+            _write_plain(directory / key, content)
+        for name in _shipped(document, "env"):
+            for filename in OPTIONAL_ENV_FILES:
+                if file_key("env", name, filename) not in document.files:
+                    (staged.env_dir(name) / filename).unlink(missing_ok=True)
+        with _relabeled(directory, str(config.root) + os.sep):
+            # Declarations first, local values second: the target's
+            # variables.local.txt may already hold a value for a name that only
+            # this import declares, and loading it earlier would refuse it.
+            declared = set(staged.load_variables().declared)
+            missing = [name for name in referenced if name not in declared]
+            text: str | None = None
+            if missing:
+                current = ""
+                if staged.variables_path().is_file():
+                    current = read_text_utf8(staged.variables_path(), exact_newlines=True)
+                text = _appended_variables(current, missing)
+                _write_plain(staged.variables_path(), text)
+            _copy_source(config.variables_local_path(), staged.variables_local_path())
+            staged.load_variables()
+        yield Staged(staged, missing, text)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def validate_staged(
+    config: ConfigRoot, staged: Staged, document: ExportDocument, options: ImportOptions
+) -> list[str]:
+    """Run ``stack edit``'s validators over each shipped item in the staged view.
+
+    :returns: Their warnings, relabeled to the target root, first occurrence kept.
+    """
+    prefix, replacement = str(staged.root.root) + os.sep, str(config.root) + os.sep
+    warnings: list[str] = []
+    with _relabeled(staged.root.root, replacement):
+        for name in _shipped(document, "profile"):
+            warnings += validate_profile(staged.root, name, strict=options.strict).warnings
+        for name in _shipped(document, "bundle"):
+            warnings += validate_bundle(staged.root, name, strict=options.strict).warnings
+        for name in _shipped(document, "env"):
+            warnings += validate_env(staged.root, name, strict=options.strict).warnings
+    return list(dict.fromkeys(_relabel_text(w, prefix, replacement) for w in warnings))

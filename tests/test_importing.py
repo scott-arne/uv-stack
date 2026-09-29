@@ -14,10 +14,14 @@ from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.operations.export import build_document, serialize_document
 from uv_stack.operations.importing import (
+    ImportOptions,
     check_document,
     document_root,
     load_document,
     read_document,
+    refuse_shadowing,
+    staged_root,
+    validate_staged,
 )
 
 
@@ -312,3 +316,115 @@ def test_overlong_bare_token_does_not_crash_on_stat(config_tree: ConfigRoot) -> 
     with document_root(document) as root:
         # Should not raise OSError; the long token is a package
         check_document(document, root)
+
+
+def _stage(config: ConfigRoot, data: dict[str, Any], strict: bool = False) -> list[str]:
+    document = _load(data)
+    with document_root(document) as root:
+        names = check_document(document, root)
+    refuse_shadowing(config, document)
+    with staged_root(config, document, names) as staged:
+        return validate_staged(config, staged, document, ImportOptions(strict=strict))
+
+
+def test_validator_refusal_names_the_target_path(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    (target.root / "profiles").mkdir(parents=True)
+    data = _raw(config_tree, "profile:ds")
+    data["files"]["profiles/ds.yaml"] = "includes: 3\n"
+    with pytest.raises(ConfigError) as caught:
+        _stage(target, data)
+    assert str(target.root) in caught.value.message
+    assert "uv-stack-" not in caught.value.message
+
+
+def test_bundle_self_reference_is_refused(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    data = _raw(config_tree, "bundle:standard")
+    data["files"]["bundles/standard.yaml"] = "includes:\n  - '@standard'\n  - profile:ds\n"
+    # The edited bundle no longer reaches these, and phase 1 would refuse them
+    # as unreachable before the validator ever saw the self-reference.
+    del data["files"]["profiles/chem.yaml"]
+    del data["files"]["profiles/utils.yaml"]
+    with pytest.raises(UvStackError, match="cannot include itself"):
+        _stage(target, data)
+
+
+def test_trailing_backslash_entry_is_refused(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    data = _raw(config_tree, "main")
+    data["files"]["envs/main/stack.txt"] = "@standard\nnumpy \\\n"
+    with pytest.raises(ConfigError):
+        _stage(target, data)
+
+
+def test_strict_reaches_the_validators(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    data = _raw(config_tree, "bundle:qsar")
+    _stage(target, data)
+    with pytest.raises(UvStackError):
+        _stage(target, data, strict=True)
+
+
+def test_cross_kind_shadowing_is_refused(config_tree: ConfigRoot) -> None:
+    data = _raw(config_tree, "profile:utils")
+    data["files"] = {"profiles/standard.yaml": "includes:\n  - rich\n"}
+    data["items"] = ["profile:standard"]
+    with pytest.raises(ConfigError, match="would shadow the existing bundle"):
+        refuse_shadowing(config_tree, _load(data))
+
+
+def test_a_same_name_pair_arriving_together_is_allowed(config_tree: ConfigRoot) -> None:
+    source = config_tree
+    (source.bundles_dir / "utils.yaml").write_text("includes:\n  - profile:utils\n")
+    data = _raw(source, "profile:utils", "bundle:utils")
+    # Checked against the source, which holds both files: without the
+    # arriving-together exemption each would shadow the other and raise.
+    refuse_shadowing(source, _load(data))
+
+
+def test_variables_are_appended_preserving_existing_lines(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.root.mkdir(parents=True)
+    target.variables_path().write_text("# mine\nHOME_DIR")
+    config_tree.variables_path().write_text("WORK\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${WORK}/pkg\n")
+    document = _load(_raw(config_tree, "profile:ds"))
+    with document_root(document) as root:
+        names = check_document(document, root)
+    with staged_root(target, document, names) as staged:
+        assert staged.missing_variables == ["WORK"]
+        assert staged.variables_text == "# mine\nHOME_DIR\nWORK\n"
+
+
+def test_a_local_value_for_an_incoming_name_is_accepted(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.root.mkdir(parents=True)
+    target.variables_path().write_text("HOME_DIR\n")
+    target.variables_local_path().write_text("WORK=/w\n")
+    config_tree.variables_path().write_text("WORK\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${WORK}/pkg\n")
+    document = _load(_raw(config_tree, "profile:ds"))
+    with document_root(document) as root:
+        names = check_document(document, root)
+    with staged_root(target, document, names) as staged:
+        assert staged.missing_variables == ["WORK"]
+        assert staged.root.load_variables().values["WORK"] == "/w"
+
+
+def test_a_local_value_nobody_declares_names_the_target(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.root.mkdir(parents=True)
+    target.variables_local_path().write_text("STRAY=/s\n")
+    document = _load(_raw(config_tree, "profile:utils"))
+    with pytest.raises(ConfigError) as caught:
+        with staged_root(target, document, []):
+            pass
+    assert str(target.root) in caught.value.message
+    assert "uv-stack-" not in caught.value.message
