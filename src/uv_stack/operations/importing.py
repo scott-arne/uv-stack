@@ -159,10 +159,10 @@ def _write_exclusive(path: Path, text: str, key: str) -> None:
     :param path: Target file path.
     :param text: Content to write.
     :param key: Document key (for error messages).
-    :raises ConfigError: When the file already exists.
+    :raises ConfigError: When the file already exists or cannot be created.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("x", encoding="utf-8", newline="") as file:
             file.write(text)
     except FileExistsError as error:
@@ -170,6 +170,13 @@ def _write_exclusive(path: Path, text: str, key: str) -> None:
             f"The document ships {key}, which names the same file on this machine "
             "as another shipped key.",
             hint=_ALIAS_HINT,
+        ) from error
+    except OSError as error:
+        raise ConfigError(
+            f"The document ships {key}, which this machine cannot store: "
+            f"{error.strerror or type(error).__name__}.",
+            hint="Shorten the name on the source machine, then re-create the document "
+            "with 'stack export'.",
         ) from error
 
 
@@ -184,13 +191,23 @@ class _DocumentOnlyRoot(ConfigRoot):
         """Return whether a profile exists, without statting invalid names."""
         if parse_file_key(file_key("profile", name)) is None:
             return False
-        return super().profile_exists(name)
+        try:
+            # Every shipped file was materialized, so a name that cannot be statted
+            # is not a shipped file.
+            return super().profile_exists(name)
+        except OSError:
+            return False
 
     def bundle_exists(self, name: str) -> bool:
         """Return whether a bundle exists, without statting invalid names."""
         if parse_file_key(file_key("bundle", name)) is None:
             return False
-        return super().bundle_exists(name)
+        try:
+            # Every shipped file was materialized, so a name that cannot be statted
+            # is not a shipped file.
+            return super().bundle_exists(name)
+        except OSError:
+            return False
 
 
 @contextmanager

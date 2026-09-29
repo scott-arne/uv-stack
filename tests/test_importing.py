@@ -269,3 +269,46 @@ def test_a_bundle_named_recursionerror_with_yaml_errors_is_not_misreported() -> 
         check_document(document, root)
     assert "Invalid YAML" in caught.value.message
     assert "nest too deeply" not in caught.value.message
+
+
+@pytest.mark.parametrize("kind", ["profile", "env"])
+def test_overlong_names_are_refused(kind: str) -> None:
+    """Names too long for the filesystem are refused at materialization."""
+    # 251 chars is too long for a filename; 300 is too long for a directory name
+    long_name = "p" * 251 if kind == "profile" else "p" * 300
+    if kind == "profile":
+        data = {
+            "format": "uv-stack-export",
+            "version": 1,
+            "created_by": "uv-stack 0.6.0",
+            "source_platform": "test",
+            "items": [f"profile:{long_name}"],
+            "files": {f"profiles/{long_name}.yaml": "includes:\n  - numpy\n"},
+            "seeds": {},
+        }
+    else:  # env
+        data = {
+            "format": "uv-stack-export",
+            "version": 1,
+            "created_by": "uv-stack 0.6.0",
+            "source_platform": "test",
+            "items": [f"env:{long_name}"],
+            "files": {f"envs/{long_name}/stack.txt": "numpy\n"},
+            "seeds": {},
+        }
+    document = load_document(json.dumps(data))
+    with pytest.raises(ConfigError, match="cannot store") as caught:
+        with document_root(document):
+            pass
+    assert "uv-stack-document-" not in caught.value.message
+
+
+def test_overlong_bare_token_does_not_crash_on_stat(config_tree: ConfigRoot) -> None:
+    """A bare token too long to stat is treated as a package, not OSError."""
+    data = _raw(config_tree, "profile:ds", "env:main")
+    long_token = "x" * 300
+    data["files"]["envs/main/stack.txt"] = f"@standard\n{long_token}\n"
+    document = _load(data)
+    with document_root(document) as root:
+        # Should not raise OSError; the long token is a package
+        check_document(document, root)
