@@ -10,6 +10,7 @@ it was.
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import shutil
@@ -570,3 +571,94 @@ def validate_staged(
         for name in _shipped(document, "env"):
             warnings += validate_env(staged.root, name, strict=options.strict).warnings
     return list(dict.fromkeys(_relabel_text(w, prefix, replacement) for w in warnings))
+
+
+STATUS_LABELS = {"new": "new", "identical": "identical", "different": "replace",
+                 "target-only": "remove"}
+
+
+@dataclass(frozen=True)
+class FileChange:
+    """One file's state: shipped text against this machine's copy."""
+
+    key: str
+    status: str
+    current: str | None
+    incoming: str | None
+
+
+class ConflictError(ConfigError):
+    """Different or target-only files met an import without ``--overwrite``."""
+
+    def __init__(self, conflicts: list[FileChange], found: dict[str, list[str]]) -> None:
+        super().__init__(
+            f"{len(conflicts)} file(s) differ from this machine's copy; nothing was written.",
+            hint="Review the differences above, then re-run with --overwrite to replace them.",
+        )
+        self.conflicts = conflicts
+        self.used_by = found
+
+
+def _read_target(path: Path) -> str | None:
+    if not os.path.lexists(path):
+        return None
+    require_regular_file(path)
+    return read_text_utf8(path, exact_newlines=True)
+
+
+def classify_changes(config: ConfigRoot, document: ExportDocument) -> list[FileChange]:
+    """Classify each shipped file, and each target-only optional env file.
+
+    Optional files are checked for every shipped environment, including an
+    orphan ``envs/<name>/`` without ``stack.txt`` left by an interrupted create.
+    """
+    changes = []
+    for key, incoming in document.files.items():
+        current = _read_target(config.root / key)
+        status = "new" if current is None else "identical" if current == incoming else "different"
+        changes.append(FileChange(key, status, current, incoming))
+    for name in _shipped(document, "env"):
+        for filename in OPTIONAL_ENV_FILES:
+            key = file_key("env", name, filename)
+            if key not in document.files:
+                current = _read_target(config.root / key)
+                if current is not None:
+                    changes.append(FileChange(key, "target-only", current, None))
+    return sorted(changes, key=lambda change: change.key)
+
+
+def _diff_lines(text: str) -> list[str]:
+    lines = text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n\\ No newline at end of file\n"
+    return lines
+
+
+def change_diff(change: FileChange) -> str:
+    """Return a unified diff of this machine's copy against the incoming text."""
+    return "".join(difflib.unified_diff(
+        _diff_lines(change.current or ""), _diff_lines(change.incoming or ""),
+        fromfile=f"{change.key} (this machine)", tofile=f"{change.key} (incoming)",
+    ))
+
+
+def used_by(config: ConfigRoot, keys: Iterable[str]) -> tuple[dict[str, list[str]], list[str]]:
+    """Map each profile or bundle key to the target environments that reach it.
+
+    :returns: Non-empty entries only, and a warning per environment that
+        does not resolve (its users cannot be known, which the user should see).
+    """
+    wanted = set(keys)
+    found: dict[str, list[str]] = {}
+    warnings: list[str] = []
+    for env in config.list_envs():
+        try:
+            resolved = Resolver(config).resolve(config.load_env(env).stack)
+        except UvStackError as error:
+            warnings.append(f"Cannot tell what environment '{env}' uses: {error.message}")
+            continue
+        reached = {file_key("profile", p) for p in resolved.profiles}
+        reached |= {file_key("bundle", b) for b in resolved.bundles}
+        for key in sorted(wanted & reached):
+            found.setdefault(key, []).append(env)
+    return found, warnings

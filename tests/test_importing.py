@@ -16,13 +16,17 @@ from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.operations.export import build_document, serialize_document
 from uv_stack.operations.importing import (
+    FileChange,
     ImportOptions,
+    change_diff,
     check_document,
+    classify_changes,
     document_root,
     load_document,
     read_document,
     refuse_shadowing,
     staged_root,
+    used_by,
     validate_staged,
 )
 
@@ -539,3 +543,50 @@ def test_a_single_linked_directory_still_stages(config_tree: ConfigRoot, tmp_pat
     target.root.mkdir()
     (target.root / "profiles").symlink_to(shared, target_is_directory=True)
     _stage(target, _raw(config_tree, "profile:utils"))
+
+
+def test_classify_new_identical_different(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    (target.root / "profiles").mkdir(parents=True)
+    target.profile_path("ds").write_text(config_tree.profile_path("ds").read_text())
+    target.profile_path("chem").write_text("includes:\n  - openeye\n")
+    document = _load(_raw(config_tree, "profile:ds", "profile:chem", "profile:utils"))
+    statuses = {c.key: c.status for c in classify_changes(target, document)}
+    assert statuses == {"profiles/chem.yaml": "different", "profiles/ds.yaml": "identical",
+                        "profiles/utils.yaml": "new"}
+
+
+@pytest.mark.parametrize("filename", ["python.txt", "micromamba.txt", "channels.txt"])
+@pytest.mark.parametrize("orphan", [False, True])
+def test_target_only_optional_file_is_a_removal(
+    config_tree: ConfigRoot, tmp_path: Path, filename: str, orphan: bool
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.env_dir("main").mkdir(parents=True)
+    if not orphan:
+        target.env_stack_path("main").write_text("@standard\n")
+    (target.env_dir("main") / filename).write_text("x\n")
+    (config_tree.env_dir("main") / filename).unlink()
+    changes = classify_changes(target, _load(_raw(config_tree, "main")))
+    removal = next(c for c in changes if c.key == f"envs/main/{filename}")
+    assert (removal.status, removal.current, removal.incoming) == ("target-only", "x\n", None)
+
+
+def test_non_regular_target_path_is_refused(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.profile_path("ds").mkdir(parents=True)
+    with pytest.raises(ConfigError, match="Not a regular file"):
+        classify_changes(target, _load(_raw(config_tree, "profile:ds")))
+
+
+def test_change_diff_keeps_brackets_and_marks_missing_newline() -> None:
+    change = FileChange("profiles/x.yaml", "different", "includes:\n  - a[b]", "includes:\n  - a\n")
+    text = change_diff(change)
+    assert "--- profiles/x.yaml (this machine)" in text
+    assert "+++ profiles/x.yaml (incoming)" in text
+    assert "-  - a[b]\n\\ No newline at end of file\n" in text
+
+
+def test_used_by_follows_bundles(config_tree: ConfigRoot) -> None:
+    found, warnings = used_by(config_tree, ["profiles/ds.yaml", "profiles/ghost.yaml"])
+    assert found == {"profiles/ds.yaml": ["main"]} and warnings == []
