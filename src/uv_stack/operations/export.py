@@ -155,6 +155,24 @@ def normalize_items(config: ConfigRoot, raw_items: Iterable[str]) -> list[str]:
     return sorted(items)
 
 
+def reference_key(kind: str, name: str) -> str:
+    """Return the file key for a profile or bundle reference.
+
+    :param kind: Either ``"profile"`` or ``"bundle"``.
+    :param name: The reference name.
+    :returns: The file key if valid.
+    :raises ConfigError: When the reference does not map to a valid file key.
+    """
+    key = file_key(kind, name)
+    if parse_file_key(key) is None:
+        noun = kind.capitalize()
+        raise ConfigError(
+            f"{noun} reference '{name}' does not map to a valid file key.",
+            hint=f"A {kind} reference must be a plain name, not a path.",
+        )
+    return key
+
+
 def closure(config: ConfigRoot, items: Iterable[str]) -> set[str]:
     """Return the file keys the normalized items reach.
 
@@ -179,21 +197,9 @@ def closure(config: ConfigRoot, items: Iterable[str]) -> set[str]:
             tokens.append(item)
     resolved = Resolver(config).resolve(tokens)
     for name in resolved.profiles:
-        key = file_key("profile", name)
-        if parse_file_key(key) is None:
-            raise ConfigError(
-                f"Profile reference '{name}' does not map to a valid file key.",
-                hint="A profile reference must be a plain name, not a path.",
-            )
-        keys.add(key)
+        keys.add(reference_key("profile", name))
     for name in resolved.bundles:
-        key = file_key("bundle", name)
-        if parse_file_key(key) is None:
-            raise ConfigError(
-                f"Bundle reference '{name}' does not map to a valid file key.",
-                hint="A bundle reference must be a plain name, not a path.",
-            )
-        keys.add(key)
+        keys.add(reference_key("bundle", name))
     return keys
 
 
