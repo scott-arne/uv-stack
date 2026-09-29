@@ -865,3 +865,32 @@ def test_diff_titles_differing_declared_layers_declared(config_tree, monkeypatch
     normalized = " ".join(output.split())
     assert "declared micromamba packages" in normalized
     assert "declared channels" in output
+
+
+def test_parse_lock_text_labels_errors_with_the_given_label() -> None:
+    from uv_stack.operations.diff import parse_lock_text
+
+    with pytest.raises(ConfigError, match=r"^seeds/main, line 2: cannot parse"):
+        parse_lock_text("numpy==1.26.4\nnot a requirement\n", "seeds/main")
+
+
+def test_parse_lock_text_labels_a_duplicate() -> None:
+    from uv_stack.operations.diff import parse_lock_text
+
+    with pytest.raises(ConfigError, match=r"^seeds/main"):
+        parse_lock_text("numpy==1.26.4\nnumpy==1.26.5\n", "seeds/main")
+
+
+def test_parse_lock_equals_parse_lock_text_of_the_file(tmp_path: Path) -> None:
+    from uv_stack.operations.diff import parse_lock, parse_lock_text
+
+    lock = tmp_path / "requirements.lock.txt"
+    lock.write_text("numpy==1.26.4\n-e ./pkg\n")
+    assert parse_lock(lock) == parse_lock_text(lock.read_text(), str(lock))
+
+
+def test_read_lock_text_refuses_a_directory(tmp_path: Path) -> None:
+    from uv_stack.operations.diff import read_lock_text
+
+    with pytest.raises(ConfigError, match="not a lock file"):
+        read_lock_text(tmp_path)
