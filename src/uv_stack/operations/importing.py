@@ -411,12 +411,7 @@ def _refuse_non_directory_blockers(config: ConfigRoot, document: ExportDocument)
     """
     # list_* report a non-directory container as empty, so the staged copy
     # would build a directory the real write cannot create.
-    dirs: set[Path] = set()
-    for key in document.files:
-        file_path = config.root / key
-        dirs.add(config.root)
-        dirs.update(file_path.parents)
-        dirs.discard(file_path)
+    dirs = {config.root / parent for key in document.files for parent in Path(key).parents}
     for path in sorted(dirs):
         if os.path.lexists(path) and not path.is_dir():
             raise ConfigError(
