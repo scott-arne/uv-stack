@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import tempfile
+import unicodedata
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -46,6 +47,10 @@ _REEXPORT_HINT = "Re-create the document with 'stack export' on the source machi
 _ALIAS_HINT = (
     "Two shipped names differ only in letter case or Unicode normalization, "
     "which this filesystem treats as one name; rename one on the source machine."
+)
+_FOLD_HINT = (
+    "Where a filesystem treats the two as one name, the bundle's bare name opens "
+    "the profile; rename one on the source machine."
 )
 
 
@@ -216,29 +221,6 @@ class _DocumentOnlyRoot(ConfigRoot):
             return False
 
 
-def _refuse_cross_kind_aliases(root: ConfigRoot, document: ExportDocument) -> None:
-    """Refuse a shipped profile that this machine would open for a shipped bundle.
-
-    :raises ConfigError: When a shipped bundle's name reaches a shipped profile
-        of another spelling.
-    """
-    # An exact-name pair reproduces the source's state; a pair differing only
-    # in case or normalization resolves differently where the filesystem folds.
-    profiles = _shipped(document, "profile")
-    for bundle in _shipped(document, "bundle"):
-        if bundle in profiles or not root.profile_exists(bundle):
-            continue
-        profile = next(
-            name for name in profiles
-            if os.path.samefile(root.profile_path(name), root.profile_path(bundle))
-        )
-        raise ConfigError(
-            f"Profile '{profile}' would shadow the shipped bundle '{bundle}': "
-            "this machine treats the two names as one.",
-            hint=_ALIAS_HINT,
-        )
-
-
 @contextmanager
 def document_root(document: ExportDocument) -> Iterator[ConfigRoot]:
     """Materialize the document's files as a temporary, document-only root.
@@ -250,9 +232,7 @@ def document_root(document: ExportDocument) -> Iterator[ConfigRoot]:
     try:
         for key, text in document.files.items():
             _write_exclusive(directory / key, text, key)
-        root = _DocumentOnlyRoot(directory)
-        _refuse_cross_kind_aliases(root, document)
-        yield root
+        yield _DocumentOnlyRoot(directory)
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 
@@ -395,13 +375,34 @@ def _shipped(document: ExportDocument, kind: str) -> list[str]:
     return sorted({k.name for k in map(parse_file_key, document.files) if k and k.kind == kind})
 
 
+def _caseless(name: str) -> str:
+    # Canonical caseless matching, computed rather than probed: a pair not yet
+    # on the target cannot be statted there, and whether the two names collide
+    # depends on the filesystem that will hold them, not on the one checking.
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", name).casefold())
+
+
 def refuse_shadowing(config: ConfigRoot, document: ExportDocument) -> None:
     """Refuse a profile or bundle that would shadow the other kind here.
 
     A same-name profile and bundle arriving together are allowed: the source
-    root already had them side by side.
+    root already had them side by side. A shipped pair whose names differ only
+    in letter case or Unicode normalization is refused, because a folding
+    filesystem would open the profile for the bundle's bare name.
+
+    :raises ConfigError: When a shipped pair folds together, or a shipped
+        profile or bundle would shadow an existing one of the other kind.
     """
-    profiles, bundles = set(_shipped(document, "profile")), set(_shipped(document, "bundle"))
+    shipped_profiles, shipped_bundles = _shipped(document, "profile"), _shipped(document, "bundle")
+    for bundle in shipped_bundles:
+        for profile in shipped_profiles:
+            if profile != bundle and _caseless(profile) == _caseless(bundle):
+                raise ConfigError(
+                    f"Profile '{profile}' would shadow the shipped bundle '{bundle}': "
+                    "the names differ only in letter case or Unicode normalization.",
+                    hint=_FOLD_HINT,
+                )
+    profiles, bundles = set(shipped_profiles), set(shipped_bundles)
     for name in sorted(profiles - bundles):
         if config.bundle_exists(name):
             raise ConfigError(

@@ -203,24 +203,30 @@ def test_a_bare_case_variant_resolves_to_an_unshipped_key(
     assert "does not ship" in caught.value.message
 
 
-@pytest.mark.parametrize(("bundle", "refused"), [("UTILS", True), ("utils", False)])
-def test_a_case_aliased_profile_and_bundle_are_refused(
-    config_tree: ConfigRoot, bundle: str, refused: bool
+@pytest.mark.parametrize(
+    ("profile", "bundle", "refused"),
+    [("utils", "UTILS", True), ("caf\u00e9", "cafe\u0301", True), ("utils", "utils", False)],
+)
+def test_a_profile_and_bundle_that_fold_together_are_refused(
+    config_tree: ConfigRoot, tmp_path: Path, profile: str, bundle: str, refused: bool
 ) -> None:
-    """A shipped profile may not shadow a shipped bundle of another spelling."""
-    if not _case_insensitive(Path(tempfile.gettempdir())):
-        pytest.skip("filesystem is case-sensitive")
-    config_tree.bundle_path(bundle).write_text("includes:\n  - profile:utils\n")
-    document = _load(_raw(config_tree, "profile:utils", f"bundle:{bundle}"))
+    """A shipped pair that folds together is refused whatever this filesystem folds."""
+    data = _raw(config_tree, "profile:utils")
+    data["files"] = {
+        f"profiles/{profile}.yaml": "includes:\n  - rich\n",
+        f"bundles/{bundle}.yaml": f"includes:\n  - profile:{profile}\n",
+    }
+    data["items"] = sorted([f"profile:{profile}", f"bundle:{bundle}"])
+    target = ConfigRoot(tmp_path / "target")
+    target.root.mkdir()
     if not refused:
-        with document_root(document):
-            return
+        refuse_shadowing(target, _load(data))
+        return
     with pytest.raises(ConfigError) as caught:
-        with document_root(document):
-            pass
+        refuse_shadowing(target, _load(data))
     assert caught.value.message == (
-        "Profile 'utils' would shadow the shipped bundle 'UTILS': "
-        "this machine treats the two names as one."
+        f"Profile '{profile}' would shadow the shipped bundle '{bundle}': "
+        "the names differ only in letter case or Unicode normalization."
     )
 
 
