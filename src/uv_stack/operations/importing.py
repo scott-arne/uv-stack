@@ -295,7 +295,9 @@ def check_document(document: ExportDocument, doc_root: ConfigRoot) -> list[str]:
             _refuse_escaping_references(document, doc_root)
             reached = closure(doc_root, document.items)
     except (RecursionError, ConfigError) as error:
-        if isinstance(error, RecursionError) or "RecursionError" in str(error):
+        # ConfigError is inspected because the YAML loader wraps a RecursionError
+        # hit while loading a bundle, which is where the limit is normally crossed.
+        if isinstance(error, RecursionError) or isinstance(error.__cause__, RecursionError):
             raise ConfigError(
                 "The document's bundles nest too deeply to resolve.", hint=_REEXPORT_HINT
             ) from None

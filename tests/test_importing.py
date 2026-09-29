@@ -251,3 +251,21 @@ def test_deeply_nested_bundle_chain_is_refused() -> None:
     document = load_document(json.dumps(data))
     with document_root(document) as root, pytest.raises(ConfigError, match="nest too deeply"):
         check_document(document, root)
+
+
+def test_a_bundle_named_recursionerror_with_yaml_errors_is_not_misreported() -> None:
+    """A bundle named RecursionError with YAML errors reports the YAML error."""
+    data = {
+        "format": "uv-stack-export",
+        "version": 1,
+        "created_by": "uv-stack 0.6.0",
+        "source_platform": "test",
+        "items": ["bundle:RecursionError"],
+        "files": {"bundles/RecursionError.yaml": "includes: [\n"},
+        "seeds": {},
+    }
+    document = load_document(json.dumps(data))
+    with document_root(document) as root, pytest.raises(ConfigError) as caught:
+        check_document(document, root)
+    assert "Invalid YAML" in caught.value.message
+    assert "nest too deeply" not in caught.value.message
