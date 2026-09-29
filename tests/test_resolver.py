@@ -96,6 +96,16 @@ def test_classify_dedups_preserving_order(config_tree: ConfigRoot):
     assert out == ["profile:ds", "bundle:standard"]
 
 
+def test_resolve_records_bundles_in_visit_order(config_tree: ConfigRoot) -> None:
+    assert Resolver(config_tree).resolve(["@qsar"]).bundles == ["qsar", "standard"]
+
+
+def test_resolve_lists_a_bundle_cycle_once(config_tree: ConfigRoot) -> None:
+    (config_tree.bundles_dir / "a.yaml").write_text("includes:\n  - '@b'\n")
+    (config_tree.bundles_dir / "b.yaml").write_text("includes:\n  - '@a'\n  - rich\n")
+    assert Resolver(config_tree).resolve(["@a"]).bundles == ["a", "b"]
+
+
 def test_resolve_packages_expands_to_flat_list(config_tree: ConfigRoot):
     out = Resolver(config_tree).resolve_packages(["standard", "umap-learn"])
     # ds -> numpy, pandas; chem -> rdkit; utils -> rich; then inline umap-learn.

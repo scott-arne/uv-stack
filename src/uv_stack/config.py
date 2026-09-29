@@ -350,6 +350,10 @@ class ConfigRoot:
         """
         return self.locks_dir / "probe.lock"
 
+    def import_lock_path(self) -> Path:
+        """Return the root-scoped lock that serializes ``stack import`` runs."""
+        return self.locks_dir / "import.lock"
+
     def project_lock_path(self, project_dir: Path) -> Path:
         """Lock covering one tracked project's ``[tool.uv-stack]`` ledger.
 

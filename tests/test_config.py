@@ -51,6 +51,10 @@ def test_discover_uv_stack_root_wins_over_legacy(monkeypatch, tmp_path: Path):
     assert cfg.root == (tmp_path / "stack-root")
 
 
+def test_import_lock_path_is_in_the_locks_dir(config_tree: ConfigRoot) -> None:
+    assert config_tree.import_lock_path() == config_tree.locks_dir / "import.lock"
+
+
 def test_discover_falls_back_to_legacy_uv_env_root(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("UV_STACK_ROOT", raising=False)
     monkeypatch.setenv("UV_ENV_ROOT", str(tmp_path / "legacy-root"))
