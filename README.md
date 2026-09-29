@@ -737,6 +737,35 @@ ordinary named requirements is portable, and a project whose stack pulls in any
 local source — an editable or a plain path — is machine-bound in that table.
 Closing that gap would mean rewriting uv's output behind its back.
 
+## Moving environments between machines
+
+### stack export
+
+`stack export [ITEMS...]` writes the named environments, profiles, and bundles
+as a single JSON document. Each ITEM is `env:NAME`, `profile:NAME`,
+`bundle:NAME`, `@NAME`, or a bare NAME that names exactly one kind. With no
+ITEMS, the whole config root is exported.
+
+Everything the named items reach is included: all referenced profiles and
+bundles, plus each environment's lock file as a seed. The document goes to
+standard output by default; pass `-o FILE` to write it to a file instead.
+
+When standard output is the destination, only the document is written there.
+Warnings (such as the absolute-path notice below) go to standard error so they
+do not corrupt the JSON stream.
+
+**Absolute paths are not portable.** If a profile or environment includes an
+editable install (`-e /src/foo`) or a local path (`/wheels/bar.whl`), those
+paths must exist at the same locations on the target machine or the import will
+fail. Use `${NAME}` variable references to make paths portable across machines.
+
+**Pull from another machine.** You can export and import in one command by
+piping over ssh:
+
+```bash
+ssh HOST stack export ITEMS | stack import -
+```
+
 ## Tips and gotchas
 
 - **Edit sources, not generated files.** `requirements.in`,

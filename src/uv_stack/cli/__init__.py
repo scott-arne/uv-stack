@@ -194,7 +194,7 @@ click.rich_click.COMMAND_GROUPS = {
         # 'sync' is cross-cutting for the same reason 'create' is: it targets
         # environments and projects both, so filing it under either would put
         # it under a destination it only partly serves.
-        {"name": "Sync", "commands": ["sync"]},
+        {"name": "Sync", "commands": ["sync", "export"]},
         {"name": "Inspection", "commands": ["list", "show", "resolve", "status", "diff"]},
         {"name": "Maintenance", "commands": ["init", "doctor", "config", "completion"]},
     ]
@@ -261,12 +261,14 @@ def _register() -> None:
         show,
         status_cmd,
         sync_cmd,
+        transfer_cmd,
         upgrade,
     )
     from uv_stack.cli import edit as edit_cmd
 
     cli.add_command(upgrade.upgrade)
     cli.add_command(sync_cmd.sync)
+    cli.add_command(transfer_cmd.export_cmd)
     cli.add_command(create.create)
     cli.add_command(edit_cmd.edit)
     cli.add_command(refresh_cmd.refresh)
