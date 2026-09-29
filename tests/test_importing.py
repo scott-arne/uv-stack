@@ -151,31 +151,28 @@ def _case_insensitive(root: Path) -> bool:
         probe.rmdir()
 
 
-# B1: Bare tokens must not stat outside the document-only root
-@pytest.mark.parametrize("token", ["../../../outside", "will_be_absolute"])
+@pytest.mark.parametrize("absolute", [False, True])
 def test_bare_traversal_tokens_are_packages_not_probes(
-    tmp_path: Path, config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch, token: str
+    tmp_path: Path, config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch, absolute: bool
 ) -> None:
+    """Bare tokens with path separators or absolute paths are packages, not probes."""
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
     outside = tmp_path / "outside.yaml"
     outside.write_text("includes:\n  - rich\n")
     data = _raw(config_tree, "main")
-    # Make the second token absolute
-    if token == "will_be_absolute":
-        token = str(tmp_path / "outside")
+    token = str(tmp_path / "outside") if absolute else "../../../outside"
     data["files"]["envs/main/stack.txt"] = f"@standard\n{token}\n"
     document = _load(data)
     with document_root(document) as root:
-        # Should not raise; token is treated as a package
         check_document(document, root)
 
 
-# B2a: Case-aliasing keys must refuse at document_root time
 def test_case_aliased_keys_are_refused_at_materialization(
     config_tree: ConfigRoot,
 ) -> None:
+    """Case-aliasing keys refuse at materialization time."""
     if not _case_insensitive(Path(tempfile.gettempdir())):
         pytest.skip("filesystem is case-sensitive")
     data = _raw(config_tree, "profile:utils")
@@ -184,13 +181,13 @@ def test_case_aliased_keys_are_refused_at_materialization(
     with pytest.raises(ConfigError) as caught:
         with document_root(document):
             pass
-    assert "profiles/Utils.yaml" in caught.value.message or "Utils.yaml" in caught.value.message
+    assert "profiles/Utils.yaml" in caught.value.message
 
 
-# B2b: Reached-but-not-shipped keys (via case aliasing) must be refused
 def test_a_bare_case_variant_resolves_to_an_unshipped_key(
     config_tree: ConfigRoot,
 ) -> None:
+    """A bare reference that aliases a shipped name is refused."""
     if not _case_insensitive(Path(tempfile.gettempdir())):
         pytest.skip("filesystem is case-sensitive")
     data = _raw(config_tree, "main")
@@ -201,25 +198,26 @@ def test_a_bare_case_variant_resolves_to_an_unshipped_key(
     assert "does not ship" in caught.value.message
 
 
-# B3: Large integers and deep nesting must not escape as tracebacks
 def test_a_huge_integer_is_refused_as_invalid_json() -> None:
+    """Huge integers that exceed the digit limit are refused."""
     data = '{"format": "uv-stack-export", "version": ' + "1" * 5000 + "}"
     with pytest.raises(ConfigError, match="not valid JSON"):
         load_document(data)
 
 
 def test_deeply_nested_json_is_refused() -> None:
+    """Deeply nested JSON that triggers RecursionError is refused."""
     data = "[" * 100_000 + "]" * 100_000
     with pytest.raises(ConfigError, match="not valid JSON"):
         load_document(data)
 
 
-# B4: Lone surrogates must be refused before schema validation
 @pytest.mark.parametrize(
     "location",
     ["file_value", "file_key", "created_by"],
 )
 def test_lone_surrogates_are_refused(config_tree: ConfigRoot, location: str) -> None:
+    """Lone surrogates in JSON escapes are detected and refused."""
     data = _raw(config_tree, "main")
     if location == "file_value":
         data["files"]["envs/main/stack.txt"] = "@standard\n\ud800\n"
@@ -228,7 +226,6 @@ def test_lone_surrogates_are_refused(config_tree: ConfigRoot, location: str) -> 
         data["items"].append("profile:\ud800")
     else:  # created_by
         data["created_by"] = "uv-stack \ud800 1.0"
-    # Use default ensure_ascii=True so surrogate becomes \ud800 escape in ASCII
     text = json.dumps(data)
     with pytest.raises(ConfigError, match="not valid Unicode"):
         load_document(text)

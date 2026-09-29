@@ -37,6 +37,10 @@ from uv_stack.resolver import Resolver
 from uv_stack.variables import referenced_names
 
 _REEXPORT_HINT = "Re-create the document with 'stack export' on the source machine."
+_ALIAS_HINT = (
+    "Two shipped names differ only in letter case or Unicode normalization, "
+    "which this filesystem treats as one name; rename one on the source machine."
+)
 
 
 def read_document(source: str, stdin: BinaryIO) -> str:
@@ -65,20 +69,12 @@ def load_document(text: str) -> ExportDocument:
     """
     try:
         data = json.loads(text)
-    except UnicodeEncodeError as error:
-        # A JSON escape can carry what UTF-8 input cannot (lone surrogates).
-        raise ConfigError(
-            f"The document holds text that is not valid Unicode: {error}", hint=_REEXPORT_HINT
-        ) from error
     except (ValueError, RecursionError) as error:
-        # ValueError covers JSONDecodeError (a subclass) and huge integers.
-        # RecursionError covers deeply nested structures.
+        # ValueError covers JSONDecodeError and huge integers; RecursionError covers deep nesting.
         raise ConfigError(
             f"The document is not valid JSON: {error}", hint=_REEXPORT_HINT
         ) from error
-    # Round-trip to detect lone surrogates before the data reaches schema validation.
-    # A JSON escape can spell \ud800 in valid UTF-8 input, which would later fail
-    # in _write_plain with UnicodeEncodeError.
+    # A JSON escape can spell a lone surrogate that UTF-8 input cannot carry.
     try:
         json.dumps(data, ensure_ascii=False).encode("utf-8")
     except UnicodeEncodeError as error:
@@ -173,13 +169,12 @@ def _write_exclusive(path: Path, text: str, key: str) -> None:
         raise ConfigError(
             f"The document ships {key}, which names the same file on this machine "
             "as another shipped key.",
-            hint="Two shipped names differ only in letter case or Unicode normalization, "
-            "which this filesystem treats as one name; rename one on the source machine.",
+            hint=_ALIAS_HINT,
         ) from error
 
 
 class _DocumentOnlyRoot(ConfigRoot):
-    """A ConfigRoot that refuses bare tokens with invalid names.
+    """Answer 'no such profile/bundle' without a stat for invalid names.
 
     The document ships only valid keys, so answering without a stat keeps bare
     traversal tokens (e.g. ../../../x) from probing outside the root.
@@ -187,14 +182,12 @@ class _DocumentOnlyRoot(ConfigRoot):
 
     def profile_exists(self, name: str) -> bool:
         """Return whether a profile exists, without statting invalid names."""
-        from uv_stack.operations.export import file_key, parse_file_key
         if parse_file_key(file_key("profile", name)) is None:
             return False
         return super().profile_exists(name)
 
     def bundle_exists(self, name: str) -> bool:
         """Return whether a bundle exists, without statting invalid names."""
-        from uv_stack.operations.export import file_key, parse_file_key
         if parse_file_key(file_key("bundle", name)) is None:
             return False
         return super().bundle_exists(name)
@@ -312,7 +305,8 @@ def check_document(document: ExportDocument, doc_root: ConfigRoot) -> list[str]:
         raise ConfigError(
             f"The document's items reach {len(unshipped)} file(s) it does not ship: "
             f"{', '.join(unshipped)}.",
-            hint="Two shipped names differ only in letter case or Unicode normalization, "
-            "which this filesystem treats as one name; rename one on the source machine.",
+            hint="A reference that differs from a shipped name only in letter case or Unicode "
+            "normalization names that file on this filesystem; "
+            "fix the reference on the source machine.",
         )
     return referenced_variables(doc_root, document.files)
