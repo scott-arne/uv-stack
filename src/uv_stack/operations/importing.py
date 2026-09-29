@@ -216,6 +216,29 @@ class _DocumentOnlyRoot(ConfigRoot):
             return False
 
 
+def _refuse_cross_kind_aliases(root: ConfigRoot, document: ExportDocument) -> None:
+    """Refuse a shipped profile that this machine would open for a shipped bundle.
+
+    :raises ConfigError: When a shipped bundle's name reaches a shipped profile
+        of another spelling.
+    """
+    # An exact-name pair reproduces the source's state; a pair differing only
+    # in case or normalization resolves differently where the filesystem folds.
+    profiles = _shipped(document, "profile")
+    for bundle in _shipped(document, "bundle"):
+        if bundle in profiles or not root.profile_exists(bundle):
+            continue
+        profile = next(
+            name for name in profiles
+            if os.path.samefile(root.profile_path(name), root.profile_path(bundle))
+        )
+        raise ConfigError(
+            f"Profile '{profile}' would shadow the shipped bundle '{bundle}': "
+            "this machine treats the two names as one.",
+            hint=_ALIAS_HINT,
+        )
+
+
 @contextmanager
 def document_root(document: ExportDocument) -> Iterator[ConfigRoot]:
     """Materialize the document's files as a temporary, document-only root.
@@ -227,7 +250,9 @@ def document_root(document: ExportDocument) -> Iterator[ConfigRoot]:
     try:
         for key, text in document.files.items():
             _write_exclusive(directory / key, text, key)
-        yield _DocumentOnlyRoot(directory)
+        root = _DocumentOnlyRoot(directory)
+        _refuse_cross_kind_aliases(root, document)
+        yield root
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 

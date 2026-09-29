@@ -203,6 +203,27 @@ def test_a_bare_case_variant_resolves_to_an_unshipped_key(
     assert "does not ship" in caught.value.message
 
 
+@pytest.mark.parametrize(("bundle", "refused"), [("UTILS", True), ("utils", False)])
+def test_a_case_aliased_profile_and_bundle_are_refused(
+    config_tree: ConfigRoot, bundle: str, refused: bool
+) -> None:
+    """A shipped profile may not shadow a shipped bundle of another spelling."""
+    if not _case_insensitive(Path(tempfile.gettempdir())):
+        pytest.skip("filesystem is case-sensitive")
+    config_tree.bundle_path(bundle).write_text("includes:\n  - profile:utils\n")
+    document = _load(_raw(config_tree, "profile:utils", f"bundle:{bundle}"))
+    if not refused:
+        with document_root(document):
+            return
+    with pytest.raises(ConfigError) as caught:
+        with document_root(document):
+            pass
+    assert caught.value.message == (
+        "Profile 'utils' would shadow the shipped bundle 'UTILS': "
+        "this machine treats the two names as one."
+    )
+
+
 def test_a_huge_integer_is_refused_as_invalid_json() -> None:
     """Huge integers that exceed the digit limit are refused."""
     data = '{"format": "uv-stack-export", "version": ' + "1" * 5000 + "}"
