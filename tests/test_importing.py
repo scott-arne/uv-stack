@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -428,3 +429,16 @@ def test_a_local_value_nobody_declares_names_the_target(
             pass
     assert str(target.root) in caught.value.message
     assert "uv-stack-" not in caught.value.message
+
+
+@pytest.mark.parametrize(("blocker", "item"), [("profiles", "profile:ds"), ("envs/main", "main")])
+def test_a_file_where_a_directory_belongs_is_refused(
+    config_tree: ConfigRoot, tmp_path: Path, blocker: str, item: str
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    (target.root / blocker).parent.mkdir(parents=True, exist_ok=True)
+    (target.root / blocker).write_text("")
+    pattern = f"^Not a directory: {re.escape(str(target.root / blocker))}$"
+    with pytest.raises(ConfigError, match=pattern):
+        _stage(target, _raw(config_tree, item))
+    assert (target.root / blocker).is_file()

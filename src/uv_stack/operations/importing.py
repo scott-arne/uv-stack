@@ -404,6 +404,27 @@ def _appended_variables(current: str, missing: list[str]) -> str:
     return current + "".join(f"{name}\n" for name in missing)
 
 
+def _refuse_non_directory_blockers(config: ConfigRoot, document: ExportDocument) -> None:
+    """Refuse when a file exists where the import needs a directory.
+
+    :raises ConfigError: When a path that must be a directory exists but is not.
+    """
+    # list_* report a non-directory container as empty, so the staged copy
+    # would build a directory the real write cannot create.
+    dirs: set[Path] = set()
+    for key in document.files:
+        file_path = config.root / key
+        dirs.add(config.root)
+        dirs.update(file_path.parents)
+        dirs.discard(file_path)
+    for path in sorted(dirs):
+        if os.path.lexists(path) and not path.is_dir():
+            raise ConfigError(
+                f"Not a directory: {path}",
+                hint="Remove or rename whatever is at that path.",
+            )
+
+
 @contextmanager
 def staged_root(
     config: ConfigRoot, document: ExportDocument, referenced: list[str]
@@ -415,6 +436,7 @@ def staged_root(
     environment's optional files the document does not ship, so the staged
     view is exactly what a successful ``--overwrite`` import would leave.
     """
+    _refuse_non_directory_blockers(config, document)
     directory = Path(os.path.realpath(tempfile.mkdtemp(prefix="uv-stack-staged-")))
     staged = ConfigRoot(directory)
     try:
