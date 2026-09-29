@@ -65,10 +65,29 @@ def load_document(text: str) -> ExportDocument:
     """
     try:
         data = json.loads(text)
-    except json.JSONDecodeError as error:
+    except UnicodeEncodeError as error:
+        # A JSON escape can carry what UTF-8 input cannot (lone surrogates).
+        raise ConfigError(
+            f"The document holds text that is not valid Unicode: {error}", hint=_REEXPORT_HINT
+        ) from error
+    except (ValueError, RecursionError) as error:
+        # ValueError covers JSONDecodeError (a subclass) and huge integers.
+        # RecursionError covers deeply nested structures.
         raise ConfigError(
             f"The document is not valid JSON: {error}", hint=_REEXPORT_HINT
         ) from error
+    # Round-trip to detect lone surrogates before the data reaches schema validation.
+    # A JSON escape can spell \ud800 in valid UTF-8 input, which would later fail
+    # in _write_plain with UnicodeEncodeError.
+    try:
+        json.dumps(data, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ConfigError(
+            f"The document holds text that is not valid Unicode: {error}", hint=_REEXPORT_HINT
+        ) from error
+    except RecursionError:
+        # No valid export document is this deep.
+        raise ConfigError("The document is not valid JSON.", hint=_REEXPORT_HINT) from None
     if not isinstance(data, dict):
         raise ConfigError(
             f"Expected a JSON object, got {type(data).__name__}.", hint=_REEXPORT_HINT
@@ -138,6 +157,49 @@ def _write_plain(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="")
 
 
+def _write_exclusive(path: Path, text: str, key: str) -> None:
+    """Write a file exclusively; refuse if it already exists (case aliasing).
+
+    :param path: Target file path.
+    :param text: Content to write.
+    :param key: Document key (for error messages).
+    :raises ConfigError: When the file already exists.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="utf-8", newline="") as file:
+            file.write(text)
+    except FileExistsError as error:
+        raise ConfigError(
+            f"The document ships {key}, which names the same file on this machine "
+            "as another shipped key.",
+            hint="Two shipped names differ only in letter case or Unicode normalization, "
+            "which this filesystem treats as one name; rename one on the source machine.",
+        ) from error
+
+
+class _DocumentOnlyRoot(ConfigRoot):
+    """A ConfigRoot that refuses bare tokens with invalid names.
+
+    The document ships only valid keys, so answering without a stat keeps bare
+    traversal tokens (e.g. ../../../x) from probing outside the root.
+    """
+
+    def profile_exists(self, name: str) -> bool:
+        """Return whether a profile exists, without statting invalid names."""
+        from uv_stack.operations.export import file_key, parse_file_key
+        if parse_file_key(file_key("profile", name)) is None:
+            return False
+        return super().profile_exists(name)
+
+    def bundle_exists(self, name: str) -> bool:
+        """Return whether a bundle exists, without statting invalid names."""
+        from uv_stack.operations.export import file_key, parse_file_key
+        if parse_file_key(file_key("bundle", name)) is None:
+            return False
+        return super().bundle_exists(name)
+
+
 @contextmanager
 def document_root(document: ExportDocument) -> Iterator[ConfigRoot]:
     """Materialize the document's files as a temporary, document-only root.
@@ -148,8 +210,8 @@ def document_root(document: ExportDocument) -> Iterator[ConfigRoot]:
     directory = Path(os.path.realpath(tempfile.mkdtemp(prefix="uv-stack-document-")))
     try:
         for key, text in document.files.items():
-            _write_plain(directory / key, text)
-        yield ConfigRoot(directory)
+            _write_exclusive(directory / key, text, key)
+        yield _DocumentOnlyRoot(directory)
     finally:
         shutil.rmtree(directory, ignore_errors=True)
 
@@ -237,11 +299,20 @@ def check_document(document: ExportDocument, doc_root: ConfigRoot) -> list[str]:
     with _relabeled(doc_root.root, ""):
         _refuse_escaping_references(document, doc_root)
         reached = closure(doc_root, document.items)
-    extra = sorted(set(document.files) - reached)
+    shipped = set(document.files)
+    extra = sorted(shipped - reached)
     if extra:
         raise ConfigError(
             f"The document ships {len(extra)} unreachable file(s) its items do not reach: "
             f"{', '.join(extra)}.",
             hint=_REEXPORT_HINT,
+        )
+    unshipped = sorted(reached - shipped)
+    if unshipped:
+        raise ConfigError(
+            f"The document's items reach {len(unshipped)} file(s) it does not ship: "
+            f"{', '.join(unshipped)}.",
+            hint="Two shipped names differ only in letter case or Unicode normalization, "
+            "which this filesystem treats as one name; rename one on the source machine.",
         )
     return referenced_variables(doc_root, document.files)
