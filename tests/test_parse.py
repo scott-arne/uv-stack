@@ -3,7 +3,13 @@ from pathlib import Path
 import pytest
 
 from uv_stack.errors import ConfigError
-from uv_stack.parse import clean_line, first_clean_line, read_clean_lines, requirement_name
+from uv_stack.parse import (
+    clean_line,
+    editable_target,
+    first_clean_line,
+    read_clean_lines,
+    requirement_name,
+)
 
 
 def test_clean_line_strips_comment_and_whitespace():
@@ -110,3 +116,9 @@ def test_direct_reference_is_owned_but_not_removable():
     entry = "torch @ https://example.invalid/torch-2.0-py3-none-any.whl"
     assert ownership_name(entry) == "torch"
     assert requirement_name(entry) is None
+
+
+def test_editable_target_extracts_the_path() -> None:
+    assert editable_target("-e ./pkg") == "./pkg"
+    assert editable_target("--editable=/src/pkg") == "/src/pkg"
+    assert editable_target("numpy") is None
