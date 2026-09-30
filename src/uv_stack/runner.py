@@ -8,7 +8,9 @@ is the single mock point for the otherwise side-effect-free core.
 
 from __future__ import annotations
 
+import codecs
 import errno
+import io
 import os
 import re
 import subprocess
@@ -18,9 +20,9 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
-from uv_stack.errors import ToolError
+from uv_stack.errors import ToolError, UvStackError
 from uv_stack.hints import render_positional_arg
 
 
@@ -246,27 +248,31 @@ class SubprocessRunner:
     def run_with_input(self, command: Command, text: str) -> tuple[int, str]:
         """Run a command with ``text`` on its stdin, streaming its stderr.
 
-        A writer thread feeds stdin while this thread drains stderr, so a
-        child that fills the stderr pipe before reading stdin cannot
-        deadlock. A child that exits without reading gets a broken pipe,
-        which is expected and swallowed: its exit status says what happened.
+        A writer thread feeds stdin while this thread drains stderr as it
+        arrives in bounded chunks, so a child that fills the stderr pipe before
+        reading stdin cannot deadlock, and newline-free output is forwarded
+        immediately. A bounded tail is kept for exit-status hints. A child that
+        exits without reading gets a broken pipe, which is expected and
+        swallowed: its exit status says what happened.
 
         :returns: The exit status and the last stderr lines, for exit-status hints.
         :raises ToolError: When the command cannot be started.
+        :raises UvStackError: When a thread cannot be started to feed stdin.
         """
         try:
             process = subprocess.Popen(
                 command.args, cwd=command.cwd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace",
             )
         except OSError as error:
             raise _spawn_error(command, error) from error
+
+        data = text.encode("utf-8", errors="replace")
         failures: list[BaseException] = []
 
         def feed() -> None:
             assert process.stdin is not None
             try:
-                process.stdin.write(text)
+                process.stdin.write(data)
             except BrokenPipeError:
                 pass
             except BaseException as error:  # re-raised on the calling thread below
@@ -280,14 +286,32 @@ class SubprocessRunner:
                     failures.append(error)
 
         writer = threading.Thread(target=feed, name="uv-stack-stdin", daemon=True)
-        writer.start()
-        tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
         assert process.stderr is not None
+        stderr = cast(io.BufferedReader, process.stderr)
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        captured = bytearray()
+        cap = _STDERR_TAIL_LINES * 1024
         try:
-            for line in process.stderr:
-                sys.stderr.write(line)
+            try:
+                writer.start()
+            except RuntimeError as error:
+                raise UvStackError(
+                    f"Could not start a thread to feed {command.args[0]}'s stdin: {error}"
+                ) from error
+            while True:
+                chunk = stderr.read1(65536)
+                if not chunk:
+                    break
+                decoded = decoder.decode(chunk, False)
+                sys.stderr.write(decoded)
                 sys.stderr.flush()
-                tail.append(line.rstrip("\n"))
+                captured += chunk
+                if len(captured) > cap:
+                    del captured[:-cap]
+            final = decoder.decode(b"", True)
+            if final:
+                sys.stderr.write(final)
+                sys.stderr.flush()
         except BaseException:
             # Kill before joining: a writer blocked on a full stdin pipe only
             # returns once the child is gone and its pipe breaks.
@@ -295,11 +319,14 @@ class SubprocessRunner:
             raise
         finally:
             status = process.wait()
-            writer.join()
+            if writer.ident is not None:
+                writer.join()
+            assert process.stdin is not None
+            process.stdin.close()
             process.stderr.close()
         if failures:
             raise failures[0]
-        return status, "\n".join(tail)
+        return status, _tail(captured.decode("utf-8", errors="replace"))
 
     @staticmethod
     def _run_with_pty(command: Command) -> tuple[int, str]:

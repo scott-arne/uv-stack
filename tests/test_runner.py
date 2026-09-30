@@ -10,9 +10,10 @@ from typing import Any
 
 import pytest
 
-from uv_stack.errors import ToolError
+from uv_stack.errors import ToolError, UvStackError
 from uv_stack.runner import (
     _PTY_AVAILABLE,
+    _STDERR_TAIL_LINES,
     Command,
     CommandResult,
     InteractiveRunner,
@@ -375,7 +376,9 @@ def test_run_with_input_child_exits_without_reading(capsys: pytest.CaptureFixtur
     status, _ = SubprocessRunner().run_with_input(_py("import sys; sys.exit(2)"), "x" * 1_000_000)
     assert status == 2
     assert threading.active_count() == before
-    assert "Traceback" not in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "Exception ignored" not in err
 
 
 def test_run_with_input_keeps_the_last_20_stderr_lines(capsys: pytest.CaptureFixture[str]) -> None:
@@ -401,10 +404,10 @@ class _ExplodingStream:
 def test_run_with_input_reaps_the_child_when_streaming_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    spawned: list[subprocess.Popen[str]] = []
+    spawned: list[subprocess.Popen[bytes]] = []
     real_popen = subprocess.Popen
 
-    def spy(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+    def spy(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
         spawned.append(real_popen(*args, **kwargs))
         return spawned[-1]
 
@@ -420,6 +423,124 @@ def test_run_with_input_reaps_the_child_when_streaming_fails(
     assert time.monotonic() - started < 30
     assert spawned[0].returncode is not None
     assert threading.active_count() == before
+
+
+def test_run_with_input_forwards_unterminated_stderr_before_exit(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flag = tmp_path / "seen"
+
+    class RecordingStream:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def write(self, chunk: str) -> int:
+            self.text += chunk
+            if "partial" in self.text and not flag.exists():
+                flag.write_text("")
+            return len(chunk)
+
+        def flush(self) -> None:
+            pass
+
+    recorder = RecordingStream()
+    monkeypatch.setattr(sys, "stderr", recorder)
+    code = f"""import sys, time, pathlib
+sys.stderr.write('partial')
+sys.stderr.flush()
+flag = pathlib.Path(r'{flag}')
+start = time.monotonic()
+while not flag.exists() and time.monotonic() - start < 5:
+    time.sleep(0.01)
+sys.exit(0 if flag.exists() else 1)
+"""
+    status, _ = SubprocessRunner().run_with_input(_py(code), "")
+    assert status == 0
+
+
+def test_run_with_input_bounds_a_newline_free_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writes: list[str] = []
+
+    class RecordingStream:
+        def write(self, chunk: str) -> int:
+            writes.append(chunk)
+            return len(chunk)
+
+        def flush(self) -> None:
+            pass
+
+    monkeypatch.setattr(sys, "stderr", RecordingStream())
+    code = "import sys; sys.stderr.write('x' * 2_000_000); sys.exit(0)"
+    _, tail = SubprocessRunner().run_with_input(_py(code), "")
+    assert all(len(w) <= 65536 for w in writes)
+    assert sum(len(w) for w in writes) == 2_000_000
+    assert set(tail) == {"x"}
+    assert len(tail) <= _STDERR_TAIL_LINES * 1024
+
+
+def test_run_with_input_reaps_the_child_when_the_writer_cannot_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spawned: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def spy(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        spawned.append(real_popen(*args, **kwargs))
+        return spawned[-1]
+
+    def fail_to_start(self: Any) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    monkeypatch.setattr(threading.Thread, "start", fail_to_start)
+    code = "import time; time.sleep(60)"
+    started = time.monotonic()
+    with pytest.raises(UvStackError):
+        SubprocessRunner().run_with_input(_py(code), "")
+    assert time.monotonic() - started < 30
+    assert spawned[0].returncode is not None
+    assert spawned[0].stdin.closed
+    assert spawned[0].stderr.closed
+
+
+def test_run_with_input_reraises_a_writer_failure_after_reaping(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    spawned: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    class FailingStdin:
+        def __init__(self, real_stdin: Any) -> None:
+            self.real_stdin = real_stdin
+
+        def write(self, data: bytes) -> int:
+            raise ValueError("stdin write failed")
+
+        def close(self) -> None:
+            self.real_stdin.close()
+
+    def spy(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        proc = real_popen(*args, **kwargs)
+        proc.stdin = FailingStdin(proc.stdin)
+        spawned.append(proc)
+        return proc
+
+    before = threading.active_count()
+    code = "import sys; sys.stdin.read(); sys.exit(0)"
+    real_popen_ref = subprocess.Popen
+    subprocess.Popen = spy
+    try:
+        with pytest.raises(ValueError, match="stdin write failed"):
+            SubprocessRunner().run_with_input(_py(code), "x" * 1000)
+    finally:
+        subprocess.Popen = real_popen_ref
+    assert spawned[0].returncode is not None
+    assert threading.active_count() == before
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "Exception ignored" not in err
 
 
 def test_recording_runner_records_input() -> None:
