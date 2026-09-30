@@ -94,6 +94,7 @@ class Resolver:
         self._seen_profiles: set[str] = set()
         self._seen_inline: set[str] = set()
         self._seen_bundles: set[str] = set()
+        self._bundles: list[str] = []
         self._bundle_stack: list[str] = []
         for token in tokens:
             self._resolve_token(token)
@@ -101,6 +102,7 @@ class Resolver:
             profiles=self._profiles,
             inline=self._inline,
             warnings=list(dict.fromkeys(self._warnings)),
+            bundles=self._bundles,
         )
 
     def classify(self, tokens: Iterable[str]) -> ClassifiedTokens:
@@ -296,6 +298,7 @@ class Resolver:
         if name in self._seen_bundles:
             return
         self._seen_bundles.add(name)
+        self._bundles.append(name)
         self._bundle_stack.append(name)
         try:
             bundle = self._config.load_bundle(name)

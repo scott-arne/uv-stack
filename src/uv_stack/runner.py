@@ -8,18 +8,21 @@ is the single mock point for the otherwise side-effect-free core.
 
 from __future__ import annotations
 
+import codecs
 import errno
+import io
 import os
 import re
 import subprocess
 import sys
+import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
-from uv_stack.errors import ToolError
+from uv_stack.errors import ToolError, UvStackError
 from uv_stack.hints import render_positional_arg
 
 
@@ -236,6 +239,98 @@ class SubprocessRunner:
             raise _spawn_error(command, error) from error
         return completed.returncode
 
+    def run_with_input(self, command: Command, text: str) -> tuple[int, str]:
+        """Run a command with ``text`` on its stdin, streaming its stderr.
+
+        A writer thread feeds stdin while this thread drains stderr as it
+        arrives in bounded chunks, so a child that fills the stderr pipe before
+        reading stdin cannot deadlock, and newline-free output is forwarded
+        immediately. A bounded tail is kept for exit-status hints. A child that
+        exits without reading gets a broken pipe, which is expected and
+        swallowed: its exit status says what happened.
+
+        :param command: The command to run; its stdout is inherited.
+        :param text: Written to its stdin as UTF-8, with unencodable
+            characters replaced, then stdin is closed.
+        :returns: The exit status and the last stderr lines, for exit-status hints.
+        :raises ToolError: When the command cannot be started.
+        :raises UvStackError: When a thread cannot be started to feed stdin.
+        """
+        # Build all objects first so nothing fallible sits between the spawn
+        # and the cleanup region.
+        data = text.encode("utf-8", errors="replace")
+        failures: list[BaseException] = []
+
+        def feed() -> None:
+            assert process.stdin is not None
+            try:
+                process.stdin.write(data)
+            except BrokenPipeError:
+                pass
+            except BaseException as error:  # re-raised on the calling thread below
+                failures.append(error)
+                process.kill()
+            finally:
+                try:
+                    process.stdin.close()
+                except BrokenPipeError:
+                    pass
+                except OSError as error:
+                    failures.append(error)
+                    process.kill()
+
+        writer = threading.Thread(target=feed, name="uv-stack-stdin", daemon=True)
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        captured = bytearray()
+        cap = _STDERR_TAIL_LINES * 1024
+
+        try:
+            process = subprocess.Popen(
+                command.args, cwd=command.cwd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        except OSError as error:
+            raise _spawn_error(command, error) from error
+
+        try:
+            assert process.stderr is not None
+            stderr = cast(io.BufferedReader, process.stderr)
+            try:
+                writer.start()
+            except RuntimeError as error:
+                raise UvStackError(
+                    f"Could not start a thread to feed {command.args[0]}'s stdin: {error}"
+                ) from error
+            while True:
+                chunk = stderr.read1(65536)
+                if not chunk:
+                    break
+                decoded = decoder.decode(chunk, False)
+                sys.stderr.write(decoded)
+                sys.stderr.flush()
+                captured += chunk
+                if len(captured) > cap:
+                    del captured[:-cap]
+            final = decoder.decode(b"", True)
+            if final:
+                sys.stderr.write(final)
+                sys.stderr.flush()
+        except BaseException:
+            # Kill before joining: a writer blocked on a full stdin pipe only
+            # returns once the child is gone and its pipe breaks.
+            process.kill()
+            raise
+        finally:
+            status = process.wait()
+            if writer.ident is not None:
+                writer.join()
+            assert process.stdin is not None
+            assert process.stderr is not None
+            process.stdin.close()
+            process.stderr.close()
+        if failures:
+            raise failures[0]
+        return status, _tail(captured.decode("utf-8", errors="replace"))
+
     @staticmethod
     def _run_with_pty(command: Command) -> tuple[int, str]:
         """Run ``command`` with its stderr attached to a pseudo-terminal.
@@ -303,6 +398,8 @@ class RecordingRunner:
 
     responder: Callable[[Command], CommandResult] | None = None
     commands: list[Command] = field(default_factory=list)
+    inputs: list[str] = field(default_factory=list)
+    input_responder: Callable[[Command, str], tuple[int, str]] | None = None
 
     def run(
         self, command: Command, *, capture: bool = False, check: bool = True
@@ -318,3 +415,11 @@ class RecordingRunner:
         if self.responder is not None:
             return self.responder(command).returncode
         return 0
+
+    def run_with_input(self, command: Command, text: str) -> tuple[int, str]:
+        """Record the command and its stdin; answer from ``input_responder``."""
+        self.commands.append(command)
+        self.inputs.append(text)
+        if self.input_responder is None:
+            return 0, ""
+        return self.input_responder(command, text)

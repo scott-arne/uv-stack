@@ -1,7 +1,9 @@
 """Rendering utilities for shell-safe command hints.
 
 Hints that end in a command the user is meant to paste must render every
-interpolated value so the pasted text means what it displays. This module is a
+interpolated value so the pasted text means what it displays. It also holds
+the control-character helpers that terminal output needs, since a name read
+from disk or from a document can carry an escape sequence. This module is a
 pure leaf with no ``uv_stack`` imports so all three layers can reach it: the
 obvious alternative homes cannot serve, since ``render`` imports ``config``
 (so ``config`` importing ``render`` would cycle) and ``commands`` imports
@@ -11,6 +13,45 @@ obvious alternative homes cannot serve, since ``render`` imports ``config``
 from __future__ import annotations
 
 import shlex
+import unicodedata
+
+
+def has_control(text: str) -> bool:
+    """Return whether text holds a Unicode control character (category ``Cc``).
+
+    That is U+0000-U+001F, U+007F, and U+0080-U+009F: the characters a
+    terminal can read as the start of an escape sequence.
+
+    :param text: The text to check.
+    :returns: ``True`` when any character is a control character.
+    """
+    return any(unicodedata.category(char) == "Cc" for char in text)
+
+
+def escape_controls(text: str, *, keep_layout: bool = False) -> str:
+    """Spell each control character and lone surrogate in text as its Python escape.
+
+    A message that must name a value holding a control character can then
+    print it without the terminal acting on it. A lone surrogate, which is how
+    Python decodes bytes that are not valid UTF-8, cannot be encoded for a
+    UTF-8 terminal at all, so printing one would raise rather than display;
+    spelled as an escape, it prints. Every other character is kept, so text
+    without either comes back unchanged.
+
+    :param text: The text to render.
+    :param keep_layout: Keep newlines and tabs, which messages, warnings and
+        diffs use for layout. Every other control character is still escaped,
+        CR included, since a bare CR can overwrite the line it is on.
+    :returns: The text with, for example, ESC as ``\\x1b``, LF as ``\\n``
+        unless ``keep_layout`` is set, and a lone surrogate as ``\\udcff``.
+    """
+    kept = "\n\t" if keep_layout else ""
+    return "".join(
+        char.encode("unicode_escape").decode("ascii")
+        if unicodedata.category(char) in ("Cc", "Cs") and char not in kept
+        else char
+        for char in text
+    )
 
 
 def render_positional_arg(value: str) -> str:

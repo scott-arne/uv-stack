@@ -505,8 +505,10 @@ file formats, environments in the wrong place, a name published as both a
 profile and a bundle) and its portability: declared
 variables with no value on this machine, references that are undeclared,
 malformed, or in an entry that may not hold one, editable checkouts that are
-absent, a `project-python.txt` value that will not travel, and a missing or
-stale managed `.gitignore` block in a root that sits inside a git repository.
+absent (given as a path or a local `file:` URL; a relative path is looked up
+from the directory `stack doctor` runs in, where uv resolves it), a `project-python.txt` value that will not travel,
+and a missing or stale managed `.gitignore` block in a root that sits inside a
+git repository.
 
 ### Watching for drift
 
@@ -737,15 +739,301 @@ ordinary named requirements is portable, and a project whose stack pulls in any
 local source — an editable or a plain path — is machine-bound in that table.
 Closing that gap would mean rewriting uv's output behind its back.
 
+## Moving environments between machines
+
+### stack export
+
+`stack export [ITEMS...]` writes the named environments, profiles, and bundles
+as a single JSON document. Each ITEM is `env:NAME`, `profile:NAME`,
+`bundle:NAME`, `@NAME`, or a bare NAME that names exactly one kind. With no
+ITEMS, the whole config root is exported.
+
+Everything the named items reach is included: all referenced profiles and
+bundles, plus each environment's lock file as a seed. The document goes to
+standard output by default; pass `-o FILE` to write it to a file instead.
+
+When standard output is the destination, only the document is written there.
+Warnings (such as the absolute-path notice below) go to standard error so they
+do not corrupt the JSON stream.
+
+**Absolute paths are not portable.** If a profile or environment includes an
+editable install (`-e /src/foo`), a local path (`/wheels/bar.whl`), or a
+`file://` URL, the export warns once per file: those paths must exist at the
+same locations on the target machine for its environments to build. The import
+writes the definitions either way. Its pre-flight refuses a missing editable
+checkout, given as a path or a local `file:` URL, before anything is written
+(unless `--no-build`), and uv reports any other missing path when the build
+runs. Use `${NAME}` variable references to
+make paths portable across machines.
+
+**References are matched by spelling.** On a filesystem that ignores letter
+case, such as a default macOS install, a stack file's `foo` reaches
+`profiles/Foo.yaml`, and the export ships it as `profiles/foo.yaml`, the key
+the reference names. An export that would ship that file under both spellings
+is refused and names both; spell the reference as the file is named.
+
+**Pull from another machine.** You can export and import in one command by
+piping over ssh:
+
+```bash
+ssh HOST stack export ITEMS | stack import -
+```
+
+### stack import
+
+`stack import FILE|-` installs the environments, profiles, and bundles from a
+document written by `stack export`. Pass the document's file path, or `-` to
+read from standard input.
+
+Each file in the document is installed as **new**, left alone if **identical**
+to this machine's copy, **replaced** when `--overwrite` is given and the
+content differs, or **removed** (for environment files only) when the source
+environment no longer has it and `--overwrite` is given.
+
+**Conflicts refuse the import.** When a file differs from this machine's copy
+and `--overwrite` was not given, the import stops before writing anything,
+prints a unified diff showing the difference, and lists the environments that
+use the file. Fix the conflict manually or re-run with `--overwrite`.
+
+**Meaning changes are always refused.** An unqualified token in a stack file or
+bundle means whichever profile, bundle, or package it resolves to, and the
+import refuses to change that meaning in either direction, even with
+`--overwrite`:
+
+- A token in a shipped stack file or bundle must mean here what it meant on the
+  source machine. A shipped environment whose stack names `utils` as a package
+  is refused when this machine has a `utils` profile.
+- A token in one of this machine's stack files or bundles that the import does
+  not replace must mean the same after the import. Importing `profile:utils` is
+  refused when an existing environment's stack names `utils` as a package.
+
+Fix it by qualifying the token so it keeps its meaning (`pkg:utils` for the
+package, `profile:utils`, or `@utils` for a bundle); the refusal's hint names
+the form to write. Qualify this machine's own file in place; for a shipped
+file, qualify it on the source machine and export again.
+
+**Options:**
+
+- `--overwrite`: Replace files that differ and remove environment files that
+  the source environment no longer has. Without this flag, differing files stop
+  the import with a conflict error.
+- `--dry-run`: Report what would change without writing anything. Unless
+  `--no-build` is given, the pre-flight below still runs, which can probe
+  micromamba, and each build the import would run is listed as
+  `build: NAME (ACTION)`, where ACTION is `create`, `sync`, or `recreate`.
+- `--strict`: Refuse unqualified names in stack files and bundles that fall
+  through to package literals rather than referencing a profile or bundle.
+- `--no-build`: Install the definitions without building environments.
+- `--recreate`: Wipe and rebuild each imported environment from the shipped
+  pins. Only works with plain dotted Python versions (e.g., `3.12`); refused
+  for ranges or constraints. Cannot be combined with `--no-build`.
+
+**Variables.** Variable names the imported definitions reference but this
+machine does not declare are appended to `variables.txt`, names only, and
+listed on a `declare in variables.txt:` line. The document does not carry
+their values: set each in `variables.local.txt` as `NAME=value`, or export it
+in the environment.
+
+**Paths.** Writing the definitions checks none of the paths they name; the
+build needs them. A relative editable path resolves against the directory
+`stack` runs in, which is where uv resolves it, not against the config root.
+Under `stack sync remote` that directory is the remote user's home.
+
+**Pre-flight refusals.** Unless `--no-build` is given, the import checks each
+imported environment before writing anything, and refuses when it references a
+variable with no value here, installs an editable checkout (a path or a local
+`file:` URL) that is missing here, already runs a Python outside the plain version its imported
+`python.txt` names (without `--recreate`; 3.12 when the document ships no
+`python.txt`), or has a `python.txt` that is not a plain version (with
+`--recreate`). Each refusal's hint also offers `--no-build`. uv reports any
+other missing path during the build.
+
+**Build phase.** After writing the definitions, each imported environment is
+built: created if absent, recreated if `--recreate` is given, or synced
+otherwise. The environment's shipped lock seeds its compile, so those pins act
+as preferences and uv re-resolves them for this machine. For each environment
+that shipped a lock and built, uv-stack then prints a pin report:
+
+```text
+main: 41 pins kept, 1 changed, 0 dropped, 1 added
+  changed: numpy 1.26.4 -> 2.0.2
+  added: typing-extensions 4.12.2
+```
+
+`kept` counts the shipped lock's version and URL pins that the new lock holds
+unchanged. `changed`, `dropped`, and `added` count requirements whose pin
+differs, that only the shipped lock has, or that only the new lock has. An
+editable or unnamed path requirement in both locks is in none of the four, so
+kept, changed, and dropped need not add up to the number of requirements in the
+shipped lock. An environment exported without a lock prints no report.
+
+**Environments not rebuilt.** Environments on this machine that the document
+does not ship are never rebuilt. When the import replaces a profile or bundle
+they use, or ships a new profile that captures a bare token in an unchanged
+bundle they reach, a line names them:
+
+```text
+Not rebuilt, but using changed definitions: work. Rebuild them with 'stack sync env work'.
+```
+
+The line prints whenever such environments exist: after a successful or failed
+build, with `--no-build`, and with `--dry-run`. It can print even without
+`--overwrite`, since adding a new profile replaces nothing.
+
+**Build failures.** If a build fails, the definitions stay written, the
+remaining environments still build, and the import exits 1 after naming only
+the failed ones: `Re-run the failed build(s) once the cause is fixed: stack
+sync env NAME`. That command syncs; it does not recreate. After a failed
+`--recreate` build, re-run the same import with `--recreate` instead, which is
+safe: the files already written are reported as identical, and each imported
+environment is recreated again, including those that built.
+
+### stack sync remote
+
+`stack sync remote [ITEMS...] DEST` exports the named items (or the whole root
+if no ITEMS are given) and imports them on a remote machine, running:
+
+```bash
+ssh DEST <stack> [--root ROOT] import - [FLAGS]
+```
+
+The document is sent to ssh's stdin; ssh's stdout and stderr stream to the local
+terminal as they arrive; the local exit status is the remote's. Everything the
+import does—pre-flight checks, building environments, pin reports—happens on the
+remote and prints locally.
+
+**Printed commands are for the remote.** The `stack sync env ...` commands
+the import prints refer to the remote machine: the re-run command for
+environments whose build failed, and the "Not rebuilt, but using changed
+definitions" line naming the remote's other environments that use a changed
+profile or bundle. The second line can appear even when every build
+succeeds, and with `--no-build` or `--dry-run`. Run these commands on the
+remote (for example over `ssh DEST`), not locally. The printed commands use
+bare `stack` and the remote's default root; when the stack command or root
+was customized, run them with the same command and root the import used—for
+example, `ssh gpu-box 'PATH=$HOME/.local/bin:$PATH stack --root /data/python-envs sync env NAME'`
+for the `remotes.yaml` entry below.
+
+**Customizing the remote command.** `--remote-stack CMD` sets the stack command
+to run on the remote. `--remote-root PATH` sets the remote's config root. Both
+can be specified per-host in `remotes.yaml` (see below), with the command-line
+flags taking precedence.
+
+**The remote's PATH.** ssh runs the command in a non-interactive shell, whose
+PATH often lacks `~/.local/bin` (where `uv tool install` and the micromamba
+installer put their commands) or Homebrew's `/opt/homebrew/bin`, because the
+startup files that add them are skipped or return early for such shells.
+Finding `stack` is not enough: the import runs `uv` from PATH, and micromamba
+from `$MAMBA_EXE` when that is set, otherwise from PATH. The stack command is
+inserted into the remote command line as written, so a `PATH=` prefix in it
+reaches stack and everything stack runs:
+
+```yaml
+gpu-box:
+  stack: PATH=$HOME/.local/bin:$PATH stack
+```
+
+List every directory that holds stack, uv, or micromamba on that host, for
+example `PATH=$HOME/.local/bin:/opt/homebrew/bin:$PATH stack`, or set
+`MAMBA_EXE=/path/to/micromamba` in the same way. A prefix needs a remote login
+shell that accepts `NAME=value command`, as sh, bash, and zsh do.
+
+**Exit status hints:**
+
+- Exit 255 is ssh's own failure: the connection failed, or it dropped during
+  the import. The hint says that re-running the same command is safe: files
+  already written are reported as identical and the rest are completed. If the
+  dropped import is still running on the remote, a re-run waits a few seconds
+  for its lock and then refuses.
+- Exit 127 means the remote shell did not find the stack command. The hint
+  suggests `uv tool install uv-stack` on the remote and, for an installed
+  uv-stack that the ssh shell cannot find, a `remotes.yaml` entry for DEST
+  whose `stack` is the PATH recipe above.
+- Exit 2 with "No such command 'import'" in the stderr means the remote's
+  uv-stack predates `import`; the hint says to run `uv tool upgrade uv-stack`
+  there.
+
+**Options forwarded to the remote:**
+
+- `--overwrite`: Replace files that differ and remove environment files the
+  source no longer has.
+- `--no-build`: Install definitions without building environments.
+- `--recreate`: Wipe and rebuild each environment from the shipped pins.
+- `--dry-run`: Report what the remote would change without writing anything.
+  Unless `--no-build` is given, this can still probe the remote's micromamba
+  installation.
+- `--strict`: Refuse unqualified names that fall through to package literals.
+
+**Using ssh prompts.** Password and passphrase prompts still work—ssh reads them
+from the terminal, not stdin.
+
+**Without a remote uv-stack install.** For a remote that has uv but not
+uv-stack, run it through `uvx`. The stack it starts runs `uv` too, so give the
+command the same PATH prefix:
+
+```yaml
+gpu-box:
+  stack: PATH=$HOME/.local/bin:$PATH uvx --from uv-stack stack
+```
+
+**Pull from another machine.** To pull items from a remote into the local
+machine, reverse the direction by piping the remote export into a local import:
+
+```bash
+ssh HOST stack export ITEMS | stack import -
+```
+
+### remotes.yaml
+
+A root-level file mapping host names to optional settings:
+
+```yaml
+gpu-box:
+  stack: PATH=$HOME/.local/bin:$PATH stack
+  root: /data/python-envs
+```
+
+Each entry allows only `stack` (the command to run on the remote) and `root`
+(the remote's config root), both optional non-empty strings. Command-line flags
+(`--remote-stack`, `--remote-root`) take precedence over the file's values.
+
+- **DEST must match the key exactly as typed.** `stack sync remote gpu-box`
+  uses the entry above; `stack sync remote user@gpu-box` does not.
+- **`root` is passed literally.** It reaches the remote quoted, and only a
+  leading `~` is expanded there. `$HOME/envs` is not expanded: it names a
+  directory literally called `$HOME`, relative to the remote home. `stack`, by
+  contrast, is inserted unquoted, so the remote shell expands `~` and `$HOME`
+  in it.
+- **Quote host names that YAML reads as something else.** A key such as `yes`,
+  `no`, `null`, or `1` is a boolean, null, or number to YAML, and
+  `stack sync remote` refuses the file until it is quoted (`"yes":`).
+
+The file is portable across machines—the remote's paths are properties of the
+remote, not of the machine that pushes. Edited by hand. `stack doctor` reports
+an unreadable or invalid `remotes.yaml` file.
+
 ## Tips and gotchas
 
 - **Edit sources, not generated files.** `requirements.in`,
   `environment.yml`, and `requirements.lock.txt` are overwritten on every
   upgrade. For env-specific additions use `requirements.local.in`; for
   anything reusable, a profile.
-- **`--dry-run` is almost dry.** It runs no commands and never touches the
-  lock or the environment, but it does re-render `requirements.in` and
-  `environment.yml`.
+- **`--dry-run` is almost dry.** For `stack upgrade`, `stack sync` and
+  `stack sync env`, `--dry-run` runs no uv commands and never touches the lock
+  or the environment, but it re-renders `requirements.in` and `environment.yml`
+  and can still ask micromamba for the environment's Python version. `stack
+  refresh --dry-run` and `stack sync project --dry-run` change nothing. `stack
+  import --dry-run` and `stack sync remote --dry-run` write nothing, but can
+  still run micromamba probes (on the remote, over ssh, for `stack sync
+  remote`).
+- **Import's letter-case checks assume matching filesystems.** `stack import`
+  stages its view of the result in the system temporary directory, and its
+  checks of whether two names that differ only in letter case or Unicode
+  normalization are one file see that directory's filesystem. They are exact
+  only when it folds names the same way as the config root's filesystem, as a
+  default macOS install or a plain Linux system does. On a target that folds
+  case, a shipped case variant of an existing definition replaces it, and the
+  environments that used it are reported under the shipped name.
 - **Your lock is safe from failed compiles.** The lock is compiled to a
   temporary file and atomically swapped in, so a failed `uv pip compile`
   never corrupts an existing `requirements.lock.txt`. If the later *sync*

@@ -41,7 +41,8 @@ from uv_stack.fsutil import (
 )
 from uv_stack.operations.portable import enclosing_repository, write_portable_ignore
 from uv_stack.operations.project import python_travel_problem
-from uv_stack.parse import read_clean_lines
+from uv_stack.operations.remote import load_remotes
+from uv_stack.parse import editable_target, read_clean_lines
 from uv_stack.variables import Variables, expand_all, placement_problem, referenced_names
 
 _KNOWN_TOP_LEVEL = {"profiles", "bundles", "envs", "lib", ".locks"}
@@ -1344,101 +1345,8 @@ def _reference_findings(
     return findings
 
 
-def _editable_target(entry: str) -> str | None:
-    """The local path an editable entry installs from, if it has one.
-
-    An entry counts as a local editable when its first whitespace-separated
-    token is ``-e`` or ``--editable``, alone or with the operand attached by
-    ``=``, and the value carries no URL scheme. Anything else is a remote
-    install with no path to check.
-
-    The operand is extracted verbatim from the original entry to preserve
-    interior whitespace exactly as written — uv reads ``-e ./my  pkg`` as the
-    single path ``my  pkg`` with two spaces, and ``split()`` would discard the
-    run length. In both the attached (``-e=PATH``) and separated (``-e PATH``)
-    forms, the operand runs to the end of the entry, except that it stops at
-    the first whitespace run preceding a token that begins with ``-`` or ``#``.
-    A requirements file treats ``#`` as a comment marker at the start of a line
-    or after whitespace, so ``-e ./pkg # note`` installs from ``./pkg``, while
-    a ``#`` inside a token is ordinary text and ``-e ./pkg#1`` installs from
-    ``./pkg#1``.
-
-    A trailing PEP 508 extras suffix is dropped from the operand.
-
-    :param entry: One expanded requirement entry.
-    :returns: The path operand, or ``None``.
-    """
-    stripped = entry.strip()
-    if not stripped:
-        return None
-    parts = stripped.split()
-    # uv is what consumes these entries, so its parser sets the boundary: it
-    # accepts '-e=PATH' and '--editable=PATH' as readily as the separated
-    # forms, but refuses '-ePATH' with "Expected '=' or whitespace". Reading a
-    # path out of the glued form would report a missing checkout for an entry
-    # that cannot install for an entirely different reason.
-    flag, attached, operand_start = parts[0].partition("=")
-    if flag not in ("-e", "--editable"):
-        return None
-    # An attached '=' with nothing after it is still a separator to uv, which
-    # reads '-e= PATH' exactly as '-e PATH'. Treating the empty operand as the
-    # value would drop a checkout doctor is supposed to be watching.
-    if attached and operand_start:
-        # The attached form: everything after the '=' in the original entry.
-        # The operand_start from partition is only what sat in the first
-        # token, so we slice the stripped entry to get the whole remainder.
-        remainder = stripped[len(flag) + 1 :]
-    elif len(parts) >= 2:
-        # The separated form: everything after the flag and its trailing
-        # whitespace. We slice from the original entry rather than rejoining
-        # split() to preserve interior whitespace exactly as written.
-        flag_text = parts[0]
-        remainder = stripped[len(flag_text) :].lstrip()
-        # When the remainder begins with a comment, the operand is empty. The
-        # lstrip() ensures a leading '#' here genuinely followed whitespace, so
-        # it is a comment marker per the requirements file line semantics rather
-        # than ordinary text inside a token. In '-e=#note' the '#' is glued to
-        # the '=' with no space, so the attached branch keeps it as a path. uv
-        # sees a bare '-e' when the separated operand is only a comment, which
-        # is a malformed entry, not a checkout.
-        if remainder.startswith("#"):
-            return None
-    else:
-        return None
-    # uv reads everything after the flag as one path, but '-e ./my pkg --opt'
-    # stops the path at the option, and '-e ./pkg # note' stops the path at the
-    # comment. We scan the remainder for the first whitespace run followed by
-    # a token starting with '-' or '#', and cut there. A requirements file
-    # treats '#' as a comment marker at the start of a line or after whitespace,
-    # not inside a token, so './pkg#1' keeps its '#'. An option or comment
-    # cannot be part of a path uv would accept here, and a path that genuinely
-    # begins with '-' is the first token, so this rule applies only to later
-    # tokens.
-    target = remainder
-    for index, char in enumerate(remainder):
-        if char.isspace():
-            after = index
-            while after < len(remainder) and remainder[after].isspace():
-                after += 1
-            # The cut lands before the whitespace run rather than before the
-            # '-' or '#': the run separates the two tokens and belongs to
-            # neither, so keeping it would leave the path with a trailing space.
-            if after < len(remainder) and remainder[after] in ("-", "#"):
-                target = remainder[:index]
-                break
-    if "://" in target or target.startswith("git+"):
-        return None
-    # pip reads '-e ./pkg[dev]' as the path './pkg' carrying extras, so probing
-    # the whole token would report a checkout that is present as missing. The
-    # suffix is stripped rather than parsed: the operand is a path here, and
-    # nothing downstream has any use for the extras names.
-    if target.endswith("]") and "[" in target:
-        target = target[: target.rindex("[")]
-    return target or None
-
-
 def _expanded_entry_findings(
-    config: ConfigRoot, entries: list[tuple[Path, str]], variables: Variables
+    entries: list[tuple[Path, str]], variables: Variables
 ) -> list[Finding]:
     """Report what expanding each scanned entry reveals.
 
@@ -1459,10 +1367,9 @@ def _expanded_entry_findings(
 
     The whole entry is expanded rather than the bare target, because a bare
     ``${DEV}`` is not an admitted entry on its own — only the entry it sits in
-    is. A relative path resolves against the config root, matching how uv reads
-    the generated ``requirements.in``.
+    is. A relative path resolves against the working directory, matching how
+    uv resolves a relative ``-e`` in the generated ``requirements.in``.
 
-    :param config: The configuration root, for resolving relative paths.
     :param entries: Scanned ``(source, entry)`` pairs.
     :param variables: The values to expand with.
     :returns: An ``error`` finding per refused expansion and a ``warn`` finding
@@ -1492,7 +1399,7 @@ def _expanded_entry_findings(
                 )
             )
             continue
-        target = _editable_target(expanded)
+        target = editable_target(expanded)
         if target is None:
             continue
         # os.path.expanduser, not Path.expanduser: the pathlib spelling raises
@@ -1505,14 +1412,17 @@ def _expanded_entry_findings(
         # ValueError -- again neither family the CLI turns into a message. Both
         # failures want the same answer, so the except supplies by hand what
         # expanduser supplies for an unresolvable name: the text unchanged,
-        # resolved against the root and reported as a checkout that does not
-        # exist — which is the true answer, not a consolation prize.
+        # resolved against the working directory and reported as a checkout
+        # that does not exist — which is the true answer, not a consolation
+        # prize.
         try:
             path = Path(os.path.expanduser(target))
         except ValueError:
             path = Path(target)
+        # The working directory, not the config root: uv-stack runs uv without
+        # a cwd, and uv resolves a relative -e against its own.
         if not path.is_absolute():
-            path = config.root / path
+            path = Path.cwd() / path
         # os.path.exists for the same family of reason: the pathlib probe
         # re-raises every errno but a handful, and this path is built from a
         # variable value, so an ancestor this user cannot search is ordinary
@@ -1654,6 +1564,20 @@ def _variables_blame(config: ConfigRoot, error: UvStackError | OSError) -> Path:
     return config.variables_path()
 
 
+def _remotes_findings(config: ConfigRoot) -> list[Finding]:
+    """Report a ``remotes.yaml`` that ``stack sync remote`` would refuse to load.
+
+    :param config: The configuration root to inspect.
+    :returns: One unparseable-source warning, or nothing when the file is
+        absent or loads.
+    """
+    try:
+        load_remotes(config)
+    except (ConfigError, OSError) as error:
+        return [_unparseable(config.remotes_path(), str(error))]
+    return []
+
+
 def _portability_findings(config: ConfigRoot) -> list[Finding]:
     """Every portability check, ordered so a broken root still reports usefully.
 
@@ -1662,6 +1586,7 @@ def _portability_findings(config: ConfigRoot) -> list[Finding]:
     """
     findings = _ignore_block_findings(config)
     findings.extend(_project_python_findings(config))
+    findings.extend(_remotes_findings(config))
 
     entries, scan_findings = _scan_sources(config)
     findings.extend(scan_findings)
@@ -1679,5 +1604,5 @@ def _portability_findings(config: ConfigRoot) -> list[Finding]:
     if not placement and not references:
         # Expanding on top of a known-bad reference set produces noise, not
         # information: the findings above already name every cause.
-        findings.extend(_expanded_entry_findings(config, entries, variables))
+        findings.extend(_expanded_entry_findings(entries, variables))
     return findings

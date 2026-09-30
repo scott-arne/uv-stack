@@ -7,6 +7,65 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) with
 one addition, a `Breaking` section for changes that alter existing behavior, and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.0
+
+### Added
+
+- `stack export [ITEMS...]` writes the named environments, profiles, and
+  bundles, everything they reach, and each environment's lock as one JSON
+  document on standard output or to `-o FILE`.
+- `stack import FILE|-` installs the definitions from an export document,
+  reporting new/identical/replace/remove outcomes for each file. A file that
+  differs from this machine's copy is refused with a diff and the environments
+  that use it, unless `--overwrite` is given. `--dry-run` reports changes
+  without writing. `--strict` refuses unqualified stack names. A meaning change
+  (importing a profile when an environment's stack names it as a package) is
+  refused even with `--overwrite`. Missing variables are appended to
+  `variables.txt`. After writing, each imported environment is built (created,
+  synced, or recreated per environment) with the shipped pins as preferences,
+  and a pin report shows how many pins were kept, changed, dropped, or added.
+  `--no-build` installs definitions without building. `--recreate` wipes and
+  rebuilds each environment from the shipped pins (plain dotted Python only).
+- Unless `--no-build` is given, `stack import` refuses before writing anything
+  when an imported environment references a variable with no value on this
+  machine, installs an editable checkout that is missing, already runs a
+  Python outside its plain `python.txt` version without `--recreate`, or has a
+  `python.txt` that is not a plain version with `--recreate`.
+- `stack import` names the environments it did not rebuild that use a replaced
+  profile or bundle, and also those that reach an unchanged bundle whose bare
+  token a newly imported profile now captures.
+- On a target that folds letter case, `stack import` reports the environments
+  that use a definition a shipped case variant replaces (`profiles/Foo.yaml`
+  over `profiles/foo.yaml`), in both the conflict report and the not-rebuilt
+  line.
+- `stack sync remote [ITEMS...] DEST` exports the named items (or the whole
+  root) and imports them on a remote machine over ssh, running `ssh DEST <stack>
+  import -` with the document on stdin. The local exit status is the remote's.
+  `--remote-stack` and `--remote-root` customize the remote command and root.
+- `remotes.yaml` maps host names to optional `stack` and `root` settings,
+  overridden by `--remote-stack` and `--remote-root`. Edited by hand. Portable
+  across machines. `stack doctor` reports an invalid file.
+
+### Changed
+
+- `stack doctor`'s missing-checkout finding looks up a relative editable path
+  from the directory doctor runs in, where uv resolves it, instead of from the
+  config root. This changes an existing finding: the same root can now report
+  a checkout missing from one directory and present from another.
+  `stack import` checks editables the same way.
+- `stack doctor`'s missing-checkout finding also checks an editable given as a
+  local `file:` URL (`-e file:///src/pkg`), which it previously skipped as a
+  remote install. `stack import`'s pre-flight checks it the same way.
+- A name holding a control character, such as an escape or a NUL, or a name
+  that is not valid UTF-8 is now refused wherever a NAME is taken, as a name
+  holding whitespace already was. `stack export` refuses such a name on disk
+  rather than ship a document that every `stack import` would refuse.
+- Error panels, warnings, `stack doctor` findings and `stack status` messages
+  print a control character in their text as its escape (for example `\x1b`),
+  keeping newlines and tabs, so a name or value read from disk cannot drive
+  the terminal. `stack import` prints everything it reports the same way, the
+  conflict diff included.
+
 ## 0.6.0 - 2026-09-28
 
 ### Breaking

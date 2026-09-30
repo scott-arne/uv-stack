@@ -1,7 +1,14 @@
 import pytest
 from pydantic import ValidationError
 
-from uv_stack.models import Bundle, EnvConfig, Profile, ProjectTracking, ResolvedStack
+from uv_stack.models import (
+    Bundle,
+    EnvConfig,
+    ExportDocument,
+    Profile,
+    ProjectTracking,
+    ResolvedStack,
+)
 
 
 def test_profile_fields_and_defaults():
@@ -74,3 +81,23 @@ def test_project_tracking_rejects_a_padded_python():
     assert "must not be padded" in str(excinfo.value)
     with pytest.raises(ValidationError):
         ProjectTracking(stack=["ds"], python="3.12\n")
+
+
+def _document(**overrides: object) -> dict[str, object]:
+    data: dict[str, object] = {
+        "format": "uv-stack-export", "version": 1, "created_by": "uv-stack 0.6.0",
+        "source_platform": "darwin-arm64", "items": ["profile:ds"],
+        "files": {"profiles/ds.yaml": "includes:\n  - numpy\n"}, "seeds": {},
+    }
+    data.update(overrides)
+    return data
+
+
+def test_export_document_forbids_an_unknown_key() -> None:
+    with pytest.raises(ValidationError):
+        ExportDocument.model_validate(_document(extra="x"))
+
+
+def test_export_document_refuses_a_boolean_version() -> None:
+    with pytest.raises(ValidationError):
+        ExportDocument.model_validate(_document(version=True))

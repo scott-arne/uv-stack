@@ -184,7 +184,7 @@ def _describe(result: os.stat_result) -> str:
     return "not a regular file"
 
 
-def _parse_lock_line(raw: str, path: Path, number: int) -> tuple[str, str | None] | None:
+def _parse_lock_line(raw: str, label: str, number: int) -> tuple[str, str | None] | None:
     """Classify one lock line into exactly one grammar row.
 
     Rows are tried in a fixed order, and the editable row before the generic
@@ -192,14 +192,14 @@ def _parse_lock_line(raw: str, path: Path, number: int) -> tuple[str, str | None
     valid editable would silently vanish from the comparison.
 
     :param raw: The line as read, without its newline.
-    :param path: The file, for error messages.
+    :param label: Human-readable label (file path or 'seeds/env') for error messages.
     :param number: The 1-based line number, for error messages.
     :returns: ``(identity, version)``, or ``None`` for a discarded line.
     :raises ConfigError: On a continued line or a line matching no row.
     """
     if raw.rstrip().endswith("\\"):
         raise ConfigError(
-            f"{path}, line {number}: line continuations are not supported.",
+            f"{label}, line {number}: line continuations are not supported.",
             hint=(
                 "This looks like 'uv pip compile --generate-hashes' output. "
                 "uv-stack never generates hashed locks and cannot compare one."
@@ -223,7 +223,7 @@ def _parse_lock_line(raw: str, path: Path, number: int) -> tuple[str, str | None
     if not line.startswith("-") and not any(ch.isspace() for ch in line) and "/" in line:
         return line, None
     raise ConfigError(
-        f"{path}, line {number}: cannot parse '{line}' as a requirement.",
+        f"{label}, line {number}: cannot parse '{line}' as a requirement.",
         hint=(
             "Expected 'name==version', 'name @ url', '-e target', a path or URL, "
             "an option line, or a comment."
@@ -231,16 +231,12 @@ def _parse_lock_line(raw: str, path: Path, number: int) -> tuple[str, str | None
     )
 
 
-def parse_lock(path: Path) -> dict[str, str | None]:
-    """Read a compiled lock file into identity-to-version pairs.
+def read_lock_text(path: Path) -> str:
+    """Read a lock file and return its raw text content.
 
     :param path: The lock file.
-    :returns: Canonical identity to version, URL, or ``None`` for an editable
-        or unnamed requirement.
-    :raises ConfigError: On an unreadable file, a non-regular file, an
-        unparseable line, or a duplicate identity — which a compiled lock never
-        contains, and whose silent last-wins resolution would hide that the
-        file is not one.
+    :returns: The raw text of the lock file.
+    :raises ConfigError: On an unreadable file or a non-regular file.
     """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
@@ -278,19 +274,51 @@ def parse_lock(path: Path) -> dict[str, str | None]:
                 hint="Re-save the file as UTF-8 text.",
             ) from error
 
+    return text
+
+
+def parse_lock_text(text: str, label: str) -> dict[str, str | None]:
+    """Parse lock file text into identity-to-version pairs.
+
+    The label replaces the file path in error messages, allowing a seed
+    inside a document to be named 'seeds/<env>' instead of a file path.
+
+    :param text: The raw text of a lock file.
+    :param label: A human-readable label for error messages (e.g., file path
+        or 'seeds/main').
+    :returns: Canonical identity to version, URL, or ``None`` for an editable
+        or unnamed requirement.
+    :raises ConfigError: On an unparseable line or a duplicate identity —
+        which a compiled lock never contains, and whose silent last-wins
+        resolution would hide that the file is not one.
+    """
     pins: dict[str, str | None] = {}
     for number, raw in enumerate(text.splitlines(), 1):
-        parsed = _parse_lock_line(raw, path, number)
+        parsed = _parse_lock_line(raw, label, number)
         if parsed is None:
             continue
         identity, version = parsed
         if identity in pins:
             raise ConfigError(
-                f"{path}, line {number}: '{identity}' appears more than once.",
+                f"{label}, line {number}: '{identity}' appears more than once.",
                 hint="A compiled lock file contains each requirement exactly once.",
             )
         pins[identity] = version
     return pins
+
+
+def parse_lock(path: Path) -> dict[str, str | None]:
+    """Read a compiled lock file into identity-to-version pairs.
+
+    :param path: The lock file.
+    :returns: Canonical identity to version, URL, or ``None`` for an editable
+        or unnamed requirement.
+    :raises ConfigError: On an unreadable file, a non-regular file, an
+        unparseable line, or a duplicate identity — which a compiled lock never
+        contains, and whose silent last-wins resolution would hide that the
+        file is not one.
+    """
+    return parse_lock_text(read_lock_text(path), str(path))
 
 
 def _stat_or_none(path: Path) -> os.stat_result | None:

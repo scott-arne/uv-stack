@@ -10,6 +10,7 @@ from rich.text import Text
 from uv_stack.cli._complete import complete_env_names
 from uv_stack.cli._render import console, echo, render_table
 from uv_stack.config import ConfigRoot
+from uv_stack.hints import escape_controls
 from uv_stack.operations.scaffold import validate_name
 from uv_stack.operations.status import compute_status
 from uv_stack.runner import SubprocessRunner
@@ -74,4 +75,6 @@ def status(config: ConfigRoot, names: tuple[str, ...], as_json: bool) -> None:
     )
     for s in statuses:
         if s.message:
-            console.print(Text(f"{s.name}: {s.message}", style="dim"))
+            # The message can quote a load error, and so a key read from disk.
+            message = escape_controls(s.message, keep_layout=True)
+            console.print(Text(f"{s.name}: {message}", style="dim"))

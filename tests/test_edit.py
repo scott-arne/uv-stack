@@ -779,3 +779,16 @@ def test_validate_env_does_not_reattribute_a_profile_defect(config_tree: ConfigR
     # ds.yaml is what catches it, and 'stack doctor' catches it root-wide.
     config_tree.profile_path("ds").write_text("includes:\n  - ${PACKAGE}\n")
     validate_env(config_tree, "main")
+
+
+def test_validate_bundle_strict_refuses_a_bare_literal(config_tree: ConfigRoot) -> None:
+    validate_bundle(config_tree, "qsar")
+    with pytest.raises(ResolutionError):
+        validate_bundle(config_tree, "qsar", strict=True)
+
+
+def test_validate_env_strict_refuses_a_bare_literal(config_tree: ConfigRoot) -> None:
+    config_tree.env_stack_path("main").write_text("@standard\nrequests\n")
+    validate_env(config_tree, "main")
+    with pytest.raises(ResolutionError):
+        validate_env(config_tree, "main", strict=True)

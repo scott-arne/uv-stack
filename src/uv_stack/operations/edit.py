@@ -64,11 +64,13 @@ def missing_project_error(cwd: Path) -> ConfigError:
     )
 
 
-def validate_profile(config: ConfigRoot, name: str) -> Validation:
+def validate_profile(config: ConfigRoot, name: str, *, strict: bool = False) -> Validation:
     """Validate an edited profile.
 
     :param config: Config root.
     :param name: Profile name.
+    :param strict: Accepted for a uniform call shape; a profile references
+        nothing, so it has no effect.
     :returns: No warnings; a profile references nothing, so it produces no
         resolution warnings.
     :raises ConfigError: When the YAML is unreadable or fails the schema, or
@@ -81,11 +83,13 @@ def validate_profile(config: ConfigRoot, name: str) -> Validation:
     return Validation([])
 
 
-def validate_bundle(config: ConfigRoot, name: str) -> Validation:
+def validate_bundle(config: ConfigRoot, name: str, *, strict: bool = False) -> Validation:
     """Validate an edited bundle.
 
     :param config: Config root.
     :param name: Bundle name.
+    :param strict: Refuse an unqualified name that falls through to a package
+        literal, as ``stack resolve --strict`` does.
     :returns: Resolution warnings.
     :raises ConfigError: When the bundle's own YAML — or that of a profile or
         bundle it includes — is unreadable or fails the schema, or when the
@@ -105,13 +109,13 @@ def validate_bundle(config: ConfigRoot, name: str) -> Validation:
             ),
         )
     check_placement(bundle.includes, source=str(config.bundle_path(name)))
-    resolver = Resolver(config)
+    resolver = Resolver(config, strict=strict)
     stack = resolver.resolve(bundle.includes)
     resolver.flatten(stack)
     return Validation(list(stack.warnings))
 
 
-def validate_env(config: ConfigRoot, name: str) -> Validation:
+def validate_env(config: ConfigRoot, name: str, *, strict: bool = False) -> Validation:
     """Validate every source file of an edited environment.
 
     The whole env is validated regardless of which file was opened: the source
@@ -120,6 +124,8 @@ def validate_env(config: ConfigRoot, name: str) -> Validation:
 
     :param config: Config root.
     :param name: Environment name.
+    :param strict: Refuse an unqualified name that falls through to a package
+        literal, as ``stack resolve --strict`` does.
     :returns: Resolution warnings.
     :raises ConfigError: When a source file is unreadable or renders no output,
         or when the environment's own ``stack.txt`` holds an entry that spans
@@ -133,7 +139,7 @@ def validate_env(config: ConfigRoot, name: str) -> Validation:
     # validated when that file is edited; re-checking it here would attribute
     # another file's defect to this edit, in a file the user cannot act on.
     check_placement(env.stack, source=str(config.env_stack_path(name)))
-    resolver = Resolver(config)
+    resolver = Resolver(config, strict=strict)
     stack = resolver.resolve(env.stack)
     resolver.flatten(stack)
     render_requirements_in(stack, config, name, None)

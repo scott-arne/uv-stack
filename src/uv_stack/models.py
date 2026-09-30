@@ -54,6 +54,27 @@ class EnvConfig(BaseModel):
     channels: list[str] = Field(default_factory=list)
 
 
+EXPORT_FORMAT = "uv-stack-export"
+EXPORT_VERSION = 1
+
+
+class ExportDocument(BaseModel):
+    """A portable export: verbatim config files plus seed locks.
+
+    ``strict`` keeps JSON's ``true`` from validating as version 1.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    format: str
+    version: int
+    created_by: str
+    source_platform: str
+    items: list[str]
+    files: dict[str, str]
+    seeds: dict[str, str]
+
+
 class ResolvedStack(BaseModel):
     """The result of resolving a list of stack tokens.
 
@@ -66,6 +87,8 @@ class ResolvedStack(BaseModel):
     profiles: list[str] = Field(default_factory=list)
     inline: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    # Bundle names visited, in first-visit order; the export closure ships these files.
+    bundles: list[str] = Field(default_factory=list)
 
 
 class ClassifiedTokens(BaseModel):
@@ -78,6 +101,17 @@ class ClassifiedTokens(BaseModel):
 
     entries: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class RemoteSettings(BaseModel):
+    """Per-host settings for ``stack sync remote``, from ``remotes.yaml``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # default= by keyword: type checkers honor only the keyword form on a
+    # field specifier, and T18 calls RemoteSettings() in src.
+    stack: str | None = Field(default=None, min_length=1)
+    root: str | None = Field(default=None, min_length=1)
 
 
 class ProjectTracking(BaseModel):

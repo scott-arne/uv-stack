@@ -48,6 +48,13 @@ _FRAGMENT_WINDOW = 24
 #: drops the separator along with the comment.
 _COMMENT_RE = re.compile(r"(?:^|\s)#")
 
+#: Hint shown when a reference names an undeclared variable.
+UNDECLARED_HINT = (
+    "Add each name on its own line in variables.txt. Declaring it "
+    "is what makes it part of the root's portable contract, so an "
+    "environment variable alone is not enough."
+)
+
 
 @dataclass(frozen=True)
 class Variables:
@@ -508,11 +515,7 @@ def expand_all(
         raise ConfigError(
             f"Requirement sources reference {len(undeclared)} name(s) that are "
             f"not declared by the config root: {names}.",
-            hint=(
-                "Add each name on its own line in variables.txt. Declaring it "
-                "is what makes it part of the root's portable contract, so an "
-                "environment variable alone is not enough."
-            ),
+            hint=UNDECLARED_HINT,
         )
     if undefined:
         names = ", ".join(undefined)

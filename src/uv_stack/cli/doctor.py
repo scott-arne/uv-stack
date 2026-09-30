@@ -10,6 +10,7 @@ from rich.text import Text
 
 from uv_stack.cli._render import console, echo
 from uv_stack.config import ConfigRoot
+from uv_stack.hints import escape_controls
 from uv_stack.operations.doctor import Finding, RepairAction, diagnose, repair
 
 
@@ -42,11 +43,13 @@ def _print_findings(findings: list[Finding]) -> None:
         return
     for finding in findings:
         color = "red" if finding.level == "error" else "yellow"
-        console.print(
-            Text.assemble((finding.level.upper(), color), f" {finding.message}")
-        )
+        # A finding can quote a load error, and so a name or key read from
+        # disk; Rich would pass an escape in it through to the terminal.
+        message = escape_controls(finding.message, keep_layout=True)
+        console.print(Text.assemble((finding.level.upper(), color), f" {message}"))
         if finding.fix:
-            console.print(Text.assemble("    ", ("fix:", "dim"), f" {finding.fix}"))
+            fix = escape_controls(finding.fix, keep_layout=True)
+            console.print(Text.assemble("    ", ("fix:", "dim"), f" {fix}"))
 
 
 @click.command("doctor")

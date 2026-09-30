@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sys
+from collections.abc import Callable, Mapping
 
 import rich_click as click
 from rich.text import Text
@@ -11,6 +13,7 @@ from uv_stack.cli._complete import complete_env_names
 from uv_stack.cli._render import console, echo, render_error, render_os_error, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ToolError, UvStackError
+from uv_stack.hints import escape_controls
 from uv_stack.operations.scaffold import validate_name
 from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
 from uv_stack.runner import SubprocessRunner
@@ -47,6 +50,8 @@ def _run_upgrade(
     stop_on_error: bool = False,
     rule_verb: str = "Upgrading",
     all_succeeded: str = "All requested environments upgraded.",
+    seeds: Mapping[str, str] | None = None,
+    on_success: Callable[[str], None] | None = None,
 ) -> None:
     """Upgrade each environment, continuing past failures by default.
 
@@ -67,6 +72,11 @@ def _run_upgrade(
         from a call site in this package, never user input. A dry run ignores
         it in favour of :data:`_ALL_PLANNED`, since neither command upgraded
         nor synced anything.
+    :param seeds: Lock text shipped by an export, keyed by environment name.
+        Each environment runs with its own entry as ``UpgradeOptions.seed``,
+        and an environment absent from the mapping runs unseeded.
+    :param on_success: Called with each environment's name after it upgrades
+        without error.
     """
     runner = SubprocessRunner()
     failures: list[tuple[str, UvStackError | OSError]] = []
@@ -81,8 +91,11 @@ def _run_upgrade(
     for name in targets:
         attempted.append(name)
         console.rule(Text(f"{rule_verb} {name}"))
+        env_options = (
+            dataclasses.replace(options, seed=seeds.get(name)) if seeds is not None else options
+        )
         try:
-            result = upgrade_env(config, runner, name, options)
+            result = upgrade_env(config, runner, name, env_options)
         except UvStackError as error:
             render_warnings(error.resolution_warnings)
             render_error(error)
@@ -103,6 +116,8 @@ def _run_upgrade(
                 break
             continue
         render_warnings(result.warnings)
+        if on_success is not None:
+            on_success(name)
         if options.dry_run:
             echo("Planned commands:")
             for command in result.planned:
@@ -130,13 +145,17 @@ def _failure_reason(error: UvStackError | OSError) -> str:
     stderr tail) collapsed to its last line — typically the actual diagnostic,
     e.g. ``numba requires numpy>=1.22,<2.5, but 2.5.0 is installed`` — and falls
     back to the error message for non-tool failures (bad config, resolution).
-    For an :class:`OSError`, the strerror is used if available.
+    For an :class:`OSError`, the strerror is used if available. Control
+    characters are spelled as escapes, as :func:`render_error` does, since the
+    reason repeats text read from disk outside the error panel.
     """
     if isinstance(error, ToolError) and error.detail:
-        return error.detail.splitlines()[-1].strip()
-    if isinstance(error, OSError):
-        return error.strerror or str(error)
-    return error.message
+        reason = error.detail.splitlines()[-1].strip()
+    elif isinstance(error, OSError):
+        reason = error.strerror or str(error)
+    else:
+        reason = error.message
+    return escape_controls(reason, keep_layout=True)
 
 
 def _print_summary(
