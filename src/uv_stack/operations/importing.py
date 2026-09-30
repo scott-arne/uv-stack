@@ -741,10 +741,17 @@ def used_by(config: ConfigRoot, keys: Iterable[str]) -> tuple[dict[str, list[str
         try:
             resolved = Resolver(config).resolve(config.load_env(env).stack)
         except UvStackError as error:
-            warnings.append(f"Cannot tell what environment '{env}' uses: {error.message}")
+            # The warning renderer keeps newlines and tabs, which a listed
+            # directory name may hold, so the name is escaped in full here.
+            warnings.append(
+                f"Cannot tell what environment '{escape_controls(env)}' uses: {error.message}"
+            )
             continue
         except OSError as error:
-            warnings.append(f"Cannot tell what environment '{env}' uses: {_os_reason(error)}")
+            warnings.append(
+                f"Cannot tell what environment '{escape_controls(env)}' uses: "
+                f"{_os_reason(error)}"
+            )
             continue
         reached = [file_key("profile", p) for p in resolved.profiles]
         reached += [file_key("bundle", b) for b in resolved.bundles]

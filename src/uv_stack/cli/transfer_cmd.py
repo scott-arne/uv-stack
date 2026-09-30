@@ -41,7 +41,9 @@ def _echo(message: str, *, nl: bool = True) -> None:
 
     Everything import prints comes from a document another machine wrote or
     from names on this machine's disk, and a terminal acts on an escape
-    sequence in either.
+    sequence in either. Newlines and tabs are kept for the diff's layout, so a
+    name listed from disk, where nothing refuses them, is escaped in full
+    before it joins a line; otherwise it could start a line of its own.
     """
     click.echo(escape_controls(message, keep_layout=True), nl=nl)
 
@@ -82,13 +84,14 @@ def print_conflicts(error: ConflictError) -> None:
         _echo(change_diff(change), nl=False)
         users = error.used_by.get(change.key)
         if users:
-            _echo(f"{change.key} is used by: {', '.join(users)}")
+            _echo(f"{change.key} is used by: {', '.join(escape_controls(u) for u in users)}")
 
 
 def dependents_line(names: list[str]) -> str:
     """Name the environments that use changed definitions but were not rebuilt."""
-    args = " ".join(render_positional_arg(n) for n in names)
-    return (f"Not rebuilt, but using changed definitions: {', '.join(names)}. "
+    shown = [escape_controls(n) for n in names]
+    args = " ".join(render_positional_arg(n) for n in shown)
+    return (f"Not rebuilt, but using changed definitions: {', '.join(shown)}. "
             f"Rebuild them with 'stack sync env {args}'.")
 
 

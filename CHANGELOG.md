@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) with
 one addition, a `Breaking` section for changes that alter existing behavior, and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.1
+
+### Fixed
+
+- `stack import` prints a newline or tab in an environment name as its escape
+  where it names the environments that use a changed file, and in its warning
+  that an environment could not be read. Its output keeps newlines and tabs
+  for the conflict diff's layout, so a directory under `envs/` whose name held
+  one could print a line of its choosing.
+
 ## 0.7.0 - 2026-09-30
 
 ### Added

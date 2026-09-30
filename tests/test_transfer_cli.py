@@ -520,6 +520,46 @@ def test_used_by_and_dependents_lines_escape_an_environment_name(
     _assert_escaped(replaced, "Not rebuilt, but using changed definitions: a\\x1bb.")
 
 
+# Import keeps newlines and tabs for its diff's layout, so a name from this
+# machine's disk holding one would otherwise start a line of its own choosing.
+_LAYOUT_NAMES = pytest.mark.parametrize(
+    ("name", "escaped"), [("a\nb", "a\\nb"), ("a\tb", "a\\tb")], ids=["newline", "tab"]
+)
+
+
+@_LAYOUT_NAMES
+def test_used_by_and_dependents_lines_escape_a_layout_character_in_a_name(
+    config_tree: ConfigRoot, tmp_path: Path, name: str, escaped: str
+) -> None:
+    target = _target(tmp_path)
+    _run_import(target, _export(config_tree, "main"))
+    target.env_dir(name).mkdir()
+    target.env_stack_path(name).write_text("profile:ds\n")
+    target.profile_path("ds").write_text("includes:\n  - scipy\n")
+    doc = _export(config_tree, "main")
+    conflict = _run_import(target, doc)
+    assert conflict.exit_code == 1
+    assert f"profiles/ds.yaml is used by: {escaped}, main\n" in conflict.output
+    replaced = _run_import(target, doc, "--overwrite")
+    assert replaced.exit_code == 0, replaced.output
+    assert (f"Not rebuilt, but using changed definitions: {escaped}. "
+            f"Rebuild them with 'stack sync env '{escaped}''.\n") in replaced.output
+
+
+@_LAYOUT_NAMES
+def test_used_by_warning_escapes_a_layout_character_in_a_name(
+    config_tree: ConfigRoot, tmp_path: Path, name: str, escaped: str
+) -> None:
+    target = _target(tmp_path)
+    _run_import(target, _export(config_tree, "main"))
+    target.profile_path("ds").write_text("includes:\n  - scipy\n")
+    target.env_dir(name).mkdir()
+    target.env_stack_path(name).write_text("profile:ghost\n")
+    result = _run_import(target, _export(config_tree, "profile:ds"))
+    assert result.exit_code == 1
+    assert f"warning: Cannot tell what environment '{escaped}' uses: " in result.stderr
+
+
 def test_shipped_profile_with_an_escape_in_a_key_is_refused_cleanly(
     config_tree: ConfigRoot, tmp_path: Path
 ) -> None:
