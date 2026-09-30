@@ -259,13 +259,8 @@ class SubprocessRunner:
         :raises ToolError: When the command cannot be started.
         :raises UvStackError: When a thread cannot be started to feed stdin.
         """
-        try:
-            process = subprocess.Popen(
-                command.args, cwd=command.cwd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-        except OSError as error:
-            raise _spawn_error(command, error) from error
-
+        # Build all objects first so nothing fallible sits between the spawn
+        # and the cleanup region.
         data = text.encode("utf-8", errors="replace")
         failures: list[BaseException] = []
 
@@ -277,6 +272,7 @@ class SubprocessRunner:
                 pass
             except BaseException as error:  # re-raised on the calling thread below
                 failures.append(error)
+                process.kill()
             finally:
                 try:
                     process.stdin.close()
@@ -284,14 +280,23 @@ class SubprocessRunner:
                     pass
                 except OSError as error:
                     failures.append(error)
+                    process.kill()
 
         writer = threading.Thread(target=feed, name="uv-stack-stdin", daemon=True)
-        assert process.stderr is not None
-        stderr = cast(io.BufferedReader, process.stderr)
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         captured = bytearray()
         cap = _STDERR_TAIL_LINES * 1024
+
         try:
+            process = subprocess.Popen(
+                command.args, cwd=command.cwd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        except OSError as error:
+            raise _spawn_error(command, error) from error
+
+        try:
+            assert process.stderr is not None
+            stderr = cast(io.BufferedReader, process.stderr)
             try:
                 writer.start()
             except RuntimeError as error:
@@ -322,6 +327,7 @@ class SubprocessRunner:
             if writer.ident is not None:
                 writer.join()
             assert process.stdin is not None
+            assert process.stderr is not None
             process.stdin.close()
             process.stderr.close()
         if failures:

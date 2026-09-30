@@ -480,6 +480,28 @@ def test_run_with_input_bounds_a_newline_free_stderr(
     assert len(tail) <= _STDERR_TAIL_LINES * 1024
 
 
+def test_run_with_input_spawns_nothing_when_the_document_cannot_be_encoded() -> None:
+    class _Unencodable(str):
+        def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
+            raise ValueError("cannot encode")
+
+    spawned: list[subprocess.Popen[bytes]] = []
+    real_popen = subprocess.Popen
+
+    def spy(*args: Any, **kwargs: Any) -> subprocess.Popen[bytes]:
+        spawned.append(real_popen(*args, **kwargs))
+        return spawned[-1]
+
+    real_popen_ref = subprocess.Popen
+    subprocess.Popen = spy
+    try:
+        with pytest.raises(ValueError, match="cannot encode"):
+            SubprocessRunner().run_with_input(_py("pass"), _Unencodable("x"))
+    finally:
+        subprocess.Popen = real_popen_ref
+    assert len(spawned) == 0
+
+
 def test_run_with_input_reaps_the_child_when_the_writer_cannot_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -528,14 +550,18 @@ def test_run_with_input_reraises_a_writer_failure_after_reaping(
         return proc
 
     before = threading.active_count()
-    code = "import sys; sys.stdin.read(); sys.exit(0)"
+    # Child ignores stdin and sleeps, so a writer failure should kill it rather
+    # than waiting 60 seconds for it to exit on its own.
+    code = "import time; time.sleep(60)"
     real_popen_ref = subprocess.Popen
     subprocess.Popen = spy
+    started = time.monotonic()
     try:
         with pytest.raises(ValueError, match="stdin write failed"):
             SubprocessRunner().run_with_input(_py(code), "x" * 1000)
     finally:
         subprocess.Popen = real_popen_ref
+    assert time.monotonic() - started < 30
     assert spawned[0].returncode is not None
     assert threading.active_count() == before
     err = capsys.readouterr().err
