@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import textwrap
 from dataclasses import dataclass
 
 import yaml
@@ -50,8 +51,9 @@ def load_remotes(config: ConfigRoot) -> dict[str, RemoteSettings]:
     remotes: dict[str, RemoteSettings] = {}
     for host, entry in data.items():
         if not isinstance(host, str):
+            kind = "null" if host is None else type(host).__name__
             raise ConfigError(
-                f"Host {host!r} in {path} is a YAML {type(host).__name__}, not a name.",
+                f"Host {host!r} in {path} is a YAML {kind}, not a name.",
                 hint="Quote the host name in remotes.yaml, for example \"yes\":",
                 path=path)
         try:
@@ -98,19 +100,33 @@ def remote_command(dest: str, stack: str, root: str | None, flags: list[str]) ->
     return Command(["ssh", dest, " ".join([stack, *map(shlex.quote, tail)])])
 
 
+# Non-interactive ssh often lacks ~/.local/bin, where uv tool and the
+# micromamba installer put their commands. stack is inserted verbatim, so a
+# PATH prefix reaches stack itself and the uv and micromamba it runs.
+_PATH_STACK = "PATH=$HOME/.local/bin:$PATH stack"
+
+
 def explain_exit(code: int, tail: str, dest: str, stack: str) -> UvStackError | None:
     """Explain the exit statuses that are ssh's or the remote shell's, not import's."""
     if code == 255:
         return UvStackError(
-            f"Could not connect to {dest}: ssh exited with status 255.",
-            hint=f"Check that 'ssh {dest}' works from this shell; this is a connection "
-            "failure, not an import failure.",
+            f"ssh to {dest} exited with status 255: the connection failed or dropped.",
+            hint=f"Check that 'ssh {dest}' works from this shell. Status 255 is ssh's own "
+            "failure, not an import refusal. If the connection dropped during the import, "
+            "re-running the same command is safe: files already written are reported as "
+            "identical and the rest are completed.",
         )
     if code == 127:
+        # Dumped rather than formatted, so a DEST that YAML would read as a
+        # bool, number, or null comes out quoted and the entry loads as shown.
+        entry = yaml.safe_dump({dest: {"stack": _PATH_STACK}}, default_flow_style=False,
+                               allow_unicode=True)
         return UvStackError(
             f"'{stack}' was not found on {dest} (exit status 127).",
-            hint="Install uv-stack there with 'uv tool install uv-stack', or add its path "
-            f"to remotes.yaml:\n  {dest}:\n    stack: ~/.local/bin/stack",
+            hint="Install uv-stack there with 'uv tool install uv-stack'. If it is installed, "
+            "the non-interactive ssh shell may not have it on PATH; a remotes.yaml entry can "
+            "put the directories holding stack, uv and micromamba on PATH:\n"
+            + textwrap.indent(entry.rstrip("\n"), "  "),
         )
     if code == 2 and "No such command 'import'" in tail:
         return UvStackError(

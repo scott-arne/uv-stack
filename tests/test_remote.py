@@ -4,13 +4,16 @@ import json
 import os
 import shlex
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
+import rich_click as click
 from click.testing import CliRunner
 
 import uv_stack.cli.sync_cmd
 from uv_stack.cli import cli
+from uv_stack.cli.transfer_cmd import import_cmd
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.models import RemoteSettings
@@ -87,6 +90,13 @@ def test_non_string_remotes_host_key_is_refused(config_tree: ConfigRoot, text: s
     assert "Quote the host name" in (caught.value.hint or "")
 
 
+def test_a_null_host_key_is_named_in_yaml_terms(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("null:\n")
+    with pytest.raises(ConfigError) as caught:
+        load_remotes(config_tree)
+    assert "is a YAML null, not a name" in caught.value.message
+
+
 def test_quoted_remotes_host_keys_load_verbatim(config_tree: ConfigRoot) -> None:
     config_tree.remotes_path().write_text('"yes":\n  root: /a\n"1":\n  root: /b\n')
     remotes = load_remotes(config_tree)
@@ -126,10 +136,39 @@ def test_exit_hints(code: int, tail: str, needle: str) -> None:
     assert needle in error.message + (error.hint or "")
 
 
-def test_exit_127_names_the_remotes_entry() -> None:
-    error = explain_exit(127, "", "box", "stack")
+@pytest.mark.parametrize("dest", ["box", "yes"])
+def test_exit_127_suggests_a_remotes_entry_that_loads(config_tree: ConfigRoot, dest: str) -> None:
+    # The entry is there to be pasted into remotes.yaml, so it must load: a
+    # DEST that YAML reads as a bool, such as yes, has to come out quoted.
+    error = explain_exit(127, "", dest, "stack")
     assert error is not None and error.hint is not None
-    assert "box:\n    stack: ~/.local/bin/stack" in error.hint
+    entry = [line for line in error.hint.splitlines() if line.startswith("  ")]
+    config_tree.remotes_path().write_text(textwrap.dedent("\n".join(entry)) + "\n")
+    assert load_remotes(config_tree) == {
+        dest: RemoteSettings(stack="PATH=$HOME/.local/bin:$PATH stack")}
+
+
+def test_exit_255_allows_for_a_dropped_session() -> None:
+    error = explain_exit(255, "", "box", "stack")
+    assert error is not None and error.hint is not None
+    assert "failed or dropped" in error.message
+    assert "re-running the same command is safe" in error.hint
+
+
+def _options(command: click.Command) -> dict[str | None, click.Option]:
+    return {p.name: p for p in command.params if isinstance(p, click.Option)}
+
+
+def test_sync_remote_help_matches_import_and_names_its_metavars() -> None:
+    remote = _options(uv_stack.cli.sync_cmd.sync_remote)
+    assert remote["overwrite"].help == _options(import_cmd)["overwrite"].help
+    assert remote["remote_root"].metavar == "PATH"
+    assert remote["remote_stack"].metavar == "CMD"
+    group = uv_stack.cli.sync_cmd.sync
+    assert "remote" in (group.help or "") and "remote" in (uv_stack.cli.sync_cmd.__doc__ or "")
+    # rich-click reads help as markup, so a bracketed word would vanish.
+    helps = [uv_stack.cli.sync_cmd.sync_remote.help, *(o.help for o in remote.values())]
+    assert not any("[" in (text or "") for text in helps)
 
 
 @pytest.mark.parametrize(("code", "tail"), [(2, "Usage: stack import"), (1, ""), (0, "")])

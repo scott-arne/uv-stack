@@ -162,12 +162,6 @@ class InteractiveRunner(Protocol):
         ...
 
 
-class InputRunner(Protocol):
-    """A runner that can feed a command's stdin (``stack sync remote``)."""
-
-    def run_with_input(self, command: Command, text: str) -> tuple[int, str]: ...
-
-
 class SubprocessRunner:
     """Runs commands with :mod:`subprocess`."""
 

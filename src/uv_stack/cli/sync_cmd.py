@@ -4,6 +4,9 @@ Sync is what a freshly cloned config root needs: create what is missing, build
 what is empty, recompile what has drifted, and do it for every environment the
 root declares. It adds no pipeline of its own — it runs ``stack upgrade``'s
 pipeline with ``create=True`` and ``no_upgrade=True`` across the whole root.
+``stack sync remote`` brings another machine into line instead: it exports
+from this root and pipes the document to ``stack import -`` on the remote over
+ssh, so the remote's own import writes and builds it.
 
 The group takes no positional arguments of its own. A ``nargs=-1`` argument on
 an ``invoke_without_command`` group swallows the subcommand name, so
@@ -175,6 +178,9 @@ def sync(
     '--upgrade' to force new ones. Unlike 'stack upgrade' with no arguments,
     sync never prompts — acting on every environment is the whole point of the
     command, so a confirmation would ask about the thing you just asked for.
+
+    To bring another machine into line instead, 'stack sync remote' exports
+    from this config root and imports on that machine over ssh.
     """
     given = {
         "dry_run": dry_run,
@@ -285,9 +291,11 @@ def sync_project(
 @sync.command("remote")
 @click.argument("items", nargs=-1, metavar="ITEMS...")
 @click.argument("dest", metavar="DEST")
-@click.option("--remote-root", help="Config root on the remote machine.")
-@click.option("--remote-stack", help="Command that runs uv-stack on the remote machine.")
-@click.option("--overwrite", is_flag=True, help="Replace files that differ on the remote.")
+@click.option("--remote-root", metavar="PATH", help="Config root on the remote machine.")
+@click.option("--remote-stack", metavar="CMD",
+              help="Command that runs uv-stack on the remote machine.")
+@click.option("--overwrite", is_flag=True,
+              help="Replace files that differ and remove target-only environment files.")
 @click.option("--no-build", is_flag=True, help="Install the definitions without building.")
 @click.option("--recreate", is_flag=True, help="Wipe and rebuild each environment there.")
 @click.option("--dry-run", is_flag=True, help="Report what the remote would change.")
