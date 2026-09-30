@@ -842,7 +842,11 @@ environments whose build failed, and the "Not rebuilt, but using changed
 definitions" line naming the remote's other environments that use a changed
 profile or bundle. The second line can appear even when every build
 succeeds, and with `--no-build` or `--dry-run`. Run these commands on the
-remote (for example over `ssh DEST`), not locally.
+remote (for example over `ssh DEST`), not locally. The printed commands use
+bare `stack` and the remote's default root; when the stack command or root
+was customized, run them with the same command and root the import used—for
+example, `ssh gpu-box '~/.local/bin/stack --root /data/python-envs sync env NAME'`
+for the `remotes.yaml` entry below.
 
 **Customizing the remote command.** `--remote-stack CMD` sets the stack command
 to run on the remote. `--remote-root PATH` sets the remote's config root. Both
@@ -906,9 +910,12 @@ an unreadable or invalid `remotes.yaml` file.
   `environment.yml`, and `requirements.lock.txt` are overwritten on every
   upgrade. For env-specific additions use `requirements.local.in`; for
   anything reusable, a profile.
-- **`--dry-run` is almost dry.** It runs no commands and never touches the
-  lock or the environment, but it does re-render `requirements.in` and
-  `environment.yml`.
+- **`--dry-run` is almost dry.** For environment-building commands (`stack
+  upgrade`, `stack sync env`, `stack sync`, `stack sync project`), `--dry-run`
+  runs no commands and never touches the lock or the environment, but it does
+  re-render `requirements.in` and `environment.yml`. `stack import --dry-run`
+  and `stack sync remote --dry-run` write nothing, but can still run micromamba
+  probes (on the remote, over ssh, for `stack sync remote`).
 - **Your lock is safe from failed compiles.** The lock is compiled to a
   temporary file and atomically swapped in, so a failed `uv pip compile`
   never corrupts an existing `requirements.lock.txt`. If the later *sync*
