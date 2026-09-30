@@ -267,6 +267,23 @@ def test_sync_remote_with_only_dest_sends_the_whole_root(
     assert expected <= set(json.loads(runner.inputs[0])["items"])
 
 
+def test_sync_remote_prints_an_invalid_remotes_yaml_without_a_control_character(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A YAML "\e" puts ESC in the key, and pydantic quotes an extra key in the
+    # error that load_remotes embeds in its message.
+    config_tree.remotes_path().write_text('box:\n  "evil\\e[2J": 1\n')
+    runner = RecordingRunner()
+    monkeypatch.setattr(uv_stack.cli.sync_cmd, "SubprocessRunner", lambda: runner)
+    result = CliRunner().invoke(cli, ["--root", str(config_tree.root), "sync", "remote",
+                                      "main", "box"], env={"COLUMNS": "200"})
+    assert result.exit_code == 1 and runner.commands == []
+    text = result.output + result.stderr
+    assert "Invalid remotes config" in text
+    assert "\x1b" not in text
+    assert "evil\\x1b[2J" in text
+
+
 def test_sync_remote_missing_item_never_connects(
     config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
 ) -> None:

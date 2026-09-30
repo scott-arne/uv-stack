@@ -60,6 +60,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   refused wherever a NAME is taken, as a name holding whitespace already was.
   `stack export` refuses such a name on disk rather than ship a document that
   every `stack import` would refuse.
+- Error panels, warnings, `stack doctor` findings and `stack status` messages
+  print a control character in their text as its escape (for example `\x1b`),
+  keeping newlines and tabs, so a name or value read from disk cannot drive
+  the terminal. `stack import` prints everything it reports the same way, the
+  conflict diff included.
 
 ## 0.6.0 - 2026-09-28
 

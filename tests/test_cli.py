@@ -4826,6 +4826,124 @@ def test_status_message_preserves_bracketed_text(tmp_path: Path, monkeypatch):
     assert "[type=list_type" in output
 
 
+# ---------------------------------------------------------------------------
+# control characters in printed messages
+# ---------------------------------------------------------------------------
+
+# A YAML double-quoted "\e" is how an escape reaches a parsed key: PyYAML
+# refuses a raw ESC anywhere in the stream. Pydantic then quotes the key in
+# the "extra inputs" error that the config loaders embed in their message.
+_ESC_KEY_YAML = '"evil\\e[2J": 1\n'
+
+
+def test_error_panel_escapes_control_characters_but_keeps_its_lines(capsys):
+    """Rich passes ESC and C1 through to the terminal, so the panel spells them."""
+    from uv_stack.cli._render import render_error
+    from uv_stack.errors import UvStackError
+
+    render_error(UvStackError("bad \x1b[2J name\nsecond line", hint="try \x9b this"))
+    lines = capsys.readouterr().err.splitlines()
+    assert not any("\x1b" in line or "\x9b" in line for line in lines)
+    first = next(i for i, line in enumerate(lines) if "bad \\x1b[2J name" in line)
+    assert "second line" in lines[first + 1]
+    assert any("try \\x9b this" in line for line in lines)
+
+
+@pytest.mark.parametrize("styled", [True, False])
+def test_warnings_escape_control_characters(capsys, styled):
+    from uv_stack.cli._render import render_warnings
+
+    render_warnings(["odd \x1b[31m name \x9b end"], styled=styled)
+    err = capsys.readouterr().err
+    assert "\x1b" not in err and "\x9b" not in err
+    assert "warning: odd \\x1b[31m name \\x9b end" in err
+
+
+def test_os_error_panel_escapes_control_characters(capsys):
+    from uv_stack.cli._render import render_os_error
+
+    render_os_error(PermissionError(errno.EACCES, "Denied \x9b here", "/tmp/a\x1b[2Jb"))
+    err = capsys.readouterr().err
+    assert "\x1b" not in err and "\x9b" not in err
+    assert "Denied \\x9b here" in err
+    assert "/tmp/a\\x1b[2Jb" in err
+
+
+def test_status_message_escapes_a_control_character(tmp_path: Path, monkeypatch):
+    """The config-error note quotes a key read from disk."""
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    root = tmp_path / "python-envs"
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    cfg.profile_path("web").write_text(_ESC_KEY_YAML)
+    env_dir = cfg.env_dir("alpha")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    (env_dir / "stack.txt").write_text("profile:web\n")
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "status"])
+    assert result.exit_code == 0
+    output = _combined_output(result)
+    assert "alpha: Invalid profile config" in output
+    assert "\x1b" not in output
+    assert "evil\\x1b[2J" in output
+
+
+def test_upgrade_summary_failure_reason_escapes_a_control_character(
+    tmp_path: Path, monkeypatch
+):
+    """The summary row repeats the message outside the error panel."""
+    from uv_stack.config import ConfigRoot
+    from uv_stack.operations.init import init_config_root
+
+    root = tmp_path / "python-envs"
+    cfg = ConfigRoot(root)
+    init_config_root(cfg)
+    cfg.profile_path("web").write_text(_ESC_KEY_YAML)
+    env_dir = cfg.env_dir("alpha")
+    env_dir.mkdir(parents=True)
+    (env_dir / "python.txt").write_text("3.12\n")
+    (env_dir / "stack.txt").write_text("profile:web\n")
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "alpha"])
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    summary = output.split("Summary", 1)[1]
+    assert "Invalid profile config" in summary
+    assert "\x1b" not in output
+    assert "evil\\x1b[2J" in summary
+
+
+def test_doctor_finding_escapes_a_control_character(tmp_path: Path, monkeypatch):
+    """Doctor turns an invalid remotes.yaml into a finding quoting its key."""
+    root = _seeded_root(tmp_path)
+    (root / "remotes.yaml").write_text("host:\n  " + _ESC_KEY_YAML)
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "doctor"])
+    output = _combined_output(result)
+    assert "Invalid remotes config" in output
+    assert "\x1b" not in output
+    assert "evil\\x1b[2J" in output
+
+
+def test_doctor_fix_line_escapes_a_control_character(tmp_path: Path, monkeypatch):
+    """The fix line names a path under a directory listed from disk."""
+    root = _seeded_root(tmp_path)
+    try:
+        (root / "envs" / "a\x1bb").mkdir()
+    except OSError:
+        pytest.skip("this filesystem refuses an escape in a file name")
+    (root / "envs" / "a\x1bb" / "stack.txt").write_text("rich\n")
+    monkeypatch.setenv("COLUMNS", "300")
+    result = CliRunner().invoke(cli, ["--root", str(root), "doctor"])
+    output = _combined_output(result)
+    assert "\x1b" not in output
+    assert "Env 'a\\x1bb' missing python.txt" in output
+    assert "a\\x1bb/python.txt." in output
+
+
 def test_table_directory_line_preserves_bracketed_path(tmp_path: Path, monkeypatch):
     """The ``<title> in <directory>`` line above a table carries the config root.
 

@@ -28,19 +28,27 @@ def has_control(text: str) -> bool:
     return any(unicodedata.category(char) == "Cc" for char in text)
 
 
-def escape_controls(text: str) -> str:
-    """Spell each control character in text as its Python escape.
+def escape_controls(text: str, *, keep_layout: bool = False) -> str:
+    """Spell each control character and lone surrogate in text as its Python escape.
 
     A message that must name a value holding a control character can then
-    print it without the terminal acting on it. Every other character is
-    kept, so text without a control character comes back unchanged.
+    print it without the terminal acting on it. A lone surrogate, which is how
+    Python decodes bytes that are not valid UTF-8, cannot be encoded for a
+    UTF-8 terminal at all, so printing one would raise rather than display;
+    spelled as an escape, it prints. Every other character is kept, so text
+    without either comes back unchanged.
 
     :param text: The text to render.
-    :returns: The text with, for example, ESC as ``\\x1b`` and LF as ``\\n``.
+    :param keep_layout: Keep newlines and tabs, which messages, warnings and
+        diffs use for layout. Every other control character is still escaped,
+        CR included, since a bare CR can overwrite the line it is on.
+    :returns: The text with, for example, ESC as ``\\x1b``, LF as ``\\n``
+        unless ``keep_layout`` is set, and a lone surrogate as ``\\udcff``.
     """
+    kept = "\n\t" if keep_layout else ""
     return "".join(
         char.encode("unicode_escape").decode("ascii")
-        if unicodedata.category(char) == "Cc"
+        if unicodedata.category(char) in ("Cc", "Cs") and char not in kept
         else char
         for char in text
     )

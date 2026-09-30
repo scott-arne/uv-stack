@@ -13,6 +13,7 @@ from uv_stack.cli._complete import complete_env_names
 from uv_stack.cli._render import console, echo, render_error, render_os_error, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ToolError, UvStackError
+from uv_stack.hints import escape_controls
 from uv_stack.operations.scaffold import validate_name
 from uv_stack.operations.upgrade import UpgradeOptions, upgrade_env
 from uv_stack.runner import SubprocessRunner
@@ -144,13 +145,17 @@ def _failure_reason(error: UvStackError | OSError) -> str:
     stderr tail) collapsed to its last line — typically the actual diagnostic,
     e.g. ``numba requires numpy>=1.22,<2.5, but 2.5.0 is installed`` — and falls
     back to the error message for non-tool failures (bad config, resolution).
-    For an :class:`OSError`, the strerror is used if available.
+    For an :class:`OSError`, the strerror is used if available. Control
+    characters are spelled as escapes, as :func:`render_error` does, since the
+    reason repeats text read from disk outside the error panel.
     """
     if isinstance(error, ToolError) and error.detail:
-        return error.detail.splitlines()[-1].strip()
-    if isinstance(error, OSError):
-        return error.strerror or str(error)
-    return error.message
+        reason = error.detail.splitlines()[-1].strip()
+    elif isinstance(error, OSError):
+        reason = error.strerror or str(error)
+    else:
+        reason = error.message
+    return escape_controls(reason, keep_layout=True)
 
 
 def _print_summary(

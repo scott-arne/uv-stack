@@ -62,3 +62,18 @@ def test_escape_controls_spells_each_control_character(text, escaped):
 @pytest.mark.parametrize("text", ["profiles/ds.yaml", "caf\u00e9", "a\u200bb", "a\\x1bb"])
 def test_escape_controls_returns_text_without_one_unchanged(text):
     assert escape_controls(text) == text
+
+
+def test_escape_controls_keeps_layout_but_nothing_else():
+    """Newlines and tabs lay a message out; a CR can overwrite the line it is on."""
+    assert escape_controls("a\nb\tc", keep_layout=True) == "a\nb\tc"
+    assert escape_controls("a\x1b[2J\rb\x7fc\x9bd", keep_layout=True) == (
+        "a\\x1b[2J\\rb\\x7fc\\x9bd"
+    )
+    assert escape_controls("a\nb") == "a\\nb"
+
+
+@pytest.mark.parametrize("keep_layout", [False, True])
+def test_escape_controls_spells_a_lone_surrogate(keep_layout):
+    """A lone surrogate cannot be encoded for a UTF-8 terminal, so it is escaped."""
+    assert escape_controls("a\udcffb", keep_layout=keep_layout) == "a\\udcffb"

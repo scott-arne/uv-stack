@@ -11,6 +11,11 @@ So: **never interpolate user data into a markup string.** A line that carries
 any user-controlled text is assembled as :class:`~rich.text.Text`, which does
 not parse markup at all; markup strings stay reserved for wholly literal lines
 the author controls. :func:`echo` is plain click output and is unaffected.
+
+The error and warning renderers print messages that carry names and text read
+from disk or from an export document, and Rich passes ESC and C1 characters
+through to the terminal. So they spell control characters as escapes, keeping
+newlines and tabs for layout.
 """
 
 from __future__ import annotations
@@ -28,6 +33,7 @@ from rich.table import Table
 from rich.text import Text
 
 from uv_stack.errors import UvStackError
+from uv_stack.hints import escape_controls
 
 
 class _ConsoleWithBrokenPipePropagation(Console):
@@ -56,11 +62,11 @@ def render_error(error: UvStackError) -> None:
     subject of the sentence. Assembling a :class:`~rich.text.Text` keeps them
     literal while still styling the ``Hint:`` label.
     """
-    body = Text(error.message)
+    body = Text(escape_controls(error.message, keep_layout=True))
     if error.hint:
         body.append("\n\n")
         body.append("Hint:", style="dim")
-        body.append(f" {error.hint}")
+        body.append(f" {escape_controls(error.hint, keep_layout=True)}")
     error_console.print(Panel(body, title="uv-stack error", border_style="red"))
 
 
@@ -73,7 +79,7 @@ def render_os_error(error: OSError) -> None:
     the part a user can search for; ``filename`` is user data and is assembled
     as :class:`~rich.text.Text` like everything else here.
     """
-    body = Text(error.strerror or str(error))
+    body = Text(escape_controls(error.strerror or str(error), keep_layout=True))
     code = errno.errorcode.get(error.errno) if error.errno is not None else None
     if code:
         body.append("\n\n")
@@ -82,7 +88,7 @@ def render_os_error(error: OSError) -> None:
     if error.filename:
         body.append("\n")
         body.append("Path:", style="dim")
-        body.append(f" {error.filename}")
+        body.append(f" {escape_controls(str(error.filename), keep_layout=True)}")
     error_console.print(Panel(body, title="uv-stack error", border_style="red"))
 
 
@@ -93,10 +99,11 @@ def render_warnings(warnings: Iterable[str], *, styled: bool = True) -> None:
         (JSON output modes must keep stderr unstyled).
     """
     for warning in warnings:
+        text = escape_controls(warning, keep_layout=True)
         if styled:
-            error_console.print(Text.assemble(("warning:", "yellow"), f" {warning}"))
+            error_console.print(Text.assemble(("warning:", "yellow"), f" {text}"))
         else:
-            click.echo(f"warning: {warning}", err=True)
+            click.echo(f"warning: {text}", err=True)
 
 
 def render_table(

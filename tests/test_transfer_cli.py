@@ -462,3 +462,81 @@ def test_a_mixed_build_reruns_only_the_failure_and_reports_the_success(
     assert not any(line.startswith("beta: ") for line in result.output.splitlines())
     assert "Re-run the failed build(s) once the cause is fixed: stack sync env beta\n" \
         in result.output
+
+
+# Everything import prints comes from another machine's document or from
+# names on this machine's disk, and a terminal acts on ESC and C1 characters.
+# A YAML double-quoted "\e" is how an escape reaches a parsed value, since
+# PyYAML refuses a raw ESC anywhere in the stream.
+
+
+def _assert_escaped(result: Result, escaped: str) -> None:
+    """Assert no raw ESC or CSI reached either stream, and the escape did."""
+    text = result.output + result.stderr
+    assert "\x1b" not in text and "\x9b" not in text
+    assert escaped in text
+
+
+def test_missing_editable_with_an_escape_is_refused_cleanly(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_tree.profile_path("ds").write_text('includes:\n  - "-e /missing\\e[2Kpkg"\n')
+    target = _target(tmp_path)
+    _fake_build(monkeypatch, target)
+    result = _run_import(target, _export(config_tree, "main"), build=True)
+    assert result.exit_code == 1 and "missing on this machine" in result.output
+    _assert_escaped(result, "/missing\\x1b[2Kpkg")
+
+
+def test_pin_report_escapes_a_seed_entry(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_tree.env_requirements_lock("main").write_text(
+        "numpy==1.26.4\nwidget @ file:///w/widget\x1b[2K.whl\n")
+    target = _target(tmp_path)
+    _fake_build(monkeypatch, target, lock_text="numpy==1.26.4\nwidget @ file:///w/w2.whl\n")
+    result = _run_import(target, _export(config_tree, "main"), build=True)
+    assert result.exit_code == 0, result.output
+    _assert_escaped(result, "  changed: widget file:///w/widget\\x1b[2K.whl -> file:///w/w2.whl\n")
+
+
+def test_used_by_and_dependents_lines_escape_an_environment_name(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = _target(tmp_path)
+    _run_import(target, _export(config_tree, "main"))
+    try:
+        target.env_dir("a\x1bb").mkdir()
+    except OSError:
+        pytest.skip("this filesystem refuses an escape in a file name")
+    target.env_stack_path("a\x1bb").write_text("profile:ds\n")
+    target.profile_path("ds").write_text("includes:\n  - scipy\n")
+    doc = _export(config_tree, "main")
+    conflict = _run_import(target, doc)
+    assert conflict.exit_code == 1
+    _assert_escaped(conflict, "profiles/ds.yaml is used by: a\\x1bb")
+    replaced = _run_import(target, doc, "--overwrite")
+    assert replaced.exit_code == 0, replaced.output
+    _assert_escaped(replaced, "Not rebuilt, but using changed definitions: a\\x1bb.")
+
+
+def test_shipped_profile_with_an_escape_in_a_key_is_refused_cleanly(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    data = json.loads(_export(config_tree, "profile:ds"))
+    data["files"]["profiles/ds.yaml"] = '"evil\\e[2J": 1\n'
+    target = _target(tmp_path)
+    result = _run_import(target, json.dumps(data))
+    assert result.exit_code == 1 and "Invalid profile config" in _flat_import(result)
+    _assert_escaped(result, "evil\\x1b[2J")
+
+
+def test_conflict_diff_escapes_content_but_keeps_its_lines(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = _target(tmp_path)
+    _run_import(target, _export(config_tree, "main"))
+    config_tree.env_dir("main").joinpath("micromamba.txt").write_text("graphviz\x1b[2Kx\n")
+    result = _run_import(target, _export(config_tree, "main"))
+    assert result.exit_code == 1
+    _assert_escaped(result, "\n-graphviz\n+graphviz\\x1b[2Kx\n")

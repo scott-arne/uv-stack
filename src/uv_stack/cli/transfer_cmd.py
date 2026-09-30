@@ -7,11 +7,11 @@ from pathlib import Path
 
 import rich_click as click
 
-from uv_stack.cli._render import echo, render_error, render_warnings
+from uv_stack.cli._render import render_error, render_warnings
 from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
 from uv_stack.fsutil import atomic_write
-from uv_stack.hints import render_positional_arg
+from uv_stack.hints import escape_controls, render_positional_arg
 from uv_stack.models import ExportDocument
 from uv_stack.operations.export import (
     AmbiguousItemError,
@@ -36,6 +36,16 @@ from uv_stack.operations.upgrade import UpgradeOptions
 from uv_stack.runner import SubprocessRunner
 
 
+def _echo(message: str, *, nl: bool = True) -> None:
+    """Print a line of import's output with its control characters spelled as escapes.
+
+    Everything import prints comes from a document another machine wrote or
+    from names on this machine's disk, and a terminal acts on an escape
+    sequence in either.
+    """
+    click.echo(escape_controls(message, keep_layout=True), nl=nl)
+
+
 def export_items(config: ConfigRoot, items: tuple[str, ...] | list[str]) -> ExportResult:
     """Build the export document, turning an ambiguous item into exit 2.
 
@@ -51,28 +61,28 @@ def export_items(config: ConfigRoot, items: tuple[str, ...] | list[str]) -> Expo
 
 def print_header(document: ExportDocument) -> None:
     """Say what is being imported, and whether pins may re-resolve here."""
-    echo(f"Importing {len(document.items)} item(s) exported by {document.created_by} "
-         f"on {document.source_platform}.")
+    _echo(f"Importing {len(document.items)} item(s) exported by {document.created_by} "
+          f"on {document.source_platform}.")
     here = source_platform()
     if here != document.source_platform:
-        echo(f"This machine is {here}: pins re-resolved where this platform differs.")
+        _echo(f"This machine is {here}: pins re-resolved where this platform differs.")
 
 
 def print_plan(plan: ImportPlan) -> None:
     """List each file's outcome and any variables the import declares."""
     for change in plan.changes:
-        echo(f"  {STATUS_LABELS[change.status]}: {change.key}")
+        _echo(f"  {STATUS_LABELS[change.status]}: {change.key}")
     if plan.missing_variables:
-        echo(f"  declare in variables.txt: {', '.join(plan.missing_variables)}")
+        _echo(f"  declare in variables.txt: {', '.join(plan.missing_variables)}")
 
 
 def print_conflicts(error: ConflictError) -> None:
     """Print each conflicting file's diff and the environments that use it."""
     for change in error.conflicts:
-        click.echo(change_diff(change), nl=False)
+        _echo(change_diff(change), nl=False)
         users = error.used_by.get(change.key)
         if users:
-            echo(f"{change.key} is used by: {', '.join(users)}")
+            _echo(f"{change.key} is used by: {', '.join(users)}")
 
 
 def dependents_line(names: list[str]) -> str:
@@ -142,12 +152,12 @@ def import_cmd(config: ConfigRoot, source: str, overwrite: bool, dry_run: bool,
                 print_plan(plan)
                 if dry_run:
                     for step in plan.builds:
-                        echo(f"  build: {step.name} ({step.action})")
+                        _echo(f"  build: {step.name} ({step.action})")
                 elif plan.builds:
                     _build(config, plan, recreate=recreate, strict=strict)
             finally:
                 if plan.dependents:
-                    echo(dependents_line(plan.dependents))
+                    _echo(dependents_line(plan.dependents))
     except ConflictError as error:
         # First, so a warning that an environment could not be read qualifies
         # the "used by" lists below.
@@ -155,7 +165,7 @@ def import_cmd(config: ConfigRoot, source: str, overwrite: bool, dry_run: bool,
         print_conflicts(error)
         raise
     if dry_run:
-        echo("Dry run: nothing written.")
+        _echo("Dry run: nothing written.")
 
 
 def _build(config: ConfigRoot, plan: ImportPlan, *, recreate: bool, strict: bool) -> None:
@@ -181,7 +191,7 @@ def _build(config: ConfigRoot, plan: ImportPlan, *, recreate: bool, strict: bool
         seed = plan.document.seeds.get(name)
         if seed is not None:
             for line in pin_report(name, seed, config.env_requirements_lock(name)):
-                echo(line)
+                _echo(line)
 
     options = UpgradeOptions(create=True, recreate=recreate, no_upgrade=True, strict=strict)
     try:
@@ -191,4 +201,4 @@ def _build(config: ConfigRoot, plan: ImportPlan, *, recreate: bool, strict: bool
         failed = [n for n in names if n not in built]
         if failed:
             args = " ".join(render_positional_arg(n) for n in failed)
-            echo(f"Re-run the failed build(s) once the cause is fixed: stack sync env {args}")
+            _echo(f"Re-run the failed build(s) once the cause is fixed: stack sync env {args}")
