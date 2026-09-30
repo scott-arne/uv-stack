@@ -141,6 +141,10 @@ def test_editable_target_extracts_the_path() -> None:
         ("-e https://example.invalid/x.tar.gz", None),
         # urlsplit raises on the unclosed bracket; the entry is left to uv.
         ("-e file://[/src/pkg", None),
+        # A raw bracket suffix is extras; an encoded one is part of the path.
+        ("-e file:///src/pkg[dev]", "/src/pkg"),
+        ("-e file:///src/pkg%5Bdev%5D", "/src/pkg[dev]"),
+        (f"-e {Path('/src/pkg[dev]').as_uri()}", "/src/pkg[dev]"),
     ],
 )
 def test_editable_target_reads_a_local_file_url_as_its_path(

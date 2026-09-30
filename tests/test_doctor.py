@@ -1755,6 +1755,19 @@ def test_a_present_file_url_checkout_and_another_hosts_file_url_are_not_flagged(
     assert not [f for f in diagnose(config_tree) if f.kind == "missing-checkout"]
 
 
+def test_an_encoded_bracket_in_a_file_url_checkout_is_part_of_its_path(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    # as_uri() percent-encodes the brackets, so the directory is 'pkg[dev]'
+    # and not 'pkg' carrying extras; the present 'pkg' must not satisfy it.
+    (tmp_path / "pkg").mkdir()
+    checkout = tmp_path / "pkg[dev]"
+    config_tree.profile_path("dev").write_text(f"includes:\n  - -e {checkout.as_uri()}\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
+    assert finding.level == "warn"
+    assert str(checkout) in finding.message
+
+
 def test_the_long_editable_spelling_is_recognized(
     config_tree: ConfigRoot, tmp_path: Path
 ):

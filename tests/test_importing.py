@@ -1046,6 +1046,22 @@ def test_preflight_refuses_a_missing_file_url_editable_before_writing(
     assert _build_plan(target, _raw(config_tree, "main")).builds == [BuildStep("main", "create")]
 
 
+def test_preflight_keeps_an_encoded_bracket_in_a_file_url_editable_path(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    # as_uri() percent-encodes the brackets, so the checkout is 'pkg[dev]';
+    # reading them as extras would probe the present 'pkg' and let it pass.
+    (tmp_path / "pkg").mkdir()
+    checkout = tmp_path / "pkg[dev]"
+    config_tree.profile_path("ds").write_text(f"includes:\n  - -e {checkout.as_uri()}\n")
+    target = ConfigRoot(tmp_path / "target")
+    with pytest.raises(ConfigError) as caught:
+        _build_plan(target, _raw(config_tree, "main"), dry_run=False)
+    assert str(checkout) in caught.value.message
+    assert not target.profile_path("ds").exists()
+    assert not target.env_stack_path("main").exists()
+
+
 def test_preflight_checks_a_file_url_editable_after_expanding_its_variable(
     config_tree: ConfigRoot, tmp_path: Path
 ) -> None:

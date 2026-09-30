@@ -130,7 +130,8 @@ def editable_target(entry: str) -> str | None:
     a ``#`` inside a token is ordinary text and ``-e ./pkg#1`` installs from
     ``./pkg#1``.
 
-    A trailing PEP 508 extras suffix is dropped from the operand.
+    A trailing PEP 508 extras suffix is dropped from the operand; in a file
+    URL that happens before decoding, so ``%5Bdev%5D`` stays in the path.
 
     :param entry: One expanded requirement entry.
     :returns: The path operand, or ``None``.
@@ -207,7 +208,13 @@ def editable_target(entry: str) -> str | None:
             return None
         if url.netloc.lower() not in ("", "localhost") or not url.path.startswith("/"):
             return None
-        target = unquote(url.path)
+        # The extras suffix is stripped before decoding, and not again after:
+        # a URL spells a bracket that belongs to the directory name as '%5B',
+        # so a bracket that appears only once decoded is part of the path.
+        path = url.path
+        if path.endswith("]") and "[" in path:
+            path = path[: path.rindex("[")]
+        return unquote(path)
     elif "://" in target or target.startswith("git+"):
         return None
     # pip reads '-e ./pkg[dev]' as the path './pkg' carrying extras, so probing
