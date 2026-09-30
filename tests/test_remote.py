@@ -54,3 +54,17 @@ def test_unreadable_remotes_file_is_an_os_error(config_tree: ConfigRoot) -> None
             load_remotes(config_tree)
     finally:
         config_tree.remotes_path().chmod(0o644)
+
+
+@pytest.mark.parametrize("text", ["yes:\n", "1:\n", "null:\n", "2026-09-29:\n"])
+def test_non_string_remotes_host_key_is_refused(config_tree: ConfigRoot, text: str) -> None:
+    config_tree.remotes_path().write_text(text)
+    with pytest.raises(ConfigError, match="remotes.yaml") as caught:
+        load_remotes(config_tree)
+    assert "Quote the host name" in (caught.value.hint or "")
+
+
+def test_quoted_remotes_host_keys_load_verbatim(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text('"yes":\n  root: /a\n"1":\n  root: /b\n')
+    remotes = load_remotes(config_tree)
+    assert remotes == {"yes": RemoteSettings(root="/a"), "1": RemoteSettings(root="/b")}

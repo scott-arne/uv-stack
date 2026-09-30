@@ -39,8 +39,13 @@ def load_remotes(config: ConfigRoot) -> dict[str, RemoteSettings]:
                           path=path)
     remotes: dict[str, RemoteSettings] = {}
     for host, entry in data.items():
+        if not isinstance(host, str):
+            raise ConfigError(
+                f"Host {host!r} in {path} is a YAML {type(host).__name__}, not a name.",
+                hint="Quote the host name in remotes.yaml, for example \"yes\":",
+                path=path)
         try:
-            remotes[str(host)] = RemoteSettings.model_validate({} if entry is None else entry)
+            remotes[host] = RemoteSettings.model_validate({} if entry is None else entry)
         except ValidationError as exc:
             raise ConfigError(f"Invalid remotes config in {path}: {exc}", path=path) from exc
     return remotes
