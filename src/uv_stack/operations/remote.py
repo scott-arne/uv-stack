@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import os
+import shlex
+from dataclasses import dataclass
 
 import yaml
 from pydantic import ValidationError
 
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError
+from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.fsutil import read_text_utf8, require_regular_file
 from uv_stack.models import RemoteSettings
+from uv_stack.runner import Command
 
 
 def load_remotes(config: ConfigRoot) -> dict[str, RemoteSettings]:
@@ -56,3 +59,62 @@ def load_remotes(config: ConfigRoot) -> dict[str, RemoteSettings]:
         except ValidationError as exc:
             raise ConfigError(f"Invalid remotes config in {path}: {exc}", path=path) from exc
     return remotes
+
+
+_DEFAULT_STACK = "stack"
+
+
+def check_destination(dest: str) -> None:
+    """Refuse a DEST that ssh would parse as an option."""
+    if dest.startswith("-"):
+        raise UvStackError(
+            f"Refusing destination '{dest}': it begins with '-', which ssh reads as an option.",
+            hint="Name the host as user@host or an ssh-config alias.",
+        )
+
+
+@dataclass(frozen=True)
+class ResolvedRemote:
+    """The remote ``stack`` command and root, after precedence."""
+
+    stack: str
+    root: str | None
+
+
+def resolve_settings(config: ConfigRoot, dest: str, *, stack_flag: str | None,
+                     root_flag: str | None) -> ResolvedRemote:
+    """Apply flag, then ``remotes.yaml`` entry (DEST exactly as typed), then default."""
+    entry = load_remotes(config).get(dest, RemoteSettings())
+    return ResolvedRemote(stack_flag or entry.stack or _DEFAULT_STACK, root_flag or entry.root)
+
+
+def remote_command(dest: str, stack: str, root: str | None, flags: list[str]) -> Command:
+    """Build ``ssh DEST <stack> [--root ROOT] import - FLAGS``.
+
+    ``stack`` is inserted as written so ``~``, ``$HOME``, and multi-word
+    commands work on the remote; everything after it is quoted.
+    """
+    tail = (["--root", root] if root else []) + ["import", "-", *flags]
+    return Command(["ssh", dest, " ".join([stack, *map(shlex.quote, tail)])])
+
+
+def explain_exit(code: int, tail: str, dest: str, stack: str) -> UvStackError | None:
+    """Explain the exit statuses that are ssh's or the remote shell's, not import's."""
+    if code == 255:
+        return UvStackError(
+            f"Could not connect to {dest}: ssh exited with status 255.",
+            hint=f"Check that 'ssh {dest}' works from this shell; this is a connection "
+            "failure, not an import failure.",
+        )
+    if code == 127:
+        return UvStackError(
+            f"'{stack}' was not found on {dest} (exit status 127).",
+            hint="Install uv-stack there with 'uv tool install uv-stack', or add its path "
+            f"to remotes.yaml:\n  {dest}:\n    stack: ~/.local/bin/stack",
+        )
+    if code == 2 and "No such command 'import'" in tail:
+        return UvStackError(
+            f"The uv-stack on {dest} is too old to have 'import'.",
+            hint=f"Upgrade uv-stack on {dest}: 'uv tool upgrade uv-stack'.",
+        )
+    return None

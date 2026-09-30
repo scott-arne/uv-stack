@@ -1,13 +1,25 @@
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
+from click.testing import CliRunner
 
+import uv_stack.cli.sync_cmd
+from uv_stack.cli import cli
 from uv_stack.config import ConfigRoot
-from uv_stack.errors import ConfigError
+from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.models import RemoteSettings
-from uv_stack.operations.remote import load_remotes
+from uv_stack.operations.remote import (
+    ResolvedRemote,
+    check_destination,
+    explain_exit,
+    load_remotes,
+    remote_command,
+    resolve_settings,
+)
+from uv_stack.runner import RecordingRunner
 
 _IS_ROOT = getattr(os, "geteuid", lambda: -1)() == 0
 
@@ -76,3 +88,117 @@ def test_quoted_remotes_host_keys_load_verbatim(config_tree: ConfigRoot) -> None
     config_tree.remotes_path().write_text('"yes":\n  root: /a\n"1":\n  root: /b\n')
     remotes = load_remotes(config_tree)
     assert remotes == {"yes": RemoteSettings(root="/a"), "1": RemoteSettings(root="/b")}
+
+
+def test_settings_precedence(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("box:\n  stack: /opt/stack\n  root: /r\n")
+    assert resolve_settings(config_tree, "box", stack_flag=None, root_flag=None) == \
+        ResolvedRemote("/opt/stack", "/r")
+    assert resolve_settings(config_tree, "box", stack_flag="s", root_flag="/f") == \
+        ResolvedRemote("s", "/f")
+    assert resolve_settings(config_tree, "other", stack_flag=None, root_flag=None) == \
+        ResolvedRemote("stack", None)
+
+
+def test_stack_is_verbatim_and_the_rest_quoted() -> None:
+    command = remote_command("box", "uvx --from uv-stack stack", "/data/my envs",
+                             ["--overwrite"])
+    assert command.args == [
+        "ssh", "box", "uvx --from uv-stack stack --root '/data/my envs' import - --overwrite"]
+
+
+def test_destination_starting_with_dash_is_refused() -> None:
+    with pytest.raises(UvStackError):
+        check_destination("-oProxyCommand=x")
+
+
+@pytest.mark.parametrize(("code", "tail", "needle"), [
+    (255, "", "connect"),
+    (127, "", "uv tool install uv-stack"),
+    (2, "Error: No such command 'import'.", "Upgrade uv-stack"),
+])
+def test_exit_hints(code: int, tail: str, needle: str) -> None:
+    error = explain_exit(code, tail, "box", "stack")
+    assert error is not None
+    assert needle in error.message + (error.hint or "")
+
+
+def test_exit_127_names_the_remotes_entry() -> None:
+    error = explain_exit(127, "", "box", "stack")
+    assert error is not None and error.hint is not None
+    assert "box:\n    stack: ~/.local/bin/stack" in error.hint
+
+
+@pytest.mark.parametrize(("code", "tail"), [(2, "Usage: stack import"), (1, ""), (0, "")])
+def test_other_exits_get_no_hint(code: int, tail: str) -> None:
+    assert explain_exit(code, tail, "box", "stack") is None
+
+
+def test_sync_remote_sends_the_document(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = RecordingRunner(input_responder=lambda cmd, text: (0, ""))
+    monkeypatch.setattr(uv_stack.cli.sync_cmd, "SubprocessRunner", lambda: runner)
+    result = CliRunner().invoke(cli, ["--root", str(config_tree.root), "sync", "remote",
+                                      "main", "box", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(runner.inputs[0])["items"] == ["env:main"]
+    assert runner.commands[0].args == ["ssh", "box", "stack import - --dry-run"]
+
+
+def test_sync_remote_exit_status_is_the_remotes(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = RecordingRunner(input_responder=lambda cmd, text: (255, ""))
+    monkeypatch.setattr(uv_stack.cli.sync_cmd, "SubprocessRunner", lambda: runner)
+    result = CliRunner().invoke(cli, ["--root", str(config_tree.root), "sync", "remote",
+                                      "main", "box"])
+    assert result.exit_code == 255 and "connect" in result.output
+
+
+def test_sync_remote_refuses_recreate_with_no_build_before_connecting(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = RecordingRunner()
+    monkeypatch.setattr(uv_stack.cli.sync_cmd, "SubprocessRunner", lambda: runner)
+    result = CliRunner().invoke(cli, ["--root", str(config_tree.root), "sync", "remote",
+                                      "main", "box", "--recreate", "--no-build"])
+    assert result.exit_code == 2 and runner.commands == []
+    assert "cannot be combined" in result.output
+
+
+def test_sync_remote_with_only_dest_sends_the_whole_root(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = RecordingRunner(input_responder=lambda cmd, text: (0, ""))
+    monkeypatch.setattr(uv_stack.cli.sync_cmd, "SubprocessRunner", lambda: runner)
+    result = CliRunner().invoke(cli, ["--root", str(config_tree.root), "sync", "remote", "box"])
+    assert result.exit_code == 0, result.output
+    assert runner.commands[0].args[1] == "box"
+    expected = {"env:main", "profile:ds", "bundle:standard"}
+    assert expected <= set(json.loads(runner.inputs[0])["items"])
+
+
+def test_sync_remote_missing_item_never_connects(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = RecordingRunner()
+    monkeypatch.setattr(uv_stack.cli.sync_cmd, "SubprocessRunner", lambda: runner)
+    result = CliRunner().invoke(cli, ["--root", str(config_tree.root), "sync", "remote",
+                                      "profile:ghost", "box"])
+    assert result.exit_code == 1 and runner.commands == []
+
+
+@pytest.mark.parametrize(("flag", "message"), [
+    ("--remote-stack", "--remote-stack cannot be empty."),
+    ("--remote-root", "--remote-root cannot be empty."),
+])
+def test_sync_remote_refuses_empty_flag_values(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch, flag: str, message: str
+) -> None:
+    runner = RecordingRunner()
+    monkeypatch.setattr(uv_stack.cli.sync_cmd, "SubprocessRunner", lambda: runner)
+    result = CliRunner().invoke(cli, ["--root", str(config_tree.root), "sync", "remote",
+                                      "main", "box", flag, ""])
+    assert result.exit_code == 2 and runner.commands == []
+    assert message in result.output

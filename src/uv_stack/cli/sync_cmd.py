@@ -13,6 +13,7 @@ deliberately the all-environments form and nothing else.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -20,12 +21,21 @@ from typing import Any
 import rich_click as click
 
 from uv_stack.cli._complete import complete_env_names
-from uv_stack.cli._render import console
+from uv_stack.cli._render import console, render_error, render_warnings
 from uv_stack.cli.refresh_cmd import run_refresh
+from uv_stack.cli.transfer_cmd import export_items
 from uv_stack.cli.upgrade import _checked_names, _run_upgrade
 from uv_stack.config import ConfigRoot
+from uv_stack.operations.export import serialize_document
 from uv_stack.operations.project import RefreshOptions
+from uv_stack.operations.remote import (
+    check_destination,
+    explain_exit,
+    remote_command,
+    resolve_settings,
+)
 from uv_stack.operations.upgrade import UpgradeOptions
+from uv_stack.runner import SubprocessRunner
 
 #: Group-level flag destinations mapped to their spelling, for the refusal
 #: message below. Click's group and subcommand options are independent, so a
@@ -270,3 +280,46 @@ def sync_project(
         union=tokens,
     )
     run_refresh(config, options, cwd=Path.cwd())
+
+
+@sync.command("remote")
+@click.argument("items", nargs=-1, metavar="ITEMS...")
+@click.argument("dest", metavar="DEST")
+@click.option("--remote-root", help="Config root on the remote machine.")
+@click.option("--remote-stack", help="Command that runs uv-stack on the remote machine.")
+@click.option("--overwrite", is_flag=True, help="Replace files that differ on the remote.")
+@click.option("--no-build", is_flag=True, help="Install the definitions without building.")
+@click.option("--recreate", is_flag=True, help="Wipe and rebuild each environment there.")
+@click.option("--dry-run", is_flag=True, help="Report what the remote would change.")
+@click.option("--strict", is_flag=True, help="Refuse names that fall through to packages.")
+@click.pass_obj
+def sync_remote(config: ConfigRoot, items: tuple[str, ...], dest: str, remote_root: str | None,
+                remote_stack: str | None, overwrite: bool, no_build: bool, recreate: bool,
+                dry_run: bool, strict: bool) -> None:
+    """Export ITEMS and import them on DEST over ssh, in one step.
+
+    DEST is an ssh destination, user@host or an ssh-config alias. No ITEMS
+    means the whole root. The remote must run uv-stack; its command and root
+    come from remotes.yaml, or from --remote-stack and --remote-root. The exit
+    status is the remote's.
+    """
+    if no_build and recreate:
+        raise click.UsageError("--recreate rebuilds environments, so it cannot be combined "
+                               "with --no-build.")
+    if remote_stack is not None and remote_stack == "":
+        raise click.UsageError("--remote-stack cannot be empty.")
+    if remote_root is not None and remote_root == "":
+        raise click.UsageError("--remote-root cannot be empty.")
+    check_destination(dest)
+    exported = export_items(config, items)
+    render_warnings(exported.warnings, styled=False)
+    document = serialize_document(exported.document)
+    settings = resolve_settings(config, dest, stack_flag=remote_stack, root_flag=remote_root)
+    flags = [flag for flag, on in (("--overwrite", overwrite), ("--no-build", no_build),
+             ("--recreate", recreate), ("--dry-run", dry_run), ("--strict", strict)) if on]
+    command = remote_command(dest, settings.stack, settings.root, flags)
+    code, tail = SubprocessRunner().run_with_input(command, document)
+    explanation = explain_exit(code, tail, dest, settings.stack)
+    if explanation is not None:
+        render_error(explanation)
+    sys.exit(code)
