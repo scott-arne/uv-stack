@@ -836,9 +836,13 @@ terminal as they arrive; the local exit status is the remote's. Everything the
 import does—pre-flight checks, building environments, pin reports—happens on the
 remote and prints locally.
 
-**Re-run commands are for the remote.** When a build fails during the import,
-the remote prints re-run commands (`stack sync env NAME ...`). Those must be run
-on the remote machine (for example over `ssh DEST`), not locally.
+**Printed commands are for the remote.** The `stack sync env ...` commands
+the import prints refer to the remote machine: the re-run command for
+environments whose build failed, and the "Not rebuilt, but using changed
+definitions" line naming the remote's other environments that use a changed
+profile or bundle. The second line can appear even when every build
+succeeds, and with `--no-build` or `--dry-run`. Run these commands on the
+remote (for example over `ssh DEST`), not locally.
 
 **Customizing the remote command.** `--remote-stack CMD` sets the stack command
 to run on the remote. `--remote-root PATH` sets the remote's config root. Both
