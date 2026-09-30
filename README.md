@@ -910,12 +910,14 @@ an unreadable or invalid `remotes.yaml` file.
   `environment.yml`, and `requirements.lock.txt` are overwritten on every
   upgrade. For env-specific additions use `requirements.local.in`; for
   anything reusable, a profile.
-- **`--dry-run` is almost dry.** For environment-building commands (`stack
-  upgrade`, `stack sync env`, `stack sync`, `stack sync project`), `--dry-run`
-  runs no commands and never touches the lock or the environment, but it does
-  re-render `requirements.in` and `environment.yml`. `stack import --dry-run`
-  and `stack sync remote --dry-run` write nothing, but can still run micromamba
-  probes (on the remote, over ssh, for `stack sync remote`).
+- **`--dry-run` is almost dry.** For `stack upgrade`, `stack sync` and
+  `stack sync env`, `--dry-run` runs no uv commands and never touches the lock
+  or the environment, but it re-renders `requirements.in` and `environment.yml`
+  and can still ask micromamba for the environment's Python version. `stack
+  refresh --dry-run` and `stack sync project --dry-run` change nothing. `stack
+  import --dry-run` and `stack sync remote --dry-run` write nothing, but can
+  still run micromamba probes (on the remote, over ssh, for `stack sync
+  remote`).
 - **Your lock is safe from failed compiles.** The lock is compiled to a
   temporary file and atomically swapped in, so a failed `uv pip compile`
   never corrupts an existing `requirements.lock.txt`. If the later *sync*
