@@ -12,18 +12,24 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import _lock_held_by_another_process
+from uv_stack import fsutil
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
+from uv_stack.operations import importing
 from uv_stack.operations.export import build_document, serialize_document
 from uv_stack.operations.importing import (
+    ConflictError,
     FileChange,
     ImportOptions,
+    ImportPlan,
     change_diff,
     check_document,
     check_meanings,
     classify_changes,
     document_root,
     load_document,
+    prepared_import,
     read_document,
     refuse_shadowing,
     staged_root,
@@ -682,3 +688,154 @@ def test_a_target_bundle_with_an_invalid_stem_is_still_checked(
     target.bundle_path("-x").write_text("includes:\n  - utils\n")
     with pytest.raises(ConfigError, match="would mean profile 'utils'"):
         _meanings(target, _raw(config_tree, "profile:utils"))
+
+
+def _plan(target: ConfigRoot, data: dict[str, Any], *, overwrite: bool = False,
+          dry_run: bool = False) -> ImportPlan:
+    with prepared_import(target, _load(data), ImportOptions(overwrite=overwrite),
+                         dry_run=dry_run) as plan:
+        return plan
+
+
+def test_writes_go_in_kind_order_with_stack_txt_last(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    written: list[str] = []
+    real = importing.atomic_write
+    target = ConfigRoot(tmp_path / "target")
+
+    def record(path: Path, text: str) -> None:
+        written.append(path.relative_to(target.root).as_posix())
+        real(path, text)
+
+    monkeypatch.setattr(importing, "atomic_write", record)
+    config_tree.variables_path().write_text("WORK\n")
+    config_tree.profile_path("utils").write_text("includes:\n  - -e ${WORK}/x\n")
+    _plan(target, _raw(config_tree, "main"))
+    assert written[:3] == ["profiles/chem.yaml", "profiles/ds.yaml", "profiles/utils.yaml"]
+    assert written[3:5] == ["bundles/standard.yaml", "variables.txt"]
+    assert written[-1] == "envs/main/stack.txt"
+
+
+def test_conflict_writes_nothing_and_overwrite_replaces(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.profile_path("ds").parent.mkdir(parents=True)
+    target.profile_path("ds").write_text("includes:\n  - scipy\n")
+    with pytest.raises(ConflictError) as caught:
+        _plan(target, _raw(config_tree, "profile:ds"))
+    assert [c.key for c in caught.value.conflicts] == ["profiles/ds.yaml"]
+    assert target.profile_path("ds").read_text() == "includes:\n  - scipy\n"
+    _plan(target, _raw(config_tree, "profile:ds"), overwrite=True)
+    assert target.profile_path("ds").read_text() == config_tree.profile_path("ds").read_text()
+
+
+def test_a_file_conflict_is_reported_before_a_meaning_change(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.profile_path("ds").parent.mkdir(parents=True)
+    target.profile_path("ds").write_text("includes:\n  - scipy\n")
+    target.env_dir("work").mkdir(parents=True)
+    target.env_stack_path("work").write_text("utils\n")
+    data = _raw(config_tree, "profile:ds", "profile:utils")
+    with pytest.raises(ConflictError):
+        _plan(target, data)
+    with pytest.raises(ConfigError, match="would mean profile 'utils'"):
+        _plan(target, data, overwrite=True)
+    assert target.profile_path("ds").read_text() == "includes:\n  - scipy\n"
+
+
+@pytest.mark.parametrize("outcome", ["refused", "dry-run", "overwrite"])
+@pytest.mark.parametrize("orphan", [False, True])
+@pytest.mark.parametrize("filename", ["python.txt", "micromamba.txt", "channels.txt"])
+def test_a_target_only_env_file_through_the_whole_import(
+    config_tree: ConfigRoot, tmp_path: Path, filename: str, orphan: bool, outcome: str
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.env_dir("main").mkdir(parents=True)
+    if not orphan:
+        target.env_stack_path("main").write_text("@standard\n")
+    extra = target.env_dir("main") / filename
+    extra.write_text("x\n")
+    (config_tree.env_dir("main") / filename).unlink()
+    data = _raw(config_tree, "main")
+    key = f"envs/main/{filename}"
+    if outcome == "refused":
+        with pytest.raises(ConflictError) as caught:
+            _plan(target, data)
+        assert [(c.key, c.status) for c in caught.value.conflicts] == [(key, "target-only")]
+        assert extra.read_text() == "x\n"
+    elif outcome == "dry-run":
+        plan = _plan(target, data, overwrite=True, dry_run=True)
+        assert {c.key: c.status for c in plan.changes}[key] == "target-only"
+        assert extra.read_text() == "x\n"
+    else:
+        _plan(target, data, overwrite=True)
+        assert not extra.exists()
+        assert target.env_stack_path("main").is_file()
+
+
+def test_rerun_after_interruption_completes(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.env_dir("main").mkdir(parents=True)
+    (target.env_dir("main") / "channels.txt").write_text("old\n")
+    (config_tree.env_dir("main") / "channels.txt").unlink()
+    calls = {"n": 0}
+    real = importing.atomic_write
+
+    def flaky(path: Path, text: str) -> None:
+        calls["n"] += 1
+        if path.name == "stack.txt":
+            raise OSError(28, "No space left on device")
+        real(path, text)
+
+    monkeypatch.setattr(importing, "atomic_write", flaky)
+    with pytest.raises(ConfigError, match=r"^Import interrupted after writing \d+ of \d+ file"):
+        _plan(target, _raw(config_tree, "main"), overwrite=True)
+    assert not (target.env_dir("main") / "channels.txt").exists()  # removal landed first
+    monkeypatch.setattr(importing, "atomic_write", real)
+    plan = _plan(target, _raw(config_tree, "main"), overwrite=True)
+    statuses = {c.key: c.status for c in plan.changes}
+    assert statuses["profiles/ds.yaml"] == "identical"
+    assert statuses["envs/main/stack.txt"] == "new"
+    assert "envs/main/channels.txt" not in statuses
+
+
+def test_dry_run_writes_nothing_and_takes_no_locks(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.root.mkdir()
+    target.locks_dir.mkdir(parents=True, exist_ok=True)
+    with _lock_held_by_another_process(target.import_lock_path()):
+        plan = _plan(target, _raw(config_tree, "main"), dry_run=True)
+    assert {c.status for c in plan.changes} == {"new"}
+    assert not target.env_stack_path("main").exists()
+
+
+@pytest.mark.parametrize("which", ["import", "stem", "env"])
+def test_a_held_lock_refuses(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, which: str
+) -> None:
+    monkeypatch.setattr(fsutil, "_LOCK_TIMEOUT", 0.05)
+    target = ConfigRoot(tmp_path / "target")
+    target.locks_dir.mkdir(parents=True)
+    path = {"import": target.import_lock_path(), "stem": target.stem_lock_path("ds"),
+            "env": target.env_lock_path("main")}[which]
+    with _lock_held_by_another_process(path), pytest.raises(UvStackError) as caught:
+        _plan(target, _raw(config_tree, "main"))
+    if which == "import":
+        assert f"importing into '{target.root}'" in caught.value.message
+    assert not target.env_stack_path("main").exists()
+
+
+def test_profile_and_bundle_of_one_name_share_one_stem_lock(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fsutil, "_LOCK_TIMEOUT", 0.05)
+    (config_tree.bundles_dir / "utils.yaml").write_text("includes:\n  - profile:utils\n")
+    target = ConfigRoot(tmp_path / "target")
+    _plan(target, _raw(config_tree, "profile:utils", "bundle:utils"))
+    assert target.bundle_path("utils").is_file()

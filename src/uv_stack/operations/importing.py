@@ -17,7 +17,7 @@ import shutil
 import tempfile
 import unicodedata
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -26,7 +26,7 @@ from pydantic import ValidationError
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
-from uv_stack.fsutil import read_text_utf8, require_regular_file
+from uv_stack.fsutil import atomic_write, name_lock, read_text_utf8, require_regular_file
 from uv_stack.models import EXPORT_FORMAT, EXPORT_VERSION, ExportDocument
 from uv_stack.operations.diff import parse_lock_text
 from uv_stack.operations.edit import validate_bundle, validate_env, validate_profile
@@ -734,3 +734,143 @@ def check_meanings(
         for token in _bare_tokens(config, parsed):
             _refuse_change(token, config.root / key, _meaning(config, token),
                            _meaning(staged.root, token), incoming=False)
+
+
+@dataclass
+class ImportPlan:
+    """Everything an import decided before writing."""
+
+    document: ExportDocument
+    changes: list[FileChange]
+    missing_variables: list[str]
+    variables_text: str | None
+    warnings: list[str]
+    used_by: dict[str, list[str]]
+    dependents: list[str]
+
+
+def _env_items(document: ExportDocument) -> list[str]:
+    return [i.partition(":")[2] for i in document.items if i.startswith("env:")]
+
+
+def plan_import(
+    config: ConfigRoot, document: ExportDocument, doc_root: ConfigRoot,
+    referenced: list[str], options: ImportOptions,
+) -> ImportPlan:
+    """Run phases 2-4 in spec order and decide the writes; raise before any write.
+
+    The conflict refusal (phase 3) comes before the meaning check (phase 4) so
+    a document with both reports the diffs and the ``--overwrite`` hint first.
+    """
+    refuse_shadowing(config, document)
+    with staged_root(config, document, referenced) as staged:
+        warnings = validate_staged(config, staged, document, options)
+        changes = classify_changes(config, document)
+        touched = [c.key for c in changes if c.status != "identical"]
+        found, used_warnings = used_by(config, touched)
+        conflicts = [c for c in changes if c.status in ("different", "target-only")]
+        if conflicts and not options.overwrite:
+            raise ConflictError(conflicts, found)
+        check_meanings(config, document, doc_root, staged)
+    users = {env for envs in found.values() for env in envs}
+    return ImportPlan(
+        document=document, changes=changes, missing_variables=staged.missing_variables,
+        variables_text=staged.variables_text, warnings=warnings + used_warnings,
+        used_by=found, dependents=sorted(users - set(_env_items(document))),
+    )
+
+
+@contextmanager
+def import_locks(config: ConfigRoot, document: ExportDocument) -> Iterator[None]:
+    """Hold the root import lock, then stem locks, then env locks, in sorted order.
+
+    One fixed order across every import keeps two imports from deadlocking;
+    a profile and a bundle of one name share one stem lock, taken once.
+    """
+    stems = sorted(set(_shipped(document, "profile")) | set(_shipped(document, "bundle")))
+    with ExitStack() as stack:
+        stack.enter_context(
+            name_lock(config.import_lock_path(), str(config.root), action="importing into")
+        )
+        for stem in stems:
+            stack.enter_context(name_lock(config.stem_lock_path(stem), stem, action="importing"))
+        for env in _shipped(document, "env"):
+            stack.enter_context(name_lock(config.env_lock_path(env), env, action="importing"))
+        yield
+
+
+def _write_order(change: FileChange) -> tuple[int, str, int, str]:
+    parsed = parse_file_key(change.key)
+    assert parsed is not None
+    rank = {"profile": 0, "bundle": 1, "env": 3}[parsed.kind]
+    return rank, parsed.name, int(parsed.filename == "stack.txt"), change.key
+
+
+def write_plan(config: ConfigRoot, plan: ImportPlan) -> int:
+    """Write the plan: profiles, bundles, variables, then each env with stack.txt last.
+
+    ``stack.txt`` defines whether an environment exists, so writing it last
+    means an interrupted import never leaves a half-written environment that
+    looks complete. A re-run reports finished files as identical.
+
+    :returns: The number of files written or removed.
+    :raises ConfigError: When a write fails part-way.
+    """
+    steps = sorted((c for c in plan.changes if c.status != "identical"), key=_write_order)
+    definitions = [c for c in steps if _write_order(c)[0] < 3]
+    env_steps = [c for c in steps if _write_order(c)[0] == 3]
+    total = len(steps) + (plan.variables_text is not None)
+    done = 0
+    try:
+        for change in definitions:
+            _apply(config, change)
+            done += 1
+        if plan.variables_text is not None:
+            _write_variables(config, plan.variables_text)
+            done += 1
+        for change in env_steps:
+            _apply(config, change)
+            done += 1
+    except (OSError, UvStackError) as error:
+        cause = error.message if isinstance(error, UvStackError) else str(error)
+        raise ConfigError(
+            f"Import interrupted after writing {done} of {total} file(s): {cause}",
+            hint="Fix the cause and run the same import again: files already written are "
+            "reported as identical and the rest are completed.",
+        ) from error
+    return done
+
+
+def _apply(config: ConfigRoot, change: FileChange) -> None:
+    path = config.root / change.key
+    if change.incoming is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(path, change.incoming)
+
+
+def _write_variables(config: ConfigRoot, text: str) -> None:
+    config.variables_path().parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(config.variables_path(), text)
+
+
+@contextmanager
+def prepared_import(
+    config: ConfigRoot, document: ExportDocument, options: ImportOptions, *, dry_run: bool
+) -> Iterator[ImportPlan]:
+    """Plan an import and, unless ``dry_run``, write it under the import locks.
+
+    The locks stay held until the ``with`` block exits, so the caller's build
+    runs under them and a second import of the same root waits, then refuses.
+    A dry run takes no locks and writes nothing.
+    """
+    with document_root(document) as doc_root:
+        referenced = check_document(document, doc_root)
+        if dry_run:
+            yield plan_import(config, document, doc_root, referenced, options)
+            return
+        with import_locks(config, document):
+            plan = plan_import(config, document, doc_root, referenced, options)
+            write_plan(config, plan)
+            yield plan
