@@ -15,7 +15,7 @@ import rich_click as click
 from click.testing import CliRunner
 
 import uv_stack.cli.sync_cmd
-from tests.conftest import _lock_held_by_another_process
+from tests.conftest import _lock_held_by_another_process, _still_locked_against_a_fresh_open
 from uv_stack import fsutil
 from uv_stack.cli import cli
 from uv_stack.cli.transfer_cmd import import_cmd
@@ -729,6 +729,35 @@ def test_set_remote_refuses_while_the_lock_is_held(
             pytest.raises(ConfigError, match="updating 'remotes.yaml'"):
         set_remote(config_tree, "a", root="/r")
     assert not config_tree.remotes_path().exists()
+
+
+@pytest.mark.skipif(not fsutil._LOCK_AVAILABLE, reason="requires fcntl")
+def test_set_remote_holds_the_lock_from_the_first_read_to_the_write(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A lock taken after the read, or dropped before the write, lets two
+    # writers each publish over the other's change. flock refuses a second open
+    # file description even within one process, so probing from inside the
+    # steps that touch the file pins the span without a second writer.
+    set_remote(config_tree, "a", stack="/s")
+    lock = config_tree.remotes_lock_path()
+    probes: list[tuple[str, bool]] = []
+    read_target = remote_ops._read_target
+    write = remote_ops.atomic_write
+
+    def probed_read(path: Path) -> tuple[Path, str | None]:
+        probes.append(("read", _still_locked_against_a_fresh_open(lock)))
+        return read_target(path)
+
+    def probed_write(path: Path, text: str, *, mode: int | None = None) -> None:
+        probes.append(("write", _still_locked_against_a_fresh_open(lock)))
+        write(path, text, mode=mode)
+
+    monkeypatch.setattr(remote_ops, "_read_target", probed_read)
+    monkeypatch.setattr(remote_ops, "atomic_write", probed_write)
+    set_remote(config_tree, "a", root="/r")
+    assert probes == [("read", True), ("read", True), ("write", True)]
+    assert config_tree.remotes_path().read_text() == "a:\n  stack: /s\n  root: /r\n"
 
 
 def test_a_rewrite_during_the_update_is_not_overwritten(

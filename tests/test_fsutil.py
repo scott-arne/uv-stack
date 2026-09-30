@@ -11,7 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import _deadline, _lock_held_by_another_process
+from tests.conftest import (
+    _deadline,
+    _lock_held_by_another_process,
+    _still_locked_against_a_fresh_open,
+)
 from uv_stack.errors import ConfigError
 from uv_stack.fsutil import (
     _LOCK_AVAILABLE,
@@ -1130,34 +1134,6 @@ def test_name_lock_refuses_a_real_openable_non_regular_file():
             pytest.fail("entered with a character device at the lock path")
 
     assert "not a regular file" in str(excinfo.value)
-
-
-def _still_locked_against_a_fresh_open(path: Path) -> bool:
-    """Whether a second open of ``path`` is refused the lock this process holds.
-
-    ``flock`` conflicts between two open file descriptions of the same file even
-    within one process, so this answers "is the object standing at ``path``
-    right now the one the caller has locked" without a second process.
-
-    :param path: Lock file to test.
-    :returns: ``True`` if a fresh non-blocking acquisition is refused.
-    """
-    import fcntl
-
-    # Not inside the try: an implementation that left the lock on a file since
-    # unlinked would otherwise fail its caller with a bare FileNotFoundError
-    # from here rather than the caller's own message.
-    assert path.exists(), f"nothing stands at {path} to test the lock against"
-    fd = os.open(path, os.O_RDWR)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return True
-    else:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
-    finally:
-        os.close(fd)
 
 
 @pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")

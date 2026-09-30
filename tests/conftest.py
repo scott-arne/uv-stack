@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import signal
 import sys
 from collections.abc import Iterator
@@ -102,6 +103,34 @@ def _lock_held_by_another_process(lock_path: Path) -> Iterator[None]:
             proc.kill()
             proc.wait()
             proc.stdout.close()
+
+
+def _still_locked_against_a_fresh_open(path: Path) -> bool:
+    """Whether a second open of ``path`` is refused the lock this process holds.
+
+    ``flock`` conflicts between two open file descriptions of the same file even
+    within one process, so this answers "is the object standing at ``path``
+    right now the one the caller has locked" without a second process.
+
+    :param path: Lock file to test.
+    :returns: ``True`` if a fresh non-blocking acquisition is refused.
+    """
+    import fcntl
+
+    # Not inside the try: an implementation that left the lock on a file since
+    # unlinked would otherwise fail its caller with a bare FileNotFoundError
+    # from here rather than the caller's own message.
+    assert path.exists(), f"nothing stands at {path} to test the lock against"
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 @contextmanager
