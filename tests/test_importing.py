@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import tempfile
+import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -90,6 +91,54 @@ def test_document_refusals(config_tree: ConfigRoot, mutate: Any, needle: str) ->
     assert needle in caught.value.message
 
 
+def _ship_item(data: dict[str, Any], item: str) -> None:
+    # The item's file ships too, so only the control-character check can
+    # refuse it.
+    data["items"] = sorted([*data["items"], item])
+    data["files"][f"profiles/{item.partition(':')[2]}.yaml"] = "includes:\n  - rich\n"
+
+
+def _has_control(text: str) -> bool:
+    return any(unicodedata.category(char) == "Cc" for char in text)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "mutate"),
+    [
+        ("created_by", "uv-stack 0.7.0\x1b]0;owned\x07", lambda d, v: d.update(created_by=v)),
+        ("source_platform", "darwin-arm64\x1b[2K", lambda d, v: d.update(source_platform=v)),
+        ("item", "profile:a\x1bb", _ship_item),
+        ("file key", "profiles/a\x9bb.yaml",
+         lambda d, v: d["files"].update({v: "includes:\n  - rich\n"})),
+        ("seed", "ma\x1bin", lambda d, v: d["seeds"].update({v: "numpy==1\n"})),
+    ],
+)
+def test_a_control_character_in_a_document_name_is_refused(
+    config_tree: ConfigRoot, field: str, value: str, mutate: Any
+) -> None:
+    data = _raw(config_tree, "main", "profile:utils")
+    mutate(data, value)
+    with pytest.raises(ConfigError) as caught:
+        _load(data)
+    assert field in caught.value.message and repr(value) in caught.value.message
+    assert not _has_control(caught.value.message)
+    assert caught.value.hint is not None and "stack export" in caught.value.hint
+
+
+@pytest.mark.parametrize("writer", ["uv-stack 9.0\x1b[2K", 5])
+def test_a_newer_version_names_only_a_writer_it_can_print(
+    config_tree: ConfigRoot, writer: object
+) -> None:
+    # The version refusal runs before schema validation, so created_by may be
+    # any JSON value.
+    data = _raw(config_tree, "profile:utils")
+    data.update(version=2, created_by=writer)
+    with pytest.raises(ConfigError) as caught:
+        _load(data)
+    assert "written by an unknown writer;" in caught.value.message
+    assert not _has_control(caught.value.message)
+
+
 def test_bad_json_is_refused() -> None:
     with pytest.raises(ConfigError, match="not valid JSON"):
         load_document("{")
@@ -97,14 +146,14 @@ def test_bad_json_is_refused() -> None:
 
 def test_a_nul_in_a_document_name_is_refused(config_tree: ConfigRoot) -> None:
     # JSON carries \u0000 and validate_name allows it, but document_root would
-    # raise ValueError building a path from it; the item and file agree, so
-    # only the key check can stop it.
+    # raise ValueError building a path from it. The item and file agree, and
+    # NUL is a control character, so the control-character check stops it.
     data = _raw(config_tree, "profile:ds")
     data["items"] = sorted([*data["items"], "profile:a\0b"])
     data["files"]["profiles/a\0b.yaml"] = "includes:\n  - rich\n"
     with pytest.raises(ConfigError) as caught:
         _load(data)
-    assert "invalid file key" in caught.value.message
+    assert "control character: 'profile:a\\x00b'" in caught.value.message
 
 
 def test_unreachable_extra_file_is_refused(config_tree: ConfigRoot) -> None:

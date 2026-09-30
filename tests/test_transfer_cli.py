@@ -180,11 +180,23 @@ def test_import_refuses_a_nul_in_a_name_without_writing(
     data["files"]["profiles/a\0b.yaml"] = "includes:\n  - rich\n"
     target = _target(tmp_path)
     result = _run_import(target, json.dumps(data))
-    assert result.exit_code == 1 and "invalid file key" in result.output
+    assert result.exit_code == 1 and "holding a control character" in result.output
     # CliRunner also exits 1 on an uncaught ValueError; SystemExit proves the
     # refusal went through the error renderer rather than a traceback.
     assert isinstance(result.exception, SystemExit)
     assert list(target.root.iterdir()) == []
+
+
+def test_import_refuses_a_control_character_in_the_header_without_printing_it(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    # The header echoes created_by, and click passes an escape sequence
+    # through to a terminal, where it could rewrite what the dry run shows.
+    data = json.loads(_export(config_tree, "profile:ds"))
+    data["created_by"] = f"uv-stack {__version__}\x1b[2K"
+    result = _run_import(_target(tmp_path), json.dumps(data), "--dry-run")
+    assert result.exit_code != 0
+    assert "\x1b" not in result.output and "\x1b" not in result.stderr
 
 
 def _fake_build(monkeypatch: pytest.MonkeyPatch, target: ConfigRoot, *,

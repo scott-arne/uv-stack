@@ -116,10 +116,14 @@ def load_document(text: str) -> ExportDocument:
     if not isinstance(version, int) or isinstance(version, bool):
         raise ConfigError("The document's version is not an integer.", hint=_REEXPORT_HINT)
     if version > EXPORT_VERSION:
+        # Schema validation has not run, so created_by may be any JSON value;
+        # only a string that is safe to print on a terminal is named.
+        writer = data.get("created_by")
+        if not isinstance(writer, str) or _has_control(writer):
+            writer = "an unknown writer"
         raise ConfigError(
-            f"The document is format version {version}, written by "
-            f"{data.get('created_by', 'an unknown writer')}; this uv-stack reads "
-            f"version {EXPORT_VERSION}.",
+            f"The document is format version {version}, written by {writer}; "
+            f"this uv-stack reads version {EXPORT_VERSION}.",
             hint="Upgrade uv-stack on this machine: 'uv tool upgrade uv-stack'.",
         )
     if version < EXPORT_VERSION:
@@ -137,10 +141,34 @@ def load_document(text: str) -> ExportDocument:
     return document
 
 
+def _has_control(text: str) -> bool:
+    return any(unicodedata.category(char) == "Cc" for char in text)
+
+
 def _check_invariants(document: ExportDocument) -> None:
     def refuse(message: str) -> ConfigError:
         return ConfigError(message, hint=_REEXPORT_HINT)
 
+    # These names reach the terminal through the header, the plan, and the
+    # refusals below, some of which print a name without repr, and click
+    # passes an escape sequence through to a TTY. So they are checked first.
+    # File and seed content is exempt: it carries newlines and tabs, and is
+    # shown only in a diff or a quoted line, as a local file's would be.
+    for label, value in (("created_by", document.created_by),
+                         ("source_platform", document.source_platform)):
+        if _has_control(value):
+            raise refuse(f"The document's {label} holds a control character: {value!r}.")
+    for item in document.items:
+        if _has_control(item):
+            raise refuse(f"The document lists an item holding a control character: {item!r}.")
+    for key in document.files:
+        if _has_control(key):
+            raise refuse(f"The document ships a file key holding a control character: {key!r}.")
+    for name in document.seeds:
+        if _has_control(name):
+            raise refuse(
+                f"The document ships a seed whose name holds a control character: {name!r}."
+            )
     for key in document.files:
         if parse_file_key(key) is None:
             raise refuse(f"The document ships an invalid file key: {key!r}.")
