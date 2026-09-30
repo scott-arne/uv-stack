@@ -33,7 +33,12 @@ def load_remotes(config: ConfigRoot) -> dict[str, RemoteSettings]:
         raise ConfigError(f"Invalid YAML in {path}: {type(exc).__name__}: {exc}",
                           hint="Fix the YAML syntax.", path=path) from exc
     if data is None:
-        return {}
+        # PyYAML loads an empty document and an explicit null alike. Only the
+        # empty one means "no entries"; ``null`` or ``~`` is a value, and the
+        # file must be a mapping.
+        node = yaml.compose(text, Loader=yaml.SafeLoader)
+        if node is None or node.value == "":
+            return {}
     if not isinstance(data, dict):
         raise ConfigError(f"Expected a YAML mapping in {path}, got {type(data).__name__}.",
                           path=path)

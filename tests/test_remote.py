@@ -16,6 +16,12 @@ def test_absent_remotes_file_has_no_entries(config_tree: ConfigRoot) -> None:
     assert load_remotes(config_tree) == {}
 
 
+@pytest.mark.parametrize("text", ["", "# no remotes yet\n", "---\n"])
+def test_empty_remotes_document_has_no_entries(config_tree: ConfigRoot, text: str) -> None:
+    config_tree.remotes_path().write_text(text)
+    assert load_remotes(config_tree) == {}
+
+
 def test_remotes_entries_load(config_tree: ConfigRoot) -> None:
     config_tree.remotes_path().write_text(
         "gpu-box:\n  stack: ~/.local/bin/stack\n  root: /data/envs\nplain:\n")
@@ -25,7 +31,8 @@ def test_remotes_entries_load(config_tree: ConfigRoot) -> None:
 
 
 @pytest.mark.parametrize("text", ["gpu-box: [1, 2]\n", "gpu-box:\n  host: x\n",
-                                  "gpu-box:\n  stack: ''\n", "- a\n", "a: [\n"])
+                                  "gpu-box:\n  stack: ''\n", "- a\n", "a: [\n",
+                                  "null\n", "~\n", "!!null x\n"])
 def test_invalid_remotes_file_is_refused(config_tree: ConfigRoot, text: str) -> None:
     config_tree.remotes_path().write_text(text)
     with pytest.raises(ConfigError, match="remotes.yaml"):
