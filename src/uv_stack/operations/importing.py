@@ -842,12 +842,13 @@ class BuildStep:
     action: str
 
 
-def _missing_editables(config: ConfigRoot, requirements: str) -> list[str]:
+def _missing_editables(requirements: str) -> list[str]:
     """Editable targets in a rendered ``requirements.in`` absent on this machine.
 
     Resolved as doctor's missing-checkout finding does: ``~`` expanded, a
-    relative path against the target root, where the build runs. Other
-    path-bearing entries are left to uv, which reports them itself.
+    relative path against the working directory, where uv resolves it (the
+    build runs uv without setting one). Other path-bearing entries are left
+    to uv, which reports them itself.
     """
     missing = []
     for line in requirements.splitlines():
@@ -862,7 +863,7 @@ def _missing_editables(config: ConfigRoot, requirements: str) -> list[str]:
         except ValueError:
             path = Path(target)
         if not path.is_absolute():
-            path = config.root / path
+            path = Path.cwd() / path
         if not os.path.exists(path):
             missing.append(target)
     return missing
@@ -929,7 +930,7 @@ def preflight(
                 env = staged.load_env(name)
                 stack = Resolver(staged).resolve(env.stack)
                 requirements = render_requirements_in(stack, staged, name, variables)
-                missing = _missing_editables(config, requirements)
+                missing = _missing_editables(requirements)
                 if missing:
                     raise ConfigError(
                         f"Environment '{name}' installs {len(missing)} editable "

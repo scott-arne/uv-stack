@@ -1346,7 +1346,7 @@ def _reference_findings(
 
 
 def _expanded_entry_findings(
-    config: ConfigRoot, entries: list[tuple[Path, str]], variables: Variables
+    entries: list[tuple[Path, str]], variables: Variables
 ) -> list[Finding]:
     """Report what expanding each scanned entry reveals.
 
@@ -1367,10 +1367,9 @@ def _expanded_entry_findings(
 
     The whole entry is expanded rather than the bare target, because a bare
     ``${DEV}`` is not an admitted entry on its own — only the entry it sits in
-    is. A relative path resolves against the config root, matching how uv reads
-    the generated ``requirements.in``.
+    is. A relative path resolves against the working directory, matching how
+    uv resolves a relative ``-e`` in the generated ``requirements.in``.
 
-    :param config: The configuration root, for resolving relative paths.
     :param entries: Scanned ``(source, entry)`` pairs.
     :param variables: The values to expand with.
     :returns: An ``error`` finding per refused expansion and a ``warn`` finding
@@ -1413,14 +1412,17 @@ def _expanded_entry_findings(
         # ValueError -- again neither family the CLI turns into a message. Both
         # failures want the same answer, so the except supplies by hand what
         # expanduser supplies for an unresolvable name: the text unchanged,
-        # resolved against the root and reported as a checkout that does not
-        # exist — which is the true answer, not a consolation prize.
+        # resolved against the working directory and reported as a checkout
+        # that does not exist — which is the true answer, not a consolation
+        # prize.
         try:
             path = Path(os.path.expanduser(target))
         except ValueError:
             path = Path(target)
+        # The working directory, not the config root: uv-stack runs uv without
+        # a cwd, and uv resolves a relative -e against its own.
         if not path.is_absolute():
-            path = config.root / path
+            path = Path.cwd() / path
         # os.path.exists for the same family of reason: the pathlib probe
         # re-raises every errno but a handful, and this path is built from a
         # variable value, so an ancestor this user cannot search is ordinary
@@ -1596,5 +1598,5 @@ def _portability_findings(config: ConfigRoot) -> list[Finding]:
     if not placement and not references:
         # Expanding on top of a known-bad reference set produces noise, not
         # information: the findings above already name every cause.
-        findings.extend(_expanded_entry_findings(config, entries, variables))
+        findings.extend(_expanded_entry_findings(entries, variables))
     return findings

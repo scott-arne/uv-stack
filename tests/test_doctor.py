@@ -1826,19 +1826,36 @@ def test_an_editable_with_extras_is_read_as_a_path(
     assert "missing-checkout" in _kinds(diagnose(config_tree))
 
 
-def test_a_relative_editable_resolves_against_the_config_root(
-    config_tree: ConfigRoot,
+def test_a_relative_editable_resolves_against_the_working_directory(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    # uv reads the generated requirements.in from the config root, so doctor
-    # must resolve a relative path the same way rather than against the cwd.
+    # uv-stack runs uv without a cwd, and uv resolves a relative -e against
+    # its own working directory, so a checkout under the config root does not
+    # satisfy the build. Doctor must look where uv will.
+    (config_tree.root / "lib" / "widget").mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
     config_tree.profile_path("dev").write_text("includes:\n  - -e lib/widget\n")
     finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
     assert "editable checkout does not exist:" in finding.message
-    assert str(config_tree.root / "lib" / "widget") in finding.message
-    (config_tree.root / "lib" / "widget").mkdir(parents=True)
+    assert str(work / "lib" / "widget") in finding.message
+    (work / "lib" / "widget").mkdir(parents=True)
     assert "missing-checkout" not in _kinds(diagnose(config_tree))
 
 
+@pytest.fixture
+def cwd_at_root(config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run from the config root, so a relative editable resolves beneath it.
+
+    A relative ``-e`` resolves against the working directory, as uv resolves
+    it. The tests that use this pin how an entry is read, not where it
+    resolves, so they fix the two together.
+    """
+    monkeypatch.chdir(config_tree.root)
+
+
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_path_holding_a_space_is_read_whole(config_tree: ConfigRoot):
     """uv reads everything after the flag as one path; so must the diagnosis.
 
@@ -1853,6 +1870,7 @@ def test_an_editable_path_holding_a_space_is_read_whole(config_tree: ConfigRoot)
     assert not [f for f in findings if f.kind == "missing-checkout"]
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_path_holding_a_space_is_read_whole_when_absent(
     config_tree: ConfigRoot,
 ):
@@ -1868,6 +1886,7 @@ def test_an_editable_path_holding_a_space_is_read_whole_when_absent(
     assert str(config_tree.root / "my pkg") in missing[0].message
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_entry_with_a_trailing_option_keeps_its_path_token(
     config_tree: ConfigRoot,
 ):
@@ -1886,6 +1905,7 @@ def test_an_editable_entry_with_a_trailing_option_keeps_its_path_token(
     assert str(config_tree.root / "absent") in missing[0].message
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_path_holding_a_space_survives_a_trailing_option(
     config_tree: ConfigRoot,
 ):
@@ -1904,6 +1924,7 @@ def test_an_editable_path_holding_a_space_survives_a_trailing_option(
     assert not [f for f in findings if f.kind == "missing-checkout"]
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_path_with_attached_equals_reads_the_whole_spaced_path(
     config_tree: ConfigRoot,
 ):
@@ -1920,6 +1941,7 @@ def test_an_editable_path_with_attached_equals_reads_the_whole_spaced_path(
     assert not [f for f in findings if f.kind == "missing-checkout"]
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_path_with_long_flag_attached_names_the_whole_path_when_absent(
     config_tree: ConfigRoot,
 ):
@@ -1935,6 +1957,7 @@ def test_an_editable_path_with_long_flag_attached_names_the_whole_path_when_abse
     assert str(config_tree.root / "my pkg") in missing[0].message
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_path_with_repeated_whitespace_preserves_the_run_length(
     config_tree: ConfigRoot,
 ):
@@ -1952,6 +1975,7 @@ def test_an_editable_path_with_repeated_whitespace_preserves_the_run_length(
     assert str(config_tree.root / "my  pkg") in missing[0].message
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_path_with_a_trailing_comment_is_read_without_the_comment(
     config_tree: ConfigRoot,
 ):
@@ -1970,6 +1994,7 @@ def test_an_editable_path_with_a_trailing_comment_is_read_without_the_comment(
     assert not [f for f in findings if f.kind == "missing-checkout"]
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_path_with_a_trailing_comment_names_the_path_when_absent(
     config_tree: ConfigRoot,
 ):
@@ -1987,6 +2012,7 @@ def test_an_editable_path_with_a_trailing_comment_names_the_path_when_absent(
     assert "# local" not in missing[0].message
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_spaced_path_with_a_trailing_comment_reads_both_rules(
     config_tree: ConfigRoot,
 ):
@@ -2003,6 +2029,7 @@ def test_an_editable_spaced_path_with_a_trailing_comment_reads_both_rules(
     assert not [f for f in findings if f.kind == "missing-checkout"]
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_path_containing_a_hash_preserves_the_character(
     config_tree: ConfigRoot,
 ):
@@ -2018,6 +2045,7 @@ def test_an_editable_path_containing_a_hash_preserves_the_character(
     assert not [f for f in findings if f.kind == "missing-checkout"]
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_path_with_attached_equals_and_comment_cuts_at_the_comment(
     config_tree: ConfigRoot,
 ):
@@ -2066,6 +2094,7 @@ def test_an_editable_entry_with_empty_attached_operand_and_comment_is_silent(
     assert not findings
 
 
+@pytest.mark.usefixtures("cwd_at_root")
 def test_an_editable_entry_with_glued_hash_names_a_path_beginning_with_hash(
     config_tree: ConfigRoot,
 ):
@@ -2161,18 +2190,22 @@ def test_an_unresolvable_tilde_user_is_reported_not_raised(config_tree: ConfigRo
     assert "~__no_such_user__/widget" in finding.message
 
 
-def test_a_nul_in_a_tilde_user_entry_is_reported_not_raised(config_tree: ConfigRoot):
+def test_a_nul_in_a_tilde_user_entry_is_reported_not_raised(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     # posixpath resolves the '~user' form through pwd.getpwnam and catches only
     # KeyError, so an embedded NUL comes back as ValueError -- neither
     # UvStackError nor OSError, which means nothing between here and the CLI
     # catches it. Unlike the permission cases around it, this one raises on
     # every interpreter this project supports, so it is the one test in this
     # area that cannot quietly stop discriminating.
+    monkeypatch.chdir(tmp_path)
     config_tree.env_stack_path("main").write_text("-e ~ab\0cd/widget\n")
     finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
-    # The text is kept as written and resolved against the root, which is the
-    # same answer the unresolvable-'~user' case gets one test above.
-    assert finding.path == config_tree.root / "~ab\0cd/widget"
+    # The text is kept as written and resolved against the working directory,
+    # which is the same answer the unresolvable-'~user' case gets one test
+    # above.
+    assert finding.path == tmp_path / "~ab\0cd/widget"
 
 
 @pytest.mark.skipif(_IS_ROOT, reason="root ignores the directory mode this relies on")

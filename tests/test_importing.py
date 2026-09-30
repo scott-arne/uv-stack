@@ -976,18 +976,25 @@ def test_preflight_refuses_a_missing_variable_value(
     assert not target.env_stack_path("main").exists()
 
 
-def test_preflight_checks_a_relative_editable_against_the_target(
-    config_tree: ConfigRoot, tmp_path: Path
+def test_preflight_checks_a_relative_editable_against_the_working_directory(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The brackets sit mid-path: editable_target strips only a trailing
-    # extras suffix, so this also pins that the path is reported intact.
+    # uv resolves a relative -e against its working directory, which uv-stack
+    # leaves as the one stack runs in, so a checkout under the target root
+    # does not satisfy the build. The brackets sit mid-path: editable_target
+    # strips only a trailing extras suffix, so this also pins that the path is
+    # reported intact.
     config_tree.profile_path("ds").write_text("includes:\n  - -e ./check[1]/x\n")
     target = ConfigRoot(tmp_path / "target")
+    (target.root / "check[1]" / "x").mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
     with pytest.raises(ConfigError) as caught:
         _build_plan(target, _raw(config_tree, "main"))
     assert "./check[1]/x" in caught.value.message
     assert caught.value.hint is not None and "--no-build" in caught.value.hint
-    (target.root / "check[1]" / "x").mkdir(parents=True)
+    (work / "check[1]" / "x").mkdir(parents=True)
     _build_plan(target, _raw(config_tree, "main"))
 
 
@@ -995,7 +1002,8 @@ def test_preflight_reports_a_nul_in_a_tilde_user_editable(
     config_tree: ConfigRoot, tmp_path: Path
 ) -> None:
     # os.path.expanduser resolves '~user' through pwd.getpwnam, which rejects
-    # an embedded NUL with ValueError; tests/test_doctor.py:2164 pins the same
+    # an embedded NUL with ValueError; test_doctor.py's
+    # test_a_nul_in_a_tilde_user_entry_is_reported_not_raised pins the same
     # input for doctor's missing-checkout finding.
     config_tree.env_stack_path("main").write_text("@standard\n-e ~ab\0cd/widget\n")
     with pytest.raises(ConfigError) as caught:
