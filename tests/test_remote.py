@@ -126,6 +126,32 @@ def test_parse_remotes_keeps_file_order(tmp_path: Path) -> None:
     assert remotes["a"] == RemoteSettings(root="/a")
 
 
+@pytest.mark.parametrize(("text", "lines"), [
+    ("a:\n  root: /x\na:\n  root: /y\n", "lines 1 and 3"),
+    ('a: {}\n"a": {}\n', "lines 1 and 2"),
+    ("a: {}\nb: {}\n'a':\n", "lines 1 and 3"),
+])
+def test_a_host_listed_twice_is_refused(tmp_path: Path, text: str, lines: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        parse_remotes(text, tmp_path / "remotes.yaml")
+    assert caught.value.message == (
+        f"Host 'a' is listed twice in {tmp_path / 'remotes.yaml'}: {lines}.")
+    assert caught.value.hint == "Remove or merge one of them; YAML would keep only the last."
+
+
+def test_a_quoted_and_a_bare_number_are_not_one_host_listed_twice(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError) as caught:
+        parse_remotes('"1": {}\n1: {}\n', tmp_path / "remotes.yaml")
+    assert "is a YAML int, not a name" in caught.value.message
+
+
+def test_a_merge_key_is_not_a_host_listed_twice(tmp_path: Path) -> None:
+    # YAML defines an explicit key as overriding a merged one, so this is
+    # written intent, not a slip.
+    remotes = parse_remotes("<<: {a: {root: /x}}\na: {root: /y}\n", tmp_path / "remotes.yaml")
+    assert remotes == {"a": RemoteSettings(root="/y")}
+
+
 @pytest.mark.parametrize("text", [
     "# c\na: {}\n",                              # full line
     "a:\n  stack: x # c\n",                      # trailing
@@ -537,6 +563,17 @@ def test_set_remote_refuses_an_invalid_file(config_tree: ConfigRoot, text: str) 
     with pytest.raises(ConfigError, match="remotes.yaml"):
         set_remote(config_tree, "a", stack="/s")
     assert config_tree.remotes_path().read_text() == text
+
+
+def test_a_rewrite_refuses_a_host_listed_twice(config_tree: ConfigRoot) -> None:
+    # The first block is shadowed, so a rewrite would silently drop it.
+    original = "a:\n  root: /x\nb: {}\na:\n  root: /y\n"
+    config_tree.remotes_path().write_text(original)
+    with pytest.raises(ConfigError, match="listed twice"):
+        set_remote(config_tree, "b", stack="/s")
+    with pytest.raises(ConfigError, match="listed twice"):
+        remove_remote(config_tree, "b")
+    assert config_tree.remotes_path().read_text() == original
 
 
 def test_set_remote_refuses_a_non_regular_file(config_tree: ConfigRoot) -> None:

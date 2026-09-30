@@ -65,6 +65,7 @@ def parse_remotes(text: str, path: Path) -> dict[str, RemoteSettings]:
     if not isinstance(data, dict):
         raise ConfigError(f"Expected a YAML mapping in {path}, got {type(data).__name__}.",
                           path=path)
+    _refuse_repeated_hosts(text, path)
     remotes: dict[str, RemoteSettings] = {}
     for host, entry in data.items():
         if not isinstance(host, str):
@@ -75,6 +76,32 @@ def parse_remotes(text: str, path: Path) -> dict[str, RemoteSettings]:
                 path=path)
         remotes[host] = _settings({} if entry is None else entry, path)
     return remotes
+
+
+def _refuse_repeated_hosts(text: str, path: Path) -> None:
+    """Refuse a host written twice, which YAML silently collapses to the last.
+
+    :param text: Text that loads as a YAML mapping.
+    :param path: The file the text came from, named in errors.
+    :raises ConfigError: When a host appears twice.
+    """
+    root = yaml.compose(text, Loader=yaml.SafeLoader)
+    assert isinstance(root, yaml.MappingNode)
+    first_lines: dict[str, int] = {}
+    for key, _ in root.value:
+        # Only string keys can repeat a host: a merge key follows YAML's rule
+        # that an explicit key overrides it, and any other key is refused as a
+        # host by the caller.
+        if key.tag != "tag:yaml.org,2002:str":
+            continue
+        line = key.start_mark.line + 1
+        if key.value in first_lines:
+            raise ConfigError(
+                f"Host {key.value!r} is listed twice in {path}: "
+                f"lines {first_lines[key.value]} and {line}.",
+                hint="Remove or merge one of them; YAML would keep only the last.",
+                path=path)
+        first_lines[key.value] = line
 
 
 def _settings(entry: object, path: Path) -> RemoteSettings:

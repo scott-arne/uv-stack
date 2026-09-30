@@ -44,6 +44,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `--remote-stack` and `--remote-root` customize the remote command and root.
 - `remotes.yaml` maps host names to optional `stack` and `root` settings,
   overridden by `--remote-stack` and `--remote-root`. Portable across machines.
+  A host listed twice is refused, since YAML would keep only the last entry.
   `stack doctor` reports an invalid file.
 - `stack edit remotes` opens `remotes.yaml` in the editor and validates it when
   the editor exits, offering the editor again when it does not validate, as for

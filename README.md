@@ -1015,6 +1015,9 @@ Each entry allows only `stack` (the command to run on the remote) and `root`
   `no`, `null`, or `1` is a boolean, null, or number to YAML, and
   `stack sync remote` refuses the file until it is quoted (`"yes":`).
   `stack config remote set` quotes such names itself.
+- **List each host once.** YAML would silently keep only the last of two
+  entries for one host, so every command that reads the file refuses it and
+  names both lines. `"gpu-box"` and `gpu-box` are the same host.
 
 Two commands change the file. `stack edit remotes` opens it in your editor and
 validates it on exit (see [Editing configuration](#editing-configuration)).
