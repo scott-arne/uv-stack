@@ -7,14 +7,27 @@ from pathlib import Path
 
 import rich_click as click
 
-from uv_stack.cli._render import render_error, render_warnings
+from uv_stack.cli._render import echo, render_error, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.fsutil import atomic_write
+from uv_stack.hints import render_positional_arg
+from uv_stack.models import ExportDocument
 from uv_stack.operations.export import (
     AmbiguousItemError,
     ExportResult,
     build_document,
     serialize_document,
+    source_platform,
+)
+from uv_stack.operations.importing import (
+    STATUS_LABELS,
+    ConflictError,
+    ImportOptions,
+    ImportPlan,
+    change_diff,
+    load_document,
+    prepared_import,
+    read_document,
 )
 
 
@@ -29,6 +42,39 @@ def export_items(config: ConfigRoot, items: tuple[str, ...] | list[str]) -> Expo
     except AmbiguousItemError as error:
         render_error(error)
         sys.exit(2)
+
+
+def print_header(document: ExportDocument) -> None:
+    """Say what is being imported, and whether pins may re-resolve here."""
+    echo(f"Importing {len(document.items)} item(s) exported by {document.created_by} "
+         f"on {document.source_platform}.")
+    here = source_platform()
+    if here != document.source_platform:
+        echo(f"This machine is {here}: pins re-resolved where this platform differs.")
+
+
+def print_plan(plan: ImportPlan) -> None:
+    """List each file's outcome and any variables the import declares."""
+    for change in plan.changes:
+        echo(f"  {STATUS_LABELS[change.status]}: {change.key}")
+    if plan.missing_variables:
+        echo(f"  declare in variables.txt: {', '.join(plan.missing_variables)}")
+
+
+def print_conflicts(error: ConflictError) -> None:
+    """Print each conflicting file's diff and the environments that use it."""
+    for change in error.conflicts:
+        click.echo(change_diff(change), nl=False)
+        users = error.used_by.get(change.key)
+        if users:
+            echo(f"{change.key} is used by: {', '.join(users)}")
+
+
+def dependents_line(names: list[str]) -> str:
+    """Name the environments that use changed definitions but were not rebuilt."""
+    args = " ".join(render_positional_arg(n) for n in names)
+    return (f"Not rebuilt, but using changed definitions: {', '.join(names)}. "
+            f"Rebuild them with 'stack sync env {args}'.")
 
 
 @click.command("export")
@@ -54,3 +100,35 @@ def export_cmd(config: ConfigRoot, items: tuple[str, ...], output: Path | None) 
         click.echo(text, nl=False)
     else:
         atomic_write(output, text)
+
+
+@click.command("import")
+@click.argument("source", metavar="FILE|-")
+@click.option("--overwrite", is_flag=True,
+              help="Replace files that differ and remove target-only environment files.")
+@click.option("--dry-run", is_flag=True, help="Report what would change; write nothing.")
+@click.option("--strict", is_flag=True,
+              help="Refuse unqualified names that fall through to package literals.")
+@click.pass_obj
+def import_cmd(config: ConfigRoot, source: str, overwrite: bool, dry_run: bool,
+               strict: bool) -> None:
+    """Import a document written by 'stack export'.
+
+    FILE is the document, or - to read standard input. New files are
+    installed and identical ones left alone. A file that differs from this
+    machine's copy is refused with a diff unless --overwrite is given.
+    """
+    document = load_document(read_document(source, click.get_binary_stream("stdin")))
+    print_header(document)
+    options = ImportOptions(overwrite=overwrite, strict=strict)
+    try:
+        with prepared_import(config, document, options, dry_run=dry_run) as plan:
+            render_warnings(plan.warnings)
+            print_plan(plan)
+            if plan.dependents:
+                echo(dependents_line(plan.dependents))
+    except ConflictError as error:
+        print_conflicts(error)
+        raise
+    if dry_run:
+        echo("Dry run: nothing written.")

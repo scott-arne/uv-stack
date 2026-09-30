@@ -766,6 +766,46 @@ piping over ssh:
 ssh HOST stack export ITEMS | stack import -
 ```
 
+### stack import
+
+`stack import FILE|-` installs the environments, profiles, and bundles from a
+document written by `stack export`. Pass the document's file path, or `-` to
+read from standard input.
+
+Each file in the document is installed as **new**, left alone if **identical**
+to this machine's copy, **replaced** when `--overwrite` is given and the
+content differs, or **removed** (for environment files only) when the source
+environment no longer has it and `--overwrite` is given.
+
+**Conflicts refuse the import.** When a file differs from this machine's copy
+and `--overwrite` was not given, the import stops before writing anything,
+prints a unified diff showing the difference, and lists the environments that
+use the file. Fix the conflict manually or re-run with `--overwrite`.
+
+**Meaning changes are always refused.** If importing a profile or bundle would
+change what an existing environment's stack file means—for example, importing
+`profile:utils` when an environment's stack already names `utils` as a
+package—the import is refused even with `--overwrite`. Rename the conflicting
+environment first.
+
+**Options:**
+
+- `--overwrite`: Replace files that differ and remove environment files that
+  the source environment no longer has. Without this flag, differing files stop
+  the import with a conflict error.
+- `--dry-run`: Report what would change without writing anything.
+- `--strict`: Refuse unqualified names in stack files that fall through to
+  package literals rather than referencing a profile or bundle.
+
+**Variables are appended.** Missing variables referenced in the imported
+definitions are appended to `variables.txt` with placeholder values. Edit them
+before building.
+
+**Definitions are installed, not built.** The import writes the definition
+files (stack files, profiles, bundles) but does not build environments or
+compile locks. Run `stack sync env NAME` after importing to build an
+environment with the imported definitions.
+
 ## Tips and gotchas
 
 - **Edit sources, not generated files.** `requirements.in`,

@@ -4443,7 +4443,7 @@ def test_command_panels_separate_create_env_and_project_work():
     panels = {group["name"]: group["commands"] for group in command_groups}
     assert panels.get("Create") == ["create"], panels
     assert panels.get("Environments") == ["upgrade"], panels
-    assert panels.get("Sync") == ["sync", "export"], panels
+    assert panels.get("Sync") == ["sync", "export", "import"], panels
     assert panels.get("Projects") == ["refresh"], panels
     assert panels.get("Inspection") == ["list", "show", "resolve", "status", "diff"], panels
 

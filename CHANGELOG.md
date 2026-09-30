@@ -14,6 +14,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `stack export [ITEMS...]` writes the named environments, profiles, and
   bundles, everything they reach, and each environment's lock as one JSON
   document on standard output or to `-o FILE`.
+- `stack import FILE|-` installs the definitions from an export document,
+  reporting new/identical/replace/remove outcomes for each file. A file that
+  differs from this machine's copy is refused with a diff and the environments
+  that use it, unless `--overwrite` is given. `--dry-run` reports changes
+  without writing. `--strict` refuses unqualified stack names. A meaning change
+  (importing a profile when an environment's stack names it as a package) is
+  refused even with `--overwrite`. Missing variables are appended to
+  `variables.txt`; definitions are installed but not built.
 
 ## 0.6.0 - 2026-09-28
 
