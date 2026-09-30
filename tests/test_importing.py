@@ -33,6 +33,7 @@ from uv_stack.operations.importing import (
     classify_changes,
     document_root,
     load_document,
+    pin_report,
     prepared_import,
     read_document,
     refuse_shadowing,
@@ -940,3 +941,14 @@ def test_recreate_refuses_a_non_plain_python(
 def test_no_build_skips_preflight(config_tree: ConfigRoot, tmp_path: Path) -> None:
     config_tree.profile_path("ds").write_text("includes:\n  - -e /nowhere/pkg\n")
     assert _plan(ConfigRoot(tmp_path / "target"), _raw(config_tree, "main")).builds == []
+
+
+def test_pin_report_counts_and_names(tmp_path: Path) -> None:
+    lock = tmp_path / "requirements.lock.txt"
+    lock.write_text("numpy==1.26.4\nrich==14.0.0\nscipy==1.13.0\n")
+    assert pin_report("main", "numpy==1.26.4\npandas==2.2.0\nrich==13.7.0\n", lock) == [
+        "main: 1 pins kept, 1 changed, 1 dropped, 1 added",
+        "  changed: rich 13.7.0 -> 14.0.0",
+        "  dropped: pandas 2.2.0",
+        "  added: scipy 1.13.0",
+    ]

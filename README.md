@@ -796,15 +796,31 @@ environment first.
 - `--dry-run`: Report what would change without writing anything.
 - `--strict`: Refuse unqualified names in stack files that fall through to
   package literals rather than referencing a profile or bundle.
+- `--no-build`: Install the definitions without building environments.
+- `--recreate`: Wipe and rebuild each imported environment from the shipped
+  pins. Only works with plain dotted Python versions (e.g., `3.12`); refused
+  for ranges or constraints.
 
 **Variables are appended.** Missing variables referenced in the imported
 definitions are appended to `variables.txt` with placeholder values. Edit them
 before building.
 
-**Definitions are installed, not built.** The import writes the definition
-files (stack files, profiles, bundles) but does not build environments or
-compile locks. Run `stack sync env NAME` after importing to build an
-environment with the imported definitions.
+**Build phase.** After writing the definitions, each imported environment is
+built: created if absent, recreated if `--recreate` is given, or synced
+otherwise. The shipped pins are used as preferences—uv re-resolves them on this
+machine and prints a pin report showing how many pins were kept, changed,
+dropped, or added. Use `--no-build` to skip the build and only install
+definitions.
+
+**Pre-flight refusals.** Before writing anything, the import refuses (unless
+`--no-build` is given) if a shipped environment has: a missing variable value, a
+missing editable checkout, Python version drift without `--recreate`, or
+`--recreate` with a non-plain `python.txt`. Other missing paths are reported by
+uv during the build.
+
+**Build failures.** If a build fails, the definitions are kept, and the import
+prints the re-run command for the failed environments plus any dependents (other
+environments using changed profiles or bundles) that were not rebuilt.
 
 ## Tips and gotchas
 

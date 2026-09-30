@@ -21,7 +21,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   without writing. `--strict` refuses unqualified stack names. A meaning change
   (importing a profile when an environment's stack names it as a package) is
   refused even with `--overwrite`. Missing variables are appended to
-  `variables.txt`; definitions are installed but not built.
+  `variables.txt`. After writing, each imported environment is built (created,
+  synced, or recreated per environment) with the shipped pins as preferences,
+  and a pin report shows how many pins were kept, changed, dropped, or added.
+  `--no-build` installs definitions without building. `--recreate` wipes and
+  rebuilds each environment from the shipped pins (plain dotted Python only).
 
 ## 0.6.0 - 2026-09-28
 

@@ -5,10 +5,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner, Result
 
+import uv_stack.cli.transfer_cmd
+import uv_stack.cli.upgrade
+from tests.test_operations import _compile_output
+from uv_stack import fsutil
 from uv_stack.cli import cli
+from uv_stack.commands import micromamba_create, micromamba_python_info, micromamba_python_path
 from uv_stack.config import ConfigRoot
+from uv_stack.errors import ToolError, UvStackError
+from uv_stack.fsutil import name_lock
+from uv_stack.runner import Command, CommandResult, RecordingRunner
 
 
 def _invoke(root: ConfigRoot, *args: str, env: dict[str, str] | None = None,
@@ -63,8 +72,9 @@ def _export(root: ConfigRoot, *items: str) -> str:
     return result.stdout
 
 
-def _run_import(root: ConfigRoot, doc: str, *args: str) -> Result:
-    return _invoke(root, "import", "-", *args, input=doc, env={"COLUMNS": "200"})
+def _run_import(root: ConfigRoot, doc: str, *args: str, build: bool = False) -> Result:
+    extra = [] if build else ["--no-build"]
+    return _invoke(root, "import", "-", *args, *extra, input=doc, env={"COLUMNS": "200"})
 
 
 def _target(tmp_path: Path) -> ConfigRoot:
@@ -159,3 +169,103 @@ def test_import_refuses_a_nul_in_a_name_without_writing(
     # refusal went through the error renderer rather than a traceback.
     assert isinstance(result.exception, SystemExit)
     assert list(target.root.iterdir()) == []
+
+
+def _fake_build(monkeypatch: pytest.MonkeyPatch, target: ConfigRoot, *, fail: bool = False,
+                lock_text: str = "numpy==1.26.4\nrich==14.0.0\n") -> dict[str, bool]:
+    # The env is absent until micromamba creates it, so pre-flight plans a
+    # create and upgrade_env's interpreter probe then finds a real path.
+    state = {"locked": False, "created": False}
+
+    def respond(cmd: Command) -> CommandResult:
+        if cmd.args == micromamba_create(target.env_environment_yml("main")).args:
+            state["created"] = True
+        if cmd.args == micromamba_python_path("main").args:
+            if state["created"]:
+                return CommandResult(0, "/envs/main/bin/python\n")
+            return CommandResult(1, "")
+        if cmd.args[:3] == ["uv", "pip", "compile"]:
+            if fail:
+                raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+            monkeypatch.setattr(fsutil, "_LOCK_TIMEOUT", 0.05)
+            try:
+                with name_lock(target.import_lock_path(), "probe"):
+                    pass
+            except UvStackError:
+                state["locked"] = True
+            _compile_output(cmd).write_text(lock_text)
+        if cmd.args == micromamba_python_info("main").args:
+            return CommandResult(1, "")
+        return CommandResult(0, "")
+
+    runner = RecordingRunner(responder=respond)
+    monkeypatch.setattr(uv_stack.cli.upgrade, "SubprocessRunner", lambda: runner)
+    monkeypatch.setattr(uv_stack.cli.transfer_cmd, "SubprocessRunner", lambda: runner)
+    return state
+
+
+def test_import_builds_under_the_locks_and_reports_pins(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_tree.env_requirements_lock("main").write_text(
+        "numpy==1.26.4\npandas==2.2.0\nrich==13.7.0\n")
+    target = _target(tmp_path)
+    state = _fake_build(monkeypatch, target)
+    result = _run_import(target, _export(config_tree, "main"), build=True)
+    assert result.exit_code == 0, result.output
+    assert state["locked"] is True
+    assert "main: 1 pins kept, 1 changed, 1 dropped, 0 added" in result.output
+
+
+def test_import_without_a_seed_prints_no_pin_report(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _target(tmp_path)
+    _fake_build(monkeypatch, target)
+    result = _run_import(target, _export(config_tree, "main"), build=True)
+    assert result.exit_code == 0, result.output
+    assert "pins kept" not in result.output
+
+
+def test_build_failure_keeps_definitions_and_prints_rerun_and_dependents(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _target(tmp_path)
+    _run_import(target, _export(config_tree, "main"))
+    target.env_dir("work").mkdir(parents=True)
+    target.env_stack_path("work").write_text("profile:ds\n")
+    target.profile_path("ds").write_text("includes:\n  - scipy\n")
+    _fake_build(monkeypatch, target, fail=True)
+    result = _run_import(target, _export(config_tree, "main"), "--overwrite", build=True)
+    assert result.exit_code == 1
+    assert "stack sync env main" in result.output
+    assert "Not rebuilt, but using changed definitions: work." in result.output
+    assert target.env_stack_path("main").exists()
+
+
+def test_dependents_line_prints_with_no_build(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    _run_import(target, _export(config_tree, "main"))
+    target.env_dir("work").mkdir(parents=True)
+    target.env_stack_path("work").write_text("profile:ds\n")
+    target.profile_path("ds").write_text("includes:\n  - scipy\n")
+    result = _run_import(target, _export(config_tree, "main"), "--overwrite")
+    assert result.exit_code == 0, result.output
+    assert "Not rebuilt, but using changed definitions: work." in result.output
+
+
+def test_recreate_with_no_build_is_a_usage_error(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    result = _run_import(_target(tmp_path), _export(config_tree, "main"), "--recreate")
+    # Click also exits 2 on an unknown option; the text proves the refusal.
+    assert result.exit_code == 2 and "cannot be combined" in result.output
+
+
+def test_missing_bracketed_editable_is_printed_intact(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ./check[1]/x\n")
+    target = _target(tmp_path)
+    _fake_build(monkeypatch, target)
+    result = _run_import(target, _export(config_tree, "main"), build=True)
+    assert result.exit_code == 1 and "./check[1]/x" in result.output
+    assert not target.env_stack_path("main").exists()

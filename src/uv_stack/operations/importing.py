@@ -29,7 +29,7 @@ from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.fsutil import atomic_write, name_lock, read_text_utf8, require_regular_file
 from uv_stack.models import EXPORT_FORMAT, EXPORT_VERSION, ExportDocument
-from uv_stack.operations.diff import parse_lock_text
+from uv_stack.operations.diff import PinEntry, _diff_pins, parse_lock, parse_lock_text
 from uv_stack.operations.edit import validate_bundle, validate_env, validate_profile
 from uv_stack.operations.export import (
     ENV_FILES,
@@ -1004,3 +1004,22 @@ def prepared_import(
             plan = plan_import(config, document, doc_root, referenced, options, build=build)
             write_plan(config, plan)
             yield plan
+
+
+def pin_report(name: str, seed_text: str, lock: Path) -> list[str]:
+    """Compare the shipped pins with the lock the build produced here."""
+    before = parse_lock_text(seed_text, f"seeds/{name}")
+    after = parse_lock(lock)
+    diff = _diff_pins(before, after)
+    kept = sum(1 for n, v in before.items() if v is not None and after.get(n) == v)
+    lines = [f"{name}: {kept} pins kept, {len(diff.version_differs)} changed, "
+             f"{len(diff.only_in_a)} dropped, {len(diff.only_in_b)} added"]
+    lines += [f"  changed: {c.name} {c.a} -> {c.b}" for c in diff.version_differs]
+    lines += [f"  dropped: {_pin(p)}" for p in diff.only_in_a]
+    lines += [f"  added: {_pin(p)}" for p in diff.only_in_b]
+    return lines
+
+
+def _pin(entry: PinEntry) -> str:
+    # An editable's identity already embeds its target and has no version.
+    return entry.name if entry.version is None else f"{entry.name} {entry.version}"

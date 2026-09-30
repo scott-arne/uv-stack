@@ -8,6 +8,7 @@ from pathlib import Path
 import rich_click as click
 
 from uv_stack.cli._render import echo, render_error, render_warnings
+from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
 from uv_stack.fsutil import atomic_write
 from uv_stack.hints import render_positional_arg
@@ -21,14 +22,18 @@ from uv_stack.operations.export import (
 )
 from uv_stack.operations.importing import (
     STATUS_LABELS,
+    BuildRequest,
     ConflictError,
     ImportOptions,
     ImportPlan,
     change_diff,
     load_document,
+    pin_report,
     prepared_import,
     read_document,
 )
+from uv_stack.operations.upgrade import UpgradeOptions
+from uv_stack.runner import SubprocessRunner
 
 
 def export_items(config: ConfigRoot, items: tuple[str, ...] | list[str]) -> ExportResult:
@@ -109,26 +114,64 @@ def export_cmd(config: ConfigRoot, items: tuple[str, ...], output: Path | None) 
 @click.option("--dry-run", is_flag=True, help="Report what would change; write nothing.")
 @click.option("--strict", is_flag=True,
               help="Refuse unqualified names that fall through to package literals.")
+@click.option("--no-build", is_flag=True, help="Install the definitions without building.")
+@click.option("--recreate", is_flag=True,
+              help="Wipe and rebuild each imported environment from the shipped pins.")
 @click.pass_obj
 def import_cmd(config: ConfigRoot, source: str, overwrite: bool, dry_run: bool,
-               strict: bool) -> None:
+               strict: bool, no_build: bool, recreate: bool) -> None:
     """Import a document written by 'stack export'.
 
     FILE is the document, or - to read standard input. New files are
     installed and identical ones left alone. A file that differs from this
-    machine's copy is refused with a diff unless --overwrite is given.
+    machine's copy is refused with a diff unless --overwrite is given. Each
+    imported environment is then built, with the shipped pins as
+    preferences, unless --no-build is given.
     """
+    if no_build and recreate:
+        raise click.UsageError("--recreate rebuilds environments, so it cannot be combined "
+                               "with --no-build.")
     document = load_document(read_document(source, click.get_binary_stream("stdin")))
     print_header(document)
     options = ImportOptions(overwrite=overwrite, strict=strict)
+    build = None if no_build else BuildRequest(SubprocessRunner(), recreate=recreate)
     try:
-        with prepared_import(config, document, options, dry_run=dry_run) as plan:
-            render_warnings(plan.warnings)
-            print_plan(plan)
-            if plan.dependents:
-                echo(dependents_line(plan.dependents))
+        with prepared_import(config, document, options, dry_run=dry_run, build=build) as plan:
+            try:
+                render_warnings(plan.warnings)
+                print_plan(plan)
+                if dry_run:
+                    for step in plan.builds:
+                        echo(f"  build: {step.name} ({step.action})")
+                elif plan.builds:
+                    _build(config, plan, recreate=recreate, strict=strict)
+            finally:
+                if plan.dependents:
+                    echo(dependents_line(plan.dependents))
     except ConflictError as error:
         print_conflicts(error)
         raise
     if dry_run:
         echo("Dry run: nothing written.")
+
+
+def _build(config: ConfigRoot, plan: ImportPlan, *, recreate: bool, strict: bool) -> None:
+    names = [step.name for step in plan.builds]
+    built: list[str] = []
+
+    def report(name: str) -> None:
+        built.append(name)
+        seed = plan.document.seeds.get(name)
+        if seed is not None:
+            for line in pin_report(name, seed, config.env_requirements_lock(name)):
+                echo(line)
+
+    options = UpgradeOptions(create=True, recreate=recreate, no_upgrade=True, strict=strict)
+    try:
+        _run_upgrade(config, names, options, seeds=plan.document.seeds, on_success=report,
+                     rule_verb="Building", all_succeeded="All imported environments built.")
+    finally:
+        failed = [n for n in names if n not in built]
+        if failed:
+            args = " ".join(render_positional_arg(n) for n in failed)
+            echo(f"Re-run the failed build(s) once the cause is fixed: stack sync env {args}")
