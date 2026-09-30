@@ -3736,6 +3736,68 @@ def test_a_failed_compile_hint_does_not_claim_a_copy_that_never_happened(
     assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
 
 
+def _capturing_responder(
+    seen: list[str], base: Callable[[Command], CommandResult]
+) -> Callable[[Command], CommandResult]:
+    def respond(cmd: Command) -> CommandResult:
+        if cmd.args[:3] == ["uv", "pip", "compile"]:
+            seen.append(_compile_output(cmd).read_text())
+        return base(cmd)
+
+    return respond
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("recreate", [False, True])
+def test_seed_text_is_in_the_candidate_before_compile(
+    config_tree: ConfigRoot, published: bool, recreate: bool
+) -> None:
+    if published:
+        config_tree.env_requirements_lock("main").write_text("numpy==1.0\n")
+    seen: list[str] = []
+    runner = RecordingRunner(responder=_capturing_responder(seen, _existing_env_responder))
+    options = UpgradeOptions(no_upgrade=True, recreate=recreate, seed="numpy==1.26.4\n")
+    upgrade_env(config_tree, runner, "main", options)
+    assert seen and seen[0] == "numpy==1.26.4\n"
+
+
+def test_seed_none_keeps_copying_the_published_lock(config_tree: ConfigRoot) -> None:
+    lock = config_tree.env_requirements_lock("main")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("numpy==1.0\n")
+    seen: list[str] = []
+    runner = RecordingRunner(responder=_capturing_responder(seen, _existing_env_responder))
+    upgrade_env(config_tree, runner, "main", UpgradeOptions(no_upgrade=True, seed=None))
+    assert seen == ["numpy==1.0\n"]
+
+
+def test_seed_with_a_full_upgrade_is_refused(config_tree: ConfigRoot) -> None:
+    with pytest.raises(ValueError, match="seed"):
+        upgrade_env(config_tree, RecordingRunner(), "main", UpgradeOptions(seed="x==1\n"))
+
+
+@pytest.mark.parametrize("recreate", [False, True])
+def test_a_failed_compile_hint_names_the_document_seed(
+    config_tree: ConfigRoot, recreate: bool
+) -> None:
+    lock = config_tree.env_requirements_lock("main")
+
+    def responder(cmd: Command) -> CommandResult:
+        if "compile" in cmd.args:
+            raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
+        return _existing_env_responder(cmd)
+
+    options = UpgradeOptions(no_upgrade=True, recreate=recreate, seed="numpy==1.26.4\n")
+    with pytest.raises(ToolError) as caught:
+        upgrade_env(config_tree, RecordingRunner(responder=responder), "main", options)
+    hint = caught.value.hint
+    assert hint is not None
+    assert "seeded with the pins shipped by the export" in hint
+    assert "stack sync env main" in hint
+    assert "copy of" not in hint
+    assert list(lock.parent.glob(lock.name + ".*.tmp")) == []
+
+
 def test_a_failed_rebuild_gets_no_compile_hint(config_tree: ConfigRoot):
     # The recreate branch's try also covers ensure_env and the interpreter
     # probe. A micromamba failure there must not be explained as a compile
