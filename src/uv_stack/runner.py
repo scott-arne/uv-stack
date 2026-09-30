@@ -249,6 +249,9 @@ class SubprocessRunner:
         exits without reading gets a broken pipe, which is expected and
         swallowed: its exit status says what happened.
 
+        :param command: The command to run; its stdout is inherited.
+        :param text: Written to its stdin as UTF-8, with unencodable
+            characters replaced, then stdin is closed.
         :returns: The exit status and the last stderr lines, for exit-status hints.
         :raises ToolError: When the command cannot be started.
         :raises UvStackError: When a thread cannot be started to feed stdin.

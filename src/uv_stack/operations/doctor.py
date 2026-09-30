@@ -1565,6 +1565,12 @@ def _variables_blame(config: ConfigRoot, error: UvStackError | OSError) -> Path:
 
 
 def _remotes_findings(config: ConfigRoot) -> list[Finding]:
+    """Report a ``remotes.yaml`` that ``stack sync remote`` would refuse to load.
+
+    :param config: The configuration root to inspect.
+    :returns: One unparseable-source warning, or nothing when the file is
+        absent or loads.
+    """
     try:
         load_remotes(config)
     except (ConfigError, OSError) as error:

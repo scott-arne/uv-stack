@@ -1052,6 +1052,16 @@ def test_preflight_refuses_python_drift_unless_recreate(
     assert plan.builds == [BuildStep("main", "recreate")]
 
 
+def test_python_drift_without_a_shipped_python_txt_names_the_default(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    config_tree.env_python_path("main").unlink()
+    with pytest.raises(ConfigError) as caught:
+        _build_plan(ConfigRoot(tmp_path / "target"), _raw(config_tree, "main"), python="3.11.9")
+    assert ("runs Python 3.11.9, but the document ships no python.txt for it, so it "
+            "defaults to 3.12.") in caught.value.message
+
+
 def test_preflight_actions(config_tree: ConfigRoot, tmp_path: Path) -> None:
     target = ConfigRoot(tmp_path / "target")
     assert _build_plan(target, _raw(config_tree, "main")).builds == [BuildStep("main", "create")]

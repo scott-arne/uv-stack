@@ -20,6 +20,8 @@ from uv_stack.runner import Command
 def load_remotes(config: ConfigRoot) -> dict[str, RemoteSettings]:
     """Load ``remotes.yaml``; an absent file has no entries.
 
+    :param config: The local root holding ``remotes.yaml``.
+    :returns: Each host name, exactly as written, mapped to its settings.
     :raises ConfigError: When the file is not regular, is not valid UTF-8, or
         does not parse or validate.
     :raises OSError: When the file exists but cannot be read.
@@ -67,7 +69,11 @@ _DEFAULT_STACK = "stack"
 
 
 def check_destination(dest: str) -> None:
-    """Refuse a DEST that ssh would parse as an option."""
+    """Refuse a DEST that ssh would parse as an option.
+
+    :param dest: The destination as typed.
+    :raises UvStackError: When it begins with ``-``.
+    """
     if dest.startswith("-"):
         raise UvStackError(
             f"Refusing destination '{dest}': it begins with '-', which ssh reads as an option.",
@@ -85,7 +91,17 @@ class ResolvedRemote:
 
 def resolve_settings(config: ConfigRoot, dest: str, *, stack_flag: str | None,
                      root_flag: str | None) -> ResolvedRemote:
-    """Apply flag, then ``remotes.yaml`` entry (DEST exactly as typed), then default."""
+    """Apply flag, then ``remotes.yaml`` entry (DEST exactly as typed), then default.
+
+    :param config: The local root holding ``remotes.yaml``.
+    :param dest: The destination as typed, looked up without normalizing.
+    :param stack_flag: The ``--remote-stack`` value, if given.
+    :param root_flag: The ``--remote-root`` value, if given.
+    :returns: The remote ``stack`` command and root; the root is ``None`` when
+        neither source sets one, leaving the remote's default.
+    :raises ConfigError: When ``remotes.yaml`` is invalid, as ``load_remotes``.
+    :raises OSError: When ``remotes.yaml`` cannot be read.
+    """
     entry = load_remotes(config).get(dest, RemoteSettings())
     return ResolvedRemote(stack_flag or entry.stack or _DEFAULT_STACK, root_flag or entry.root)
 
@@ -95,6 +111,13 @@ def remote_command(dest: str, stack: str, root: str | None, flags: list[str]) ->
 
     ``stack`` is inserted as written so ``~``, ``$HOME``, and multi-word
     commands work on the remote; everything after it is quoted.
+
+    :param dest: The ssh destination, passed as its own argument.
+    :param stack: The remote command that runs uv-stack, inserted verbatim.
+    :param root: The remote config root, or ``None`` to leave the remote's
+        default.
+    :param flags: Import flags forwarded after ``import -``.
+    :returns: The local ``ssh`` command; the remote part is one shell string.
     """
     tail = (["--root", root] if root else []) + ["import", "-", *flags]
     return Command(["ssh", dest, " ".join([stack, *map(shlex.quote, tail)])])
@@ -107,7 +130,16 @@ _PATH_STACK = "PATH=$HOME/.local/bin:$PATH stack"
 
 
 def explain_exit(code: int, tail: str, dest: str, stack: str) -> UvStackError | None:
-    """Explain the exit statuses that are ssh's or the remote shell's, not import's."""
+    """Explain the exit statuses that are ssh's or the remote shell's, not import's.
+
+    :param code: The ssh process's exit status.
+    :param tail: The end of ssh's standard error, which carries the remote's,
+        searched for the message an ``import``-less uv-stack prints.
+    :param dest: The destination, named in the message.
+    :param stack: The remote command, named when the remote did not find it.
+    :returns: An error to print before exiting with the same status, or
+        ``None`` when the status is import's own and its output explains it.
+    """
     if code == 255:
         return UvStackError(
             f"ssh to {dest} exited with status 255: the connection failed or dropped.",

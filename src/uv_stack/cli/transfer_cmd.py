@@ -159,6 +159,20 @@ def import_cmd(config: ConfigRoot, source: str, overwrite: bool, dry_run: bool,
 
 
 def _build(config: ConfigRoot, plan: ImportPlan, *, recreate: bool, strict: bool) -> None:
+    """Build the imported environments through the ``stack sync`` batch.
+
+    Each environment is created if missing and compiled without upgrading, so
+    the shipped lock acts as preferences; a pin report follows each build
+    whose lock the document shipped. Whether the batch finishes, fails, or
+    is interrupted, the environments it did not build are named with the
+    command that retries them.
+
+    :param config: The target root, already holding the imported files.
+    :param plan: The written plan; its ``builds`` name the environments.
+    :param recreate: Wipe and rebuild each environment from the shipped pins.
+    :param strict: Refuse unqualified stack names, as ``--strict`` does.
+    :raises SystemExit: With status 1 when any build fails, from the batch.
+    """
     names = [step.name for step in plan.builds]
     built: list[str] = []
 

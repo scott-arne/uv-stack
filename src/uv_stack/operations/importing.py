@@ -20,7 +20,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Literal
 
 from pydantic import ValidationError
 
@@ -834,12 +834,15 @@ class BuildRequest:
     recreate: bool = False
 
 
+BuildAction = Literal["create", "sync", "recreate"]
+
+
 @dataclass(frozen=True)
 class BuildStep:
     """One environment phase 7 builds, and how."""
 
     name: str
-    action: str
+    action: BuildAction
 
 
 def _missing_editables(requirements: str) -> list[str]:
@@ -869,12 +872,26 @@ def _missing_editables(requirements: str) -> list[str]:
     return missing
 
 
-def _python_action(name: str, python: str, env_python_path: Path, build: BuildRequest) -> str:
+def _python_action(
+    name: str, python: str, env_python_path: Path, build: BuildRequest, *, shipped: bool
+) -> BuildAction:
     """Decide how phase 7 builds one environment, refusing what cannot work.
 
     Mirrors ``upgrade_env``'s two guards so they fire before any write: a
     recreate needs a plain version, and without one the probe and
     ``satisfies`` test of the drift guard, failing open exactly as it does.
+
+    :param name: The environment's name.
+    :param python: The version its staged ``python.txt`` requests, or the
+        default when none was shipped.
+    :param env_python_path: The staged ``python.txt`` path, named in a hint.
+    :param build: The build request, carrying the runner and ``--recreate``.
+    :param shipped: Whether the document ships a ``python.txt`` for it, so a
+        refusal names the file or the default it fell back to.
+    :returns: ``"recreate"``, ``"create"`` when no environment answers the
+        probe, or ``"sync"``.
+    :raises ConfigError: When a recreate names a version that is not plain, or
+        the existing interpreter does not satisfy the requested one.
     """
     if build.recreate:
         if not is_comparable(python):
@@ -901,9 +918,12 @@ def _python_action(name: str, python: str, env_python_path: Path, build: BuildRe
         return "create"
     _, actual = parse_python_info(result.stdout)
     if actual and is_comparable(python) and not satisfies(python, actual):
+        requested = (
+            "the incoming python.txt requests" if shipped
+            else "the document ships no python.txt for it, so it defaults to"
+        )
         raise ConfigError(
-            f"Environment '{name}' runs Python {actual}, but the incoming python.txt "
-            f"requests {python}.",
+            f"Environment '{name}' runs Python {actual}, but {requested} {python}.",
             hint="The interpreter is only rebuilt when the environment is recreated. "
             "Re-run the import with --recreate to rebuild it from the shipped pins "
             "(this wipes and reinstalls the environment).",
@@ -938,7 +958,10 @@ def preflight(
                         hint="Check out each path, or set the variable that locates it in "
                         "variables.local.txt.",
                     )
-                action = _python_action(name, env.python, staged.env_python_path(name), build)
+                action = _python_action(
+                    name, env.python, staged.env_python_path(name), build,
+                    shipped=file_key("env", name, "python.txt") in document.files,
+                )
                 steps.append(BuildStep(name, action))
     except UvStackError as error:
         error.hint = f"{error.hint.rstrip()} {_NO_BUILD}" if error.hint else _NO_BUILD
@@ -1029,9 +1052,14 @@ def write_plan(config: ConfigRoot, plan: ImportPlan) -> int:
     """Write the plan: profiles, bundles, variables, then each env with stack.txt last.
 
     ``stack.txt`` defines whether an environment exists, so writing it last
-    means an interrupted import never leaves a half-written environment that
-    looks complete. A re-run reports finished files as identical.
+    means an interrupted import never leaves a half-written *new* environment
+    that looks complete. An existing environment already has a ``stack.txt``,
+    so an interruption can leave it listed with some files replaced and others
+    not. Either way, re-running the same import is idempotent: finished files
+    are reported as identical and the rest are completed.
 
+    :param config: The target root.
+    :param plan: The plan ``plan_import`` decided.
     :returns: The number of files written or removed.
     :raises ConfigError: When a write fails part-way.
     """
