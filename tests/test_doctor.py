@@ -2780,3 +2780,21 @@ def test_a_marker_the_filesystem_will_not_resolve_is_still_a_misplaced_env(
     (legacy / "requirements.in").symlink_to(legacy / "nowhere")
 
     assert _kinds(diagnose(config_tree)) == ["misplaced-env"]
+
+
+def test_invalid_remotes_yaml_is_unparseable(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("gpu-box: [1, 2]\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "unparseable-source")
+    assert finding.level == "warn"
+    assert finding.path == config_tree.remotes_path()
+
+
+@pytest.mark.skipif(_IS_ROOT, reason="root ignores the file mode this relies on")
+def test_unreadable_remotes_yaml_is_unparseable(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("gpu-box:\n")
+    config_tree.remotes_path().chmod(0)
+    try:
+        finding = next(f for f in diagnose(config_tree) if f.kind == "unparseable-source")
+    finally:
+        config_tree.remotes_path().chmod(0o644)
+    assert finding.path == config_tree.remotes_path()

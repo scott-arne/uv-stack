@@ -41,6 +41,7 @@ from uv_stack.fsutil import (
 )
 from uv_stack.operations.portable import enclosing_repository, write_portable_ignore
 from uv_stack.operations.project import python_travel_problem
+from uv_stack.operations.remote import load_remotes
 from uv_stack.parse import editable_target, read_clean_lines
 from uv_stack.variables import Variables, expand_all, placement_problem, referenced_names
 
@@ -1561,6 +1562,14 @@ def _variables_blame(config: ConfigRoot, error: UvStackError | OSError) -> Path:
     return config.variables_path()
 
 
+def _remotes_findings(config: ConfigRoot) -> list[Finding]:
+    try:
+        load_remotes(config)
+    except (ConfigError, OSError) as error:
+        return [_unparseable(config.remotes_path(), str(error))]
+    return []
+
+
 def _portability_findings(config: ConfigRoot) -> list[Finding]:
     """Every portability check, ordered so a broken root still reports usefully.
 
@@ -1569,6 +1578,7 @@ def _portability_findings(config: ConfigRoot) -> list[Finding]:
     """
     findings = _ignore_block_findings(config)
     findings.extend(_project_python_findings(config))
+    findings.extend(_remotes_findings(config))
 
     entries, scan_findings = _scan_sources(config)
     findings.extend(scan_findings)

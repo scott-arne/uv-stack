@@ -292,6 +292,10 @@ class ConfigRoot:
         """
         return self.root / "variables.local.txt"
 
+    def remotes_path(self) -> Path:
+        """Return the hand-edited per-host settings for ``stack sync remote``."""
+        return self.root / "remotes.yaml"
+
     def profile_path(self, name: str) -> Path:
         return self.profiles_dir / f"{name}.yaml"
 

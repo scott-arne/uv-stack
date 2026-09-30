@@ -103,6 +103,17 @@ class ClassifiedTokens(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class RemoteSettings(BaseModel):
+    """Per-host settings for ``stack sync remote``, from ``remotes.yaml``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # default= by keyword: type checkers honor only the keyword form on a
+    # field specifier, and T18 calls RemoteSettings() in src.
+    stack: str | None = Field(default=None, min_length=1)
+    root: str | None = Field(default=None, min_length=1)
+
+
 class ProjectTracking(BaseModel):
     """The ``[tool.uv-stack]`` project tracking table.
 
