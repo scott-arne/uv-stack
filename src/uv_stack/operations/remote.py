@@ -6,6 +6,7 @@ import os
 import shlex
 import textwrap
 from dataclasses import dataclass
+from pathlib import Path
 
 import yaml
 from pydantic import ValidationError
@@ -32,7 +33,18 @@ def load_remotes(config: ConfigRoot) -> dict[str, RemoteSettings]:
     require_regular_file(path)
     # Read outside the broad except: a decode failure is already a ConfigError
     # naming the file, and an unreadable file is an OSError, not bad YAML.
-    text = read_text_utf8(path)
+    return parse_remotes(read_text_utf8(path), path)
+
+
+def parse_remotes(text: str, path: Path) -> dict[str, RemoteSettings]:
+    """Parse ``remotes.yaml`` text; an empty document has no entries.
+
+    :param text: The file's text.
+    :param path: The file the text came from, named in errors.
+    :returns: Each host name, exactly as written, mapped to its settings, in
+        file order.
+    :raises ConfigError: When the text does not parse or validate.
+    """
     try:
         data = yaml.safe_load(text)
     except Exception as exc:  # Same breadth as ConfigRoot._load_yaml_model.
@@ -58,11 +70,43 @@ def load_remotes(config: ConfigRoot) -> dict[str, RemoteSettings]:
                 f"Host {host!r} in {path} is a YAML {kind}, not a name.",
                 hint="Quote the host name in remotes.yaml, for example \"yes\":",
                 path=path)
-        try:
-            remotes[host] = RemoteSettings.model_validate({} if entry is None else entry)
-        except ValidationError as exc:
-            raise ConfigError(f"Invalid remotes config in {path}: {exc}", path=path) from exc
+        remotes[host] = _settings({} if entry is None else entry, path)
     return remotes
+
+
+def _settings(entry: object, path: Path) -> RemoteSettings:
+    """Validate one host's entry, naming the file on failure."""
+    try:
+        return RemoteSettings.model_validate(entry)
+    except ValidationError as exc:
+        raise ConfigError(f"Invalid remotes config in {path}: {exc}", path=path) from exc
+
+
+#: The line breaks YAML recognizes; a block scalar's header ends at the first.
+_BREAKS = "\r\n\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}"
+
+
+def has_comment(text: str) -> bool:
+    """Return whether YAML text holds a comment.
+
+    A comment is a ``#`` that no scanner token covers. PyYAML's token for a
+    block scalar (``|`` or ``>``) also spans its header line, where a comment
+    may sit, so that span is taken to start at the header's line break. A
+    ``#`` in a gap the scanner leaves counts as a comment, so a gap refuses a
+    clean file rather than dropping a comment.
+
+    :param text: Text that scans as YAML; call this only after it parsed.
+    :returns: True when a comment is present.
+    """
+    covered = [False] * len(text)
+    for token in yaml.scan(text, Loader=yaml.SafeLoader):
+        start = token.start_mark.index
+        if isinstance(token, yaml.ScalarToken) and token.style in ("|", ">"):
+            while start < token.end_mark.index and text[start] not in _BREAKS:
+                start += 1
+        for index in range(start, token.end_mark.index):
+            covered[index] = True
+    return any(char == "#" and not covered[index] for index, char in enumerate(text))
 
 
 _DEFAULT_STACK = "stack"

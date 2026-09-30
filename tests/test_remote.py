@@ -21,7 +21,9 @@ from uv_stack.operations.remote import (
     ResolvedRemote,
     check_destination,
     explain_exit,
+    has_comment,
     load_remotes,
+    parse_remotes,
     remote_command,
     resolve_settings,
 )
@@ -101,6 +103,60 @@ def test_quoted_remotes_host_keys_load_verbatim(config_tree: ConfigRoot) -> None
     config_tree.remotes_path().write_text('"yes":\n  root: /a\n"1":\n  root: /b\n')
     remotes = load_remotes(config_tree)
     assert remotes == {"yes": RemoteSettings(root="/a"), "1": RemoteSettings(root="/b")}
+
+
+def test_parse_remotes_names_the_given_path(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="elsewhere.yaml"):
+        parse_remotes("a: [\n", tmp_path / "elsewhere.yaml")
+
+
+def test_parse_remotes_keeps_file_order(tmp_path: Path) -> None:
+    remotes = parse_remotes("b: {}\na:\n  root: /a\n", tmp_path / "remotes.yaml")
+    assert list(remotes) == ["b", "a"]
+    assert remotes["a"] == RemoteSettings(root="/a")
+
+
+@pytest.mark.parametrize("text", [
+    "# c\na: {}\n",                              # full line
+    "a:\n  stack: x # c\n",                      # trailing
+    "a: {stack: x, # c\n  root: y}\n",           # inside a flow mapping
+    "a:\n  stack: | # c\n    x\n",               # literal block header
+    "a:\n  stack: >- # c\n    x\n",              # folded block header with chomping
+    "a:\n  stack: |2 # c\n     x\n",             # block header with an indent indicator
+    "a:\r\n  stack: | # c\r\n    x\r\n",         # block header, CRLF
+    "a:\n  stack: |\n    x\n# c\nb: {}\n",       # after a block scalar
+    "a:\n  stack: |+\n    x\n\n# c\nb: {}\n",    # after a keep-chomped block scalar
+    "# no remotes yet\n",                        # the whole file
+    "a:\n  stack: x\n  # c\n  root: y\n",        # between keys
+    "a: &x # c\n  stack: s\n",                   # after an anchor
+    "a: !!map # c\n  stack: s\n",                # after a tag
+    "a: # c\n",                                  # an empty value
+    "a:\n  stack: x\n    y # c\n",               # a multi-line plain scalar
+    "--- # c\na: {}\n",                          # a document start
+    "a: {}\n... # c\n",                          # a document end
+    "%YAML 1.1 # c\n---\na: {}\n",               # a directive
+])
+def test_has_comment_finds_a_comment(text: str) -> None:
+    assert has_comment(text)
+
+
+@pytest.mark.parametrize("text", [
+    "a:\n  stack: a#b\n",                        # inside a plain scalar
+    "a:\n  root: /x/#/y\n",                      # a path
+    "a:\n  stack: x\n    y#z\n",                 # a multi-line plain scalar
+    "a#: {}\n",                                  # a plain key
+    "a:\n  stack: 'x # y'\n",                    # single-quoted
+    'a:\n  stack: "x # y"\n',                    # double-quoted
+    "'a # b':\n  stack: x\n",                    # a quoted key
+    "a:\n  stack: |\n    x # y\n",               # block scalar content
+    "a:\n  stack: |\n    # y\n",                 # block content that starts with #
+    "a:\r\n  stack: |\r\n    x # y\r\n",         # block content, CRLF
+    "a:\n  stack: |\n    x # y",                 # block content at EOF, no newline
+    "a:\n  stack: |-\n    x\n",                  # a header with no comment
+    "",                                          # an empty file
+])
+def test_has_comment_ignores_a_hash_inside_a_token(text: str) -> None:
+    assert not has_comment(text)
 
 
 def test_settings_precedence(config_tree: ConfigRoot) -> None:
