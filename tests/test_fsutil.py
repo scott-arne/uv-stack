@@ -57,6 +57,34 @@ def _current_umask() -> int:
     return umask
 
 
+def test_atomic_write_applies_a_given_mode_under_a_permissive_umask(tmp_path: Path):
+    target = tmp_path / "out.txt"
+    previous = os.umask(0)
+    try:
+        atomic_write(target, "x", mode=0o600)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_atomic_write_mode_is_on_the_file_before_it_is_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # 0o640, not 0o600: mkstemp already creates 0600, so only a mode mkstemp
+    # does not give shows that the chmod happened before the rename.
+    target = tmp_path / "out.txt"
+    seen: list[int] = []
+    replace = os.replace
+
+    def recording_replace(src, dst):
+        seen.append(stat.S_IMODE(os.stat(src).st_mode))
+        replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", recording_replace)
+    atomic_write(target, "x", mode=0o640)
+    assert seen == [0o640]
+
+
 def test_atomic_write_new_creates_file(tmp_path: Path):
     target = tmp_path / "new.txt"
     stat_result = atomic_write_new(target, "content\n")

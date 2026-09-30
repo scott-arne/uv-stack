@@ -43,8 +43,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   import -` with the document on stdin. The local exit status is the remote's.
   `--remote-stack` and `--remote-root` customize the remote command and root.
 - `remotes.yaml` maps host names to optional `stack` and `root` settings,
-  overridden by `--remote-stack` and `--remote-root`. Edited by hand. Portable
-  across machines. `stack doctor` reports an invalid file.
+  overridden by `--remote-stack` and `--remote-root`. Portable across machines.
+  `stack doctor` reports an invalid file.
+- `stack edit remotes` opens `remotes.yaml` in the editor and validates it when
+  the editor exits, offering the editor again when it does not validate, as for
+  the other kinds.
+- `stack config remote list|set|remove` lists, sets, and removes `remotes.yaml`
+  entries. `set` and `remove` take a lock on the config root, keep a symlinked
+  file's link and the file's permission bits, and refuse a file that holds
+  comments, since the rewrite normalizes formatting and would drop them.
 
 ### Changed
 

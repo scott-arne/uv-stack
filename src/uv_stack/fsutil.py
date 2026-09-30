@@ -461,7 +461,7 @@ def relax_to_conventional_mode(path: str | Path) -> None:
     os.chmod(path, 0o666 & ~umask)
 
 
-def atomic_write(path: Path, text: str) -> None:
+def atomic_write(path: Path, text: str, *, mode: int | None = None) -> None:
     """Write ``text`` to ``path`` atomically.
 
     The content is written to a temporary file in the same directory and then
@@ -477,6 +477,10 @@ def atomic_write(path: Path, text: str) -> None:
 
     :param path: Destination file.
     :param text: Content to write.
+    :param mode: Permission bits for the published file, set on the temporary
+        file before the rename and not subject to the umask. ``None`` gives the
+        conventional mode (:func:`relax_to_conventional_mode`). A skipped
+        identical rewrite keeps the file's own mode.
     """
     # Skip identical rewrites: generated files keep their mtime, so
     # mtime-based staleness checks (stack status) see no phantom drift
@@ -516,7 +520,10 @@ def atomic_write(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
-        relax_to_conventional_mode(tmp_name)
+        if mode is None:
+            relax_to_conventional_mode(tmp_name)
+        else:
+            os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)
     except BaseException:
         if os.path.exists(tmp_name):

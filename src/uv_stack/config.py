@@ -293,7 +293,7 @@ class ConfigRoot:
         return self.root / "variables.local.txt"
 
     def remotes_path(self) -> Path:
-        """Return the hand-edited per-host settings for ``stack sync remote``."""
+        """Return the per-host settings for ``stack sync remote``."""
         return self.root / "remotes.yaml"
 
     def profile_path(self, name: str) -> Path:
@@ -357,6 +357,14 @@ class ConfigRoot:
     def import_lock_path(self) -> Path:
         """Return the root-scoped lock that serializes ``stack import`` runs."""
         return self.locks_dir / "import.lock"
+
+    def remotes_lock_path(self) -> Path:
+        """Return the root-scoped lock that serializes ``remotes.yaml`` rewrites.
+
+        A fixed name outside the ``stem-``, ``env-`` and ``project-``
+        namespaces, so no user-chosen name can collide with it.
+        """
+        return self.locks_dir / "remotes.lock"
 
     def project_lock_path(self, project_dir: Path) -> Path:
         """Lock covering one tracked project's ``[tool.uv-stack]`` ledger.

@@ -2889,7 +2889,8 @@ def test_edit_env_opens_an_absent_optional_file(tmp_path: Path, monkeypatch):
     ["stack", "python"],
 )
 @pytest.mark.parametrize(
-    "kind,name", [("profile", ["ds"]), ("bundle", ["standard"]), ("project", [])]
+    "kind,name",
+    [("profile", ["ds"]), ("bundle", ["standard"]), ("project", []), ("remotes", [])],
 )
 def test_edit_rejects_file_on_non_env_kinds(
     tmp_path: Path, monkeypatch, kind, name, file
@@ -2974,6 +2975,15 @@ def test_edit_project_rejects_a_name(tmp_path: Path, monkeypatch):
     result = CliRunner().invoke(cli, ["--root", str(root), "edit", "project", "x"])
     assert result.exit_code == 2
     assert "takes no NAME" in _combined_output(result)
+
+
+def test_edit_remotes_rejects_a_name(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes", "gpu-box"])
+    assert result.exit_code == 2
+    assert "takes no NAME" in _combined_output(result)
+    assert fake.commands == []
 
 
 @pytest.mark.parametrize(
@@ -3302,6 +3312,131 @@ def test_edit_still_validates_an_optional_env_file_left_absent(
     assert "Apply it with: stack upgrade main" in result.output
 
 
+def test_edit_remotes_left_absent_is_not_validated(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    path = ConfigRoot(root).remotes_path()
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
+    assert result.exit_code == 0
+    assert fake.commands == [Command(["fake-editor", str(path)])]
+    assert f"{path} does not exist; nothing to validate." in result.output
+    assert "Validated" not in result.output
+
+
+def test_edit_remotes_deleted_in_the_editor_is_not_validated(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    path = ConfigRoot(root).remotes_path()
+    path.write_text("gpu-box: {}\n")
+    _install_editor(monkeypatch, _FakeEditor(lambda target: target.unlink()))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
+    assert result.exit_code == 0
+    assert f"{path} does not exist; nothing to validate." in result.output
+    assert "Validated" not in result.output
+
+
+def test_edit_remotes_names_the_next_sync(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    path = ConfigRoot(root).remotes_path()
+
+    def _write(target: Path) -> None:
+        target.write_text("gpu-box:\n  root: /data\n", encoding="utf-8")
+
+    _install_editor(monkeypatch, _FakeEditor(_write))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
+    assert result.exit_code == 0
+    assert f"Validated {path}" in result.output
+    assert "Used by the next 'stack sync remote'." in result.output
+
+
+def test_edit_symlinked_remotes_names_the_real_file(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    real = tmp_path / "real-remotes.yaml"
+    real.write_text("gpu-box: {}\n", encoding="utf-8")
+    ConfigRoot(root).remotes_path().symlink_to(real)
+    _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
+    assert result.exit_code == 0
+    assert f"Validated {real}" in result.output
+
+
+@pytest.mark.parametrize(
+    "break_it,expected",
+    [
+        (lambda path: path.mkdir(), "Not a regular file"),
+        (lambda path: path.symlink_to(path.parent / "nowhere"), "Broken symlink"),
+    ],
+    ids=["directory", "dangling-symlink"],
+)
+def test_edit_remotes_refuses_a_non_regular_target(
+    tmp_path: Path, monkeypatch, break_it, expected
+):
+    """The pre-launch guard must refuse a directory or dangling symlink.
+
+    Without it the editor would launch on a target that cannot be a valid
+    remotes file. Mirrors the env/profile/bundle guards.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = _seeded_root(tmp_path)
+    target = ConfigRoot(root).remotes_path()
+    target.unlink(missing_ok=True)
+    break_it(target)
+
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
+    assert result.exit_code == 1
+    assert expected in _flat_panel(result)
+    assert fake.commands == []
+
+
+@pytest.mark.parametrize(
+    "break_it,expected,hint",
+    [
+        (lambda path: path.mkdir(), "Not a regular file", "Remove or rename"),
+        (
+            lambda path: path.symlink_to(path.parent / "nowhere"),
+            "Broken symlink",
+            "Point it at a real file",
+        ),
+    ],
+    ids=["directory", "dangling-symlink"],
+)
+def test_edit_remotes_refuses_a_target_the_editor_made_non_regular(
+    tmp_path: Path, monkeypatch, break_it, expected, hint
+):
+    """The guard must run again after the editor exits, not only before it.
+
+    Without the post-edit guard the command blesses a path it refuses on the
+    very next invocation: the lexists check sees the broken target and skips
+    validation, reporting success. The user then sees "Re-open the editor?"
+    for a problem only the shell can fix. Mirrors the env file guards.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = _seeded_root(tmp_path)
+    target = ConfigRoot(root).remotes_path()
+    target.write_text("gpu-box: {}\n", encoding="utf-8")
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+
+    def _replace(path: Path) -> None:
+        path.unlink(missing_ok=True)
+        break_it(path)
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_replace))
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "remotes"], input="n\n"
+    )
+    assert result.exit_code == 1
+    output = _flat_panel(result)
+    assert f"{expected}: {target}" in output
+    assert hint in output
+    assert "Re-open the editor?" not in output
+    assert "Validated" not in output
+    assert "does not exist; nothing to validate." not in output
+    assert len(fake.commands) == 1
+
+
 def test_edit_symlinked_profile_names_the_real_file(tmp_path: Path, monkeypatch):
     """When the target is a symlink, the success line names the resolved file."""
     root = _seeded_root(tmp_path)
@@ -3474,6 +3609,36 @@ def test_edit_does_not_prompt_without_a_tty(tmp_path: Path, monkeypatch):
 
     fake = _install_editor(monkeypatch, _FakeEditor(_break_it))
     result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "ds"])
+    assert result.exit_code == 1
+    assert len(fake.commands) == 1
+    assert "Re-open the editor?" not in _combined_output(result)
+
+
+def test_edit_remotes_reoffers_until_the_file_is_valid(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+
+    def _break_it(path: Path) -> None:
+        path.write_text("gpu-box: [1, 2]\n", encoding="utf-8")
+
+    def _fix_it(path: Path) -> None:
+        path.write_text("gpu-box:\n  root: /data\n", encoding="utf-8")
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_break_it, _fix_it))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"], input="y\n")
+    assert result.exit_code == 0
+    assert len(fake.commands) == 2
+    assert "Validated" in _combined_output(result)
+
+
+def test_edit_remotes_without_a_tty_exits_nonzero(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+
+    def _break_it(path: Path) -> None:
+        path.write_text("gpu-box: [1, 2]\n", encoding="utf-8")
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_break_it))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
     assert result.exit_code == 1
     assert len(fake.commands) == 1
     assert "Re-open the editor?" not in _combined_output(result)
@@ -3928,6 +4093,57 @@ def test_complete_show_names_dispatches_on_kind(tmp_path: Path):
     assert complete_show_names(ctx, None, "d") == ["ds"]
 
 
+def test_complete_remote_hosts_lists_the_configured_hosts(config_tree: ConfigRoot):
+    import click as _click
+
+    from uv_stack.cli._complete import complete_remote_hosts
+
+    config_tree.remotes_path().write_text("gpu-box: {}\nlaptop: {}\n")
+    ctx = _click.Context(cli)
+    ctx.params = {"root": str(config_tree.root)}
+    assert complete_remote_hosts(ctx, None, "") == ["gpu-box", "laptop"]
+    assert complete_remote_hosts(ctx, None, "g") == ["gpu-box"]
+
+
+def test_complete_remote_hosts_survives_an_invalid_file(config_tree: ConfigRoot):
+    import click as _click
+
+    from uv_stack.cli._complete import complete_remote_hosts
+
+    config_tree.remotes_path().write_text("a: [\n")
+    ctx = _click.Context(cli)
+    ctx.params = {"root": str(config_tree.root)}
+    assert complete_remote_hosts(ctx, None, "") == []
+
+
+def test_complete_remote_hosts_excludes_control_characters(config_tree: ConfigRoot):
+    import click as _click
+
+    from uv_stack.cli._complete import complete_remote_hosts
+
+    config_tree.remotes_path().write_text(
+        'gpu-box: {}\n"a\\nplain,forged": {}\n"c\\x1b[31md": {}\n"e\\uD800f": {}\n'
+    )
+    ctx = _click.Context(cli)
+    ctx.params = {"root": str(config_tree.root)}
+    assert complete_remote_hosts(ctx, None, "") == ["gpu-box"]
+
+
+def test_complete_remote_hosts_bash_format_excludes_control_characters(
+    config_tree: ConfigRoot, monkeypatch
+):
+    from click.shell_completion import BashComplete
+
+    config_tree.remotes_path().write_text(
+        'gpu-box: {}\n"a\\nplain,forged": {}\n"c\\x1b[31md": {}\n"e\\uD800f": {}\n'
+    )
+    monkeypatch.setenv("COMP_WORDS", f"stack --root {config_tree.root} config remote remove ")
+    monkeypatch.setenv("COMP_CWORD", "6")
+    output = BashComplete(cli, {}, "stack", "_STACK_COMPLETE").complete()
+    assert output == "plain,gpu-box"
+    assert output.encode() == b"plain,gpu-box"
+
+
 def test_help_contains_no_rest_double_backticks():
     runner = CliRunner()
     for args in (
@@ -3945,6 +4161,10 @@ def test_help_contains_no_rest_double_backticks():
         ["status", "--help"],
         ["doctor", "--help"],
         ["config", "--help"],
+        ["config", "remote", "--help"],
+        ["config", "remote", "list", "--help"],
+        ["config", "remote", "set", "--help"],
+        ["config", "remote", "remove", "--help"],
         ["init", "--help"],
         ["completion", "--help"],
     ):
@@ -5604,6 +5824,163 @@ def test_config_portable_reports_a_malformed_block(config_tree: ConfigRoot):
     )
     assert result.exit_code != 0
     assert "Malformed" in result.output
+
+
+def _config_remote(config_tree: ConfigRoot, *args: str, color: bool = False):
+    return CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "remote", *args], color=color
+    )
+
+
+def test_config_remote_list_fills_in_defaults(config_tree: ConfigRoot):
+    config_tree.remotes_path().write_text(
+        "gpu-box:\n  stack: PATH=$HOME/.local/bin:$PATH stack\n  root: /data/python-envs\n"
+        "laptop:\n"
+    )
+    result = _config_remote(config_tree, "list")
+    assert result.exit_code == 0, result.output
+    assert result.output == (
+        "gpu-box\n"
+        "  stack: PATH=$HOME/.local/bin:$PATH stack\n"
+        "  root: /data/python-envs\n"
+        "laptop\n"
+        "  stack: stack (default)\n"
+        "  root: (remote's default)\n"
+    )
+
+
+def test_config_remote_list_json_gives_the_stored_values(config_tree: ConfigRoot):
+    import json
+
+    config_tree.remotes_path().write_text("gpu-box:\n  stack: /opt/stack\nlaptop:\n")
+    result = _config_remote(config_tree, "list", "--json")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {
+        "gpu-box": {"stack": "/opt/stack", "root": None},
+        "laptop": {"stack": None, "root": None},
+    }
+
+
+@pytest.mark.parametrize("text", [None, "", "# nothing yet\n"])
+def test_config_remote_list_with_no_remotes(config_tree: ConfigRoot, text: str | None):
+    import json
+
+    if text is not None:
+        config_tree.remotes_path().write_text(text)
+    result = _config_remote(config_tree, "list")
+    assert result.exit_code == 0, result.output
+    assert result.output == f"No remotes in {config_tree.remotes_path()}.\n"
+    as_json = _config_remote(config_tree, "list", "--json")
+    assert json.loads(as_json.output) == {}
+
+
+@pytest.mark.parametrize("host", ["gpu-box", "-bad", ""])
+def test_config_remote_set_needs_a_field(config_tree: ConfigRoot, host: str):
+    result = _config_remote(config_tree, "set", "--", host)
+    assert result.exit_code == 2
+    assert "needs --stack, --root, or both" in _combined_output(result)
+    assert not config_tree.remotes_path().exists()
+
+
+def test_config_remote_set_prints_the_entry(config_tree: ConfigRoot):
+    result = _config_remote(config_tree, "set", "gpu-box", "--stack", "/opt/stack")
+    assert result.exit_code == 0, result.output
+    assert result.output == "gpu-box\n  stack: /opt/stack\n  root: (remote's default)\n"
+    assert config_tree.remotes_path().read_text() == "gpu-box:\n  stack: /opt/stack\n"
+
+
+def test_config_remote_set_refuses_a_dash_host(config_tree: ConfigRoot, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
+    result = _config_remote(config_tree, "set", "--root", "/r", "--", "-bad")
+    assert result.exit_code == 1
+    assert "begins with '-'" in _flat_panel(result)
+    assert not config_tree.remotes_path().exists()
+
+
+def test_config_remote_remove_prints_the_removed_line(config_tree: ConfigRoot):
+    config_tree.remotes_path().write_text("gpu-box: {}\nlaptop: {}\n")
+    result = _config_remote(config_tree, "remove", "gpu-box")
+    assert result.exit_code == 0, result.output
+    assert result.output == f"Removed gpu-box from {config_tree.remotes_path()}.\n"
+    assert config_tree.remotes_path().read_text() == "laptop: {}\n"
+
+
+def test_config_remote_remove_field_notes_what_was_not_set(config_tree: ConfigRoot):
+    config_tree.remotes_path().write_text("gpu-box:\n  root: /data\n")
+    result = _config_remote(config_tree, "remove", "gpu-box", "stack", "root")
+    assert result.exit_code == 0, result.output
+    assert result.output == (
+        "stack is not set for gpu-box.\n"
+        "gpu-box\n"
+        "  stack: stack (default)\n"
+        "  root: (remote's default)\n"
+    )
+    assert config_tree.remotes_path().read_text() == "gpu-box: {}\n"
+
+
+def test_config_remote_remove_of_a_missing_host_is_refused(config_tree: ConfigRoot, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
+    config_tree.remotes_path().write_text("gpu-box: {}\n")
+    result = _config_remote(config_tree, "remove", "gpu")
+    assert result.exit_code == 1
+    assert "No remote named 'gpu'" in _flat_panel(result)
+    assert "stack config remote list" in _flat_panel(result)
+
+
+def test_config_remote_output_escapes_a_control_character(config_tree: ConfigRoot):
+    # color=True stops CliRunner stripping ANSI sequences from the output, so
+    # a raw ESC reaching echo would still be there for the assertions to find.
+    path = config_tree.remotes_path()
+    path.write_text('"a\\e[31mb":\n  root: /r\n')
+    listed = _config_remote(config_tree, "list", color=True)
+    assert listed.exit_code == 0, listed.output
+    assert listed.output.startswith("a\\x1b[31mb\n")
+    assert "\x1b" not in listed.output
+    cleared = _config_remote(config_tree, "remove", "a\x1b[31mb", "root", color=True)
+    assert cleared.exit_code == 0, cleared.output
+    assert cleared.output.startswith("a\\x1b[31mb\n")
+    assert "\x1b" not in cleared.output
+    removed = _config_remote(config_tree, "remove", "a\x1b[31mb", color=True)
+    assert removed.exit_code == 0, removed.output
+    assert removed.output == f"Removed a\\x1b[31mb from {path}.\n"
+
+
+def test_config_remote_escapes_the_config_root_path(tmp_path: Path):
+    """Control characters in the config root path are escaped in the output."""
+    # Replicate the config_tree fixture with an ESC in the directory name.
+    root = tmp_path / "cfg\x1b[31mx" / "python-envs"
+    (root / "profiles").mkdir(parents=True)
+    (root / "bundles").mkdir(parents=True)
+    (root / "envs" / "main").mkdir(parents=True)
+    (root / "profiles" / "ds.yaml").write_text(
+        "description: Core data-science stack\n"
+        "tags: [data, core]\nincludes:\n  - numpy\n  - pandas\n"
+    )
+    (root / "bundles" / "standard.yaml").write_text(
+        "description: Standard bundle\ntags: [bundle, core]\nprofiles:\n  - ds\n"
+    )
+    (root / "envs" / "main" / "stack.txt").write_text("@standard\n")
+    cfg = ConfigRoot(root)
+
+    # Empty list names the path.
+    listed = CliRunner().invoke(
+        cli, ["--root", str(root), "config", "remote", "list"], color=True
+    )
+    assert listed.exit_code == 0, listed.output
+    escaped_path = str(cfg.remotes_path()).replace("\x1b", "\\x1b")
+    assert listed.output == f"No remotes in {escaped_path}.\n"
+    assert "\x1b" not in listed.output
+
+    # Set and remove name the path.
+    CliRunner().invoke(
+        cli, ["--root", str(root), "config", "remote", "set", "h", "--root", "/r"], color=True
+    )
+    removed = CliRunner().invoke(
+        cli, ["--root", str(root), "config", "remote", "remove", "h"], color=True
+    )
+    assert removed.exit_code == 0, removed.output
+    assert removed.output == f"Removed h from {escaped_path}.\n"
+    assert "\x1b" not in removed.output
 
 
 def test_repeated_environment_names_are_upgraded_once(tmp_path: Path):

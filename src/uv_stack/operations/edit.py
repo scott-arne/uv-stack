@@ -25,6 +25,7 @@ from uv_stack.operations.pyproject import (
     read_tracking,
     validate_tracking_write,
 )
+from uv_stack.operations.remote import load_remotes
 from uv_stack.pyversion import is_near_miss_version, near_miss_version_notice
 from uv_stack.render import render_environment_yml, render_requirements_in
 from uv_stack.resolver import Resolver, bundle_self_references
@@ -80,6 +81,18 @@ def validate_profile(config: ConfigRoot, name: str, *, strict: bool = False) -> 
     """
     profile = config.load_profile(name)
     check_placement(profile.includes, source=str(config.profile_path(name)))
+    return Validation([])
+
+
+def validate_remotes(config: ConfigRoot) -> Validation:
+    """Validate an edited ``remotes.yaml``.
+
+    :param config: Config root.
+    :returns: No warnings; an absent file is valid and has no remotes.
+    :raises ConfigError: When the file is not regular, is not valid UTF-8, or
+        does not parse or validate, as ``stack sync remote`` would find.
+    """
+    load_remotes(config)
     return Validation([])
 
 
@@ -204,8 +217,8 @@ def validate(config: ConfigRoot, kind: str, name: str, cwd: Path) -> Validation:
     """Validate the sources for ``kind``/``name`` after an edit.
 
     :param config: Config root.
-    :param kind: One of ``profile``, ``bundle``, ``env``, ``project``.
-    :param name: The resource name; ignored when ``kind`` is ``project``.
+    :param kind: One of ``profile``, ``bundle``, ``env``, ``project``, ``remotes``.
+    :param name: The resource name; ignored for ``project`` and ``remotes``.
     :param cwd: The directory holding ``pyproject.toml``; ignored otherwise.
     :returns: Non-fatal warnings to report alongside success.
     :raises ConfigError: When the edited file is invalid.
@@ -217,4 +230,6 @@ def validate(config: ConfigRoot, kind: str, name: str, cwd: Path) -> Validation:
         return validate_bundle(config, name)
     if kind == "env":
         return validate_env(config, name)
+    if kind == "remotes":
+        return validate_remotes(config)
     return validate_project(config, cwd)
