@@ -18,12 +18,13 @@ import tempfile
 import unicodedata
 from collections.abc import Iterable, Iterator
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
 from pydantic import ValidationError
 
+from uv_stack.commands import micromamba_python_info
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.fsutil import atomic_write, name_lock, read_text_utf8, require_regular_file
@@ -42,7 +43,11 @@ from uv_stack.operations.export import (
     reference_key,
 )
 from uv_stack.operations.scaffold import _SHADOW_HINT
+from uv_stack.parse import editable_target
+from uv_stack.pyversion import is_comparable, parse_python_info, satisfies
+from uv_stack.render import render_requirements_in
 from uv_stack.resolver import Resolver
+from uv_stack.runner import Runner
 from uv_stack.variables import referenced_names
 
 _REEXPORT_HINT = "Re-create the document with 'stack export' on the source machine."
@@ -736,6 +741,128 @@ def check_meanings(
                            _meaning(staged.root, token), incoming=False)
 
 
+_NO_BUILD = "Or pass --no-build to install the definitions without building."
+
+
+@dataclass(frozen=True)
+class BuildRequest:
+    """How phase 5 probes, and whether the build recreates environments."""
+
+    runner: Runner
+    recreate: bool = False
+
+
+@dataclass(frozen=True)
+class BuildStep:
+    """One environment phase 7 builds, and how."""
+
+    name: str
+    action: str
+
+
+def _missing_editables(config: ConfigRoot, requirements: str) -> list[str]:
+    """Editable targets in a rendered ``requirements.in`` absent on this machine.
+
+    Resolved as doctor's missing-checkout finding does: ``~`` expanded, a
+    relative path against the target root, where the build runs. Other
+    path-bearing entries are left to uv, which reports them itself.
+    """
+    missing = []
+    for line in requirements.splitlines():
+        target = editable_target(line)
+        if target is None:
+            continue
+        # An embedded NUL in the '~user' form makes expanduser raise
+        # ValueError; keep the text as written, as doctor does, so the entry is
+        # reported missing rather than silently passed to the build.
+        try:
+            path = Path(os.path.expanduser(target))
+        except ValueError:
+            path = Path(target)
+        if not path.is_absolute():
+            path = config.root / path
+        if not os.path.exists(path):
+            missing.append(target)
+    return missing
+
+
+def _python_action(name: str, python: str, env_python_path: Path, build: BuildRequest) -> str:
+    """Decide how phase 7 builds one environment, refusing what cannot work.
+
+    Mirrors ``upgrade_env``'s two guards so they fire before any write: a
+    recreate needs a plain version, and without one the probe and
+    ``satisfies`` test of the drift guard, failing open exactly as it does.
+    """
+    if build.recreate:
+        if not is_comparable(python):
+            raise ConfigError(
+                f"Cannot recreate env '{name}': python.txt requests "
+                f"'{python}', which is not a plain version. Recreating "
+                "resolves the lock against the target version before "
+                "rebuilding, and only a plain version can be resolved "
+                "against.",
+                hint=(
+                    "Set a plain version such as 3.14 in "
+                    f"{env_python_path}, or upgrade "
+                    "without --recreate to keep the current interpreter."
+                ),
+            )
+        return "recreate"
+    try:
+        result = build.runner.run(micromamba_python_info(name), capture=True, check=False)
+    except Exception:
+        # Probe failure (e.g., micromamba not installed): fail open, as the
+        # drift guard does, and let the build report what is really wrong.
+        return "create"
+    if result.returncode != 0 or not result.stdout.strip():
+        return "create"
+    _, actual = parse_python_info(result.stdout)
+    if actual and is_comparable(python) and not satisfies(python, actual):
+        raise ConfigError(
+            f"Environment '{name}' runs Python {actual}, but the incoming python.txt "
+            f"requests {python}.",
+            hint="The interpreter is only rebuilt when the environment is recreated. "
+            "Re-run the import with --recreate to rebuild it from the shipped pins "
+            "(this wipes and reinstalls the environment).",
+        )
+    return "sync"
+
+
+def preflight(
+    config: ConfigRoot, staged: ConfigRoot, document: ExportDocument, build: BuildRequest
+) -> list[BuildStep]:
+    """Refuse, before any write, a build that is certain to fail.
+
+    Checks each shipped environment's variable values and editable paths,
+    then its interpreter. Every refusal's hint also names ``--no-build``.
+
+    :returns: One step per environment in ``items``, in order.
+    :raises UvStackError: On the first refusal, relabeled to the target root.
+    """
+    steps = []
+    try:
+        with _relabeled(staged.root, str(config.root) + os.sep):
+            variables = staged.load_variables()
+            for name in _env_items(document):
+                env = staged.load_env(name)
+                stack = Resolver(staged).resolve(env.stack)
+                requirements = render_requirements_in(stack, staged, name, variables)
+                missing = _missing_editables(config, requirements)
+                if missing:
+                    raise ConfigError(
+                        f"Environment '{name}' installs {len(missing)} editable "
+                        f"checkout(s) missing on this machine: {', '.join(missing)}.",
+                        hint="Check out each path, or set the variable that locates it in "
+                        "variables.local.txt.",
+                    )
+                action = _python_action(name, env.python, staged.env_python_path(name), build)
+                steps.append(BuildStep(name, action))
+    except UvStackError as error:
+        error.hint = f"{error.hint.rstrip()} {_NO_BUILD}" if error.hint else _NO_BUILD
+        raise
+    return steps
+
+
 @dataclass
 class ImportPlan:
     """Everything an import decided before writing."""
@@ -747,6 +874,7 @@ class ImportPlan:
     warnings: list[str]
     used_by: dict[str, list[str]]
     dependents: list[str]
+    builds: list[BuildStep] = field(default_factory=list)
 
 
 def _env_items(document: ExportDocument) -> list[str]:
@@ -755,7 +883,7 @@ def _env_items(document: ExportDocument) -> list[str]:
 
 def plan_import(
     config: ConfigRoot, document: ExportDocument, doc_root: ConfigRoot,
-    referenced: list[str], options: ImportOptions,
+    referenced: list[str], options: ImportOptions, *, build: BuildRequest | None = None,
 ) -> ImportPlan:
     """Run phases 2-4 in spec order and decide the writes; raise before any write.
 
@@ -772,11 +900,12 @@ def plan_import(
         if conflicts and not options.overwrite:
             raise ConflictError(conflicts, found)
         check_meanings(config, document, doc_root, staged)
+        builds = preflight(config, staged.root, document, build) if build is not None else []
     users = {env for envs in found.values() for env in envs}
     return ImportPlan(
         document=document, changes=changes, missing_variables=staged.missing_variables,
         variables_text=staged.variables_text, warnings=warnings + used_warnings,
-        used_by=found, dependents=sorted(users - set(_env_items(document))),
+        used_by=found, dependents=sorted(users - set(_env_items(document))), builds=builds,
     )
 
 
@@ -857,7 +986,8 @@ def _write_variables(config: ConfigRoot, text: str) -> None:
 
 @contextmanager
 def prepared_import(
-    config: ConfigRoot, document: ExportDocument, options: ImportOptions, *, dry_run: bool
+    config: ConfigRoot, document: ExportDocument, options: ImportOptions, *,
+    dry_run: bool, build: BuildRequest | None = None,
 ) -> Iterator[ImportPlan]:
     """Plan an import and, unless ``dry_run``, write it under the import locks.
 
@@ -868,9 +998,9 @@ def prepared_import(
     with document_root(document) as doc_root:
         referenced = check_document(document, doc_root)
         if dry_run:
-            yield plan_import(config, document, doc_root, referenced, options)
+            yield plan_import(config, document, doc_root, referenced, options, build=build)
             return
         with import_locks(config, document):
-            plan = plan_import(config, document, doc_root, referenced, options)
+            plan = plan_import(config, document, doc_root, referenced, options, build=build)
             write_plan(config, plan)
             yield plan

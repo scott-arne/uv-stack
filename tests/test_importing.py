@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -14,11 +15,14 @@ import pytest
 
 from tests.conftest import _lock_held_by_another_process
 from uv_stack import fsutil
+from uv_stack.commands import micromamba_python_info
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.operations import importing
 from uv_stack.operations.export import build_document, serialize_document
 from uv_stack.operations.importing import (
+    BuildRequest,
+    BuildStep,
     ConflictError,
     FileChange,
     ImportOptions,
@@ -36,6 +40,7 @@ from uv_stack.operations.importing import (
     used_by,
     validate_staged,
 )
+from uv_stack.runner import Command, CommandResult, RecordingRunner
 
 
 def _raw(config: ConfigRoot, *items: str) -> dict[str, Any]:
@@ -839,3 +844,99 @@ def test_profile_and_bundle_of_one_name_share_one_stem_lock(
     target = ConfigRoot(tmp_path / "target")
     _plan(target, _raw(config_tree, "profile:utils", "bundle:utils"))
     assert target.bundle_path("utils").is_file()
+
+
+def _probe(python: str | None) -> Callable[[Command], CommandResult]:
+    def respond(cmd: Command) -> CommandResult:
+        if cmd.args == micromamba_python_info("main").args:
+            if python is None:
+                return CommandResult(1, "")
+            return CommandResult(0, f"/envs/main/bin/python\n{python}\n")
+        return CommandResult(0, "")
+    return respond
+
+
+def _build_plan(
+    target: ConfigRoot, data: dict[str, Any], *, recreate: bool = False,
+    python: str | None = None, dry_run: bool = True
+) -> ImportPlan:
+    build = BuildRequest(RecordingRunner(responder=_probe(python)), recreate=recreate)
+    with prepared_import(target, _load(data), ImportOptions(), dry_run=dry_run,
+                         build=build) as plan:
+        return plan
+
+
+def test_preflight_refuses_a_missing_variable_value(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    config_tree.variables_path().write_text("WORK\n")
+    config_tree.variables_local_path().write_text(f"WORK={tmp_path}\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${WORK}/pkg\n")
+    target = ConfigRoot(tmp_path / "target")
+    with pytest.raises(UvStackError) as caught:
+        _build_plan(target, _raw(config_tree, "main"), dry_run=False)
+    assert "WORK" in caught.value.message
+    assert caught.value.hint is not None and "--no-build" in caught.value.hint
+    assert not target.env_stack_path("main").exists()
+
+
+def test_preflight_checks_a_relative_editable_against_the_target(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    # The brackets sit mid-path: editable_target strips only a trailing
+    # extras suffix, so this also pins that the path is reported intact.
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ./check[1]/x\n")
+    target = ConfigRoot(tmp_path / "target")
+    with pytest.raises(ConfigError) as caught:
+        _build_plan(target, _raw(config_tree, "main"))
+    assert "./check[1]/x" in caught.value.message
+    assert caught.value.hint is not None and "--no-build" in caught.value.hint
+    (target.root / "check[1]" / "x").mkdir(parents=True)
+    _build_plan(target, _raw(config_tree, "main"))
+
+
+def test_preflight_reports_a_nul_in_a_tilde_user_editable(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    # os.path.expanduser resolves '~user' through pwd.getpwnam, which rejects
+    # an embedded NUL with ValueError; tests/test_doctor.py:2164 pins the same
+    # input for doctor's missing-checkout finding.
+    config_tree.env_stack_path("main").write_text("@standard\n-e ~ab\0cd/widget\n")
+    with pytest.raises(ConfigError) as caught:
+        _build_plan(ConfigRoot(tmp_path / "target"), _raw(config_tree, "main"))
+    assert "~ab\0cd/widget" in caught.value.message
+
+
+def test_preflight_refuses_python_drift_unless_recreate(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    with pytest.raises(ConfigError) as caught:
+        _build_plan(target, _raw(config_tree, "main"), python="3.11.9")
+    assert "runs Python 3.11.9, but the incoming python.txt requests 3.12" in caught.value.message
+    assert caught.value.hint is not None and "--recreate" in caught.value.hint
+    plan = _build_plan(target, _raw(config_tree, "main"), python="3.11.9", recreate=True)
+    assert plan.builds == [BuildStep("main", "recreate")]
+
+
+def test_preflight_actions(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    assert _build_plan(target, _raw(config_tree, "main")).builds == [BuildStep("main", "create")]
+    plan = _build_plan(target, _raw(config_tree, "main"), python="3.12.4")
+    assert plan.builds == [BuildStep("main", "sync")]
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_recreate_refuses_a_non_plain_python(
+    config_tree: ConfigRoot, tmp_path: Path, dry_run: bool
+) -> None:
+    (config_tree.env_dir("main") / "python.txt").write_text("3.12.*\n")
+    target = ConfigRoot(tmp_path / "target")
+    with pytest.raises(ConfigError):
+        _build_plan(target, _raw(config_tree, "main"), recreate=True, dry_run=dry_run)
+    assert not target.env_stack_path("main").exists()
+
+
+def test_no_build_skips_preflight(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    config_tree.profile_path("ds").write_text("includes:\n  - -e /nowhere/pkg\n")
+    assert _plan(ConfigRoot(tmp_path / "target"), _raw(config_tree, "main")).builds == []
