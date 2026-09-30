@@ -133,6 +133,22 @@ def test_a_declared_variable_is_accepted(config_tree: ConfigRoot) -> None:
     assert "${WORK}" in result.document.files["profiles/ds.yaml"]
 
 
+@pytest.mark.parametrize("source", ["file", "environment"])
+def test_a_malformed_local_value_does_not_stop_an_export(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    # The document never ships values, so neither this machine's value file
+    # nor an environment override of a declared name is read.
+    config_tree.variables_path().write_text("WORK\n")
+    if source == "file":
+        config_tree.variables_local_path().write_text("not a value line\n")
+    else:
+        monkeypatch.setenv("WORK", "has space")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${WORK}/pkg\n")
+    result = build_document(config_tree, ["profile:ds"])
+    assert "${WORK}" in result.document.files["profiles/ds.yaml"]
+
+
 def test_absolute_paths_warn_with_a_count(config_tree: ConfigRoot) -> None:
     config_tree.profile_path("ds").write_text(
         "includes:\n  - -e /src/a\n  - /wheels/b.whl\n  - -e ./rel\n  - numpy\n"
@@ -140,6 +156,27 @@ def test_absolute_paths_warn_with_a_count(config_tree: ConfigRoot) -> None:
     result = build_document(config_tree, ["profile:ds"])
     assert result.warnings == [
         "profiles/ds.yaml: 2 absolute editable or local path(s); these build only where "
+        "the same paths exist. Use ${NAME} to make them portable."
+    ]
+
+
+def test_file_urls_warn_as_absolute_paths(config_tree: ConfigRoot) -> None:
+    config_tree.variables_path().write_text("WHEELS\n")
+    config_tree.profile_path("ds").write_text(
+        "includes:\n"
+        "  - file:///wheels/a.whl\n"
+        "  - pkg-b @ file:///wheels/b.whl\n"
+        "  - pkg-c@file:///wheels/c.whl ; python_version >= '3.10'\n"
+        "  - -e file:///src/d\n"
+        "  - -e=file:///src/e\n"
+        "  - pkg-f @ file://${WHEELS}/f.whl\n"
+        "  - pkg-g @ https://example.invalid/g.whl\n"
+        # Quoted, or the YAML parser eats the comment before the check sees it.
+        "  - \"pkg-h  # see file:///docs/h\"\n"
+    )
+    result = build_document(config_tree, ["profile:ds"])
+    assert result.warnings == [
+        "profiles/ds.yaml: 5 absolute editable or local path(s); these build only where "
         "the same paths exist. Use ${NAME} to make them portable."
     ]
 

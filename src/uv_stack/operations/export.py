@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from uv_stack import __version__
-from uv_stack.config import ConfigRoot
+from uv_stack.config import ConfigRoot, _parse_declarations
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.fsutil import read_text_utf8, require_regular_file
 from uv_stack.models import EXPORT_FORMAT, EXPORT_VERSION, ExportDocument
@@ -237,7 +237,31 @@ def _check_declared(config: ConfigRoot, key: str, entries: list[str], declared: 
         )
 
 
+_FILE_URL = re.compile(r"(?:^|[\s=@])file://(\S*)")
+
+
+def _file_url_path(entry: str) -> str | None:
+    """Return what follows ``file://`` when an entry installs from a file URL.
+
+    That is a bare URL, an editable's operand, or a ``name @ URL`` direct
+    reference. Other options are skipped, as their plain-path forms are.
+    """
+    words = entry.split()
+    if not words:
+        return None
+    if words[0].startswith("-") and words[0].partition("=")[0] not in ("-e", "--editable"):
+        return None
+    code = re.split(r"\s#", entry, maxsplit=1)[0]
+    match = _FILE_URL.search(code)
+    return None if match is None else match[1]
+
+
 def _is_absolute_path(entry: str) -> bool:
+    # A file URL always names an absolute path, but editable_target and the
+    # '://' test below both pass over it as a remote location.
+    url_path = _file_url_path(entry)
+    if url_path is not None:
+        return "${" not in url_path
     target = editable_target(entry)
     if target is None:
         first = entry.split()[0] if entry.split() else ""
@@ -289,7 +313,9 @@ def build_document(config: ConfigRoot, raw_items: Iterable[str]) -> ExportResult
     """
     items = normalize_items(config, raw_items)
     keys = closure(config, items)
-    declared = set(config.load_variables().declared)
+    # Declarations only: the document ships no values, so a malformed
+    # variables.local.txt or environment override must not stop an export.
+    declared = set(_parse_declarations(config.variables_path()))
     files: dict[str, str] = {}
     for key in sorted(keys):
         path = config.root / key
