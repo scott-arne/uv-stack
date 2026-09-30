@@ -199,6 +199,19 @@ def test_import_refuses_a_control_character_in_the_header_without_printing_it(
     assert "\x1b" not in result.output and "\x1b" not in result.stderr
 
 
+def test_import_refuses_a_schema_error_without_printing_a_control_character(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    # Schema validation fails before the control-character check, so its own
+    # message is what reaches the terminal.
+    data = json.loads(_export(config_tree, "profile:ds"))
+    data["files"]["profiles/a\x1b[2K.yaml"] = 5
+    result = _run_import(_target(tmp_path), json.dumps(data), "--dry-run")
+    assert result.exit_code != 0
+    assert "\x1b" not in result.output and "\x1b" not in result.stderr
+    assert "profiles/a\\x1b[2K.yaml" in result.output
+
+
 def _fake_build(monkeypatch: pytest.MonkeyPatch, target: ConfigRoot, *,
                 envs: tuple[str, ...] = ("main",), fail: tuple[str, ...] = (),
                 lock_text: str = "numpy==1.26.4\nrich==14.0.0\n") -> dict[str, bool | str]:

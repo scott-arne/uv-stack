@@ -7,7 +7,6 @@ import json
 import re
 import shutil
 import tempfile
-import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,6 +19,7 @@ from uv_stack import fsutil
 from uv_stack.commands import micromamba_python_info
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
+from uv_stack.hints import has_control
 from uv_stack.operations import importing
 from uv_stack.operations.export import build_document, serialize_document
 from uv_stack.operations.importing import (
@@ -98,10 +98,6 @@ def _ship_item(data: dict[str, Any], item: str) -> None:
     data["files"][f"profiles/{item.partition(':')[2]}.yaml"] = "includes:\n  - rich\n"
 
 
-def _has_control(text: str) -> bool:
-    return any(unicodedata.category(char) == "Cc" for char in text)
-
-
 @pytest.mark.parametrize(
     ("field", "value", "mutate"),
     [
@@ -121,7 +117,7 @@ def test_a_control_character_in_a_document_name_is_refused(
     with pytest.raises(ConfigError) as caught:
         _load(data)
     assert field in caught.value.message and repr(value) in caught.value.message
-    assert not _has_control(caught.value.message)
+    assert not has_control(caught.value.message)
     assert caught.value.hint is not None and "stack export" in caught.value.hint
 
 
@@ -136,7 +132,41 @@ def test_a_newer_version_names_only_a_writer_it_can_print(
     with pytest.raises(ConfigError) as caught:
         _load(data)
     assert "written by an unknown writer;" in caught.value.message
-    assert not _has_control(caught.value.message)
+    assert not has_control(caught.value.message)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "location"),
+    [
+        (lambda d: d["files"].update({"profiles/a\x1b[2K.yaml": 5}),
+         "files.profiles/a\\x1b[2K.yaml: "),
+        (lambda d: d.update({"evil\x1b[2J": 1}), "evil\\x1b[2J: "),
+        (lambda d: d["seeds"].update({"ma\x9bin": ["numpy==1"]}), "seeds.ma\\x9bin: "),
+        (lambda d: d["files"].update({"profiles/a\nb.yaml": 5}), "files.profiles/a\\nb.yaml: "),
+    ],
+)
+def test_a_schema_error_names_a_key_without_its_control_characters(
+    config_tree: ConfigRoot, mutate: Any, location: str
+) -> None:
+    # Schema validation runs before the control-character check, and
+    # Pydantic's own rendering prints a mapping key or extra field verbatim.
+    data = _raw(config_tree, "main", "profile:utils")
+    mutate(data)
+    with pytest.raises(ConfigError) as caught:
+        _load(data)
+    assert location in caught.value.message
+    assert not has_control(caught.value.message)
+    assert caught.value.hint is not None and "stack export" in caught.value.hint
+
+
+def test_a_schema_error_still_names_a_wrongly_typed_field(config_tree: ConfigRoot) -> None:
+    data = _raw(config_tree, "profile:utils")
+    data["created_by"] = 5
+    with pytest.raises(ConfigError) as caught:
+        _load(data)
+    assert caught.value.message.startswith("Invalid export document: created_by: ")
+    # The offending value is not echoed: it may be any JSON, of any size.
+    assert "input_value" not in caught.value.message
 
 
 def test_bad_json_is_refused() -> None:

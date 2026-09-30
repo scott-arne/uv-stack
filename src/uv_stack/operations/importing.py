@@ -28,6 +28,7 @@ from uv_stack.commands import micromamba_python_info
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.fsutil import atomic_write, name_lock, read_text_utf8, require_regular_file
+from uv_stack.hints import escape_controls, has_control
 from uv_stack.models import EXPORT_FORMAT, EXPORT_VERSION, ExportDocument
 from uv_stack.operations.diff import PinEntry, _diff_pins, parse_lock, parse_lock_text
 from uv_stack.operations.edit import validate_bundle, validate_env, validate_profile
@@ -119,7 +120,7 @@ def load_document(text: str) -> ExportDocument:
         # Schema validation has not run, so created_by may be any JSON value;
         # only a string that is safe to print on a terminal is named.
         writer = data.get("created_by")
-        if not isinstance(writer, str) or _has_control(writer):
+        if not isinstance(writer, str) or has_control(writer):
             writer = "an unknown writer"
         raise ConfigError(
             f"The document is format version {version}, written by {writer}; "
@@ -134,15 +135,21 @@ def load_document(text: str) -> ExportDocument:
     try:
         document = ExportDocument.model_validate(data)
     except ValidationError as error:
-        raise ConfigError(f"Invalid export document: {error}", hint=_REEXPORT_HINT) from error
+        # Pydantic's own rendering prints a mapping key or an extra field
+        # verbatim, and this runs before _check_invariants refuses control
+        # characters, so the message is built from the parts with each one
+        # escaped. That also keeps a newline in a key from starting a line.
+        problems = "; ".join(
+            ".".join(escape_controls(str(part)) for part in problem["loc"])
+            + ": "
+            + escape_controls(problem["msg"])
+            for problem in error.errors(include_url=False)
+        )
+        raise ConfigError(f"Invalid export document: {problems}", hint=_REEXPORT_HINT) from error
     _check_invariants(document)
     for name, seed in document.seeds.items():
         parse_lock_text(seed, f"seeds/{name}")
     return document
-
-
-def _has_control(text: str) -> bool:
-    return any(unicodedata.category(char) == "Cc" for char in text)
 
 
 def _check_invariants(document: ExportDocument) -> None:
@@ -156,16 +163,16 @@ def _check_invariants(document: ExportDocument) -> None:
     # shown only in a diff or a quoted line, as a local file's would be.
     for label, value in (("created_by", document.created_by),
                          ("source_platform", document.source_platform)):
-        if _has_control(value):
+        if has_control(value):
             raise refuse(f"The document's {label} holds a control character: {value!r}.")
     for item in document.items:
-        if _has_control(item):
+        if has_control(item):
             raise refuse(f"The document lists an item holding a control character: {item!r}.")
     for key in document.files:
-        if _has_control(key):
+        if has_control(key):
             raise refuse(f"The document ships a file key holding a control character: {key!r}.")
     for name in document.seeds:
-        if _has_control(name):
+        if has_control(name):
             raise refuse(
                 f"The document ships a seed whose name holds a control character: {name!r}."
             )
