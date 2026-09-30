@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -159,6 +160,12 @@ class InteractiveRunner(Protocol):
         ...
 
 
+class InputRunner(Protocol):
+    """A runner that can feed a command's stdin (``stack sync remote``)."""
+
+    def run_with_input(self, command: Command, text: str) -> tuple[int, str]: ...
+
+
 class SubprocessRunner:
     """Runs commands with :mod:`subprocess`."""
 
@@ -236,6 +243,64 @@ class SubprocessRunner:
             raise _spawn_error(command, error) from error
         return completed.returncode
 
+    def run_with_input(self, command: Command, text: str) -> tuple[int, str]:
+        """Run a command with ``text`` on its stdin, streaming its stderr.
+
+        A writer thread feeds stdin while this thread drains stderr, so a
+        child that fills the stderr pipe before reading stdin cannot
+        deadlock. A child that exits without reading gets a broken pipe,
+        which is expected and swallowed: its exit status says what happened.
+
+        :returns: The exit status and the last stderr lines, for exit-status hints.
+        :raises ToolError: When the command cannot be started.
+        """
+        try:
+            process = subprocess.Popen(
+                command.args, cwd=command.cwd, stdin=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+            )
+        except OSError as error:
+            raise _spawn_error(command, error) from error
+        failures: list[BaseException] = []
+
+        def feed() -> None:
+            assert process.stdin is not None
+            try:
+                process.stdin.write(text)
+            except BrokenPipeError:
+                pass
+            except BaseException as error:  # re-raised on the calling thread below
+                failures.append(error)
+            finally:
+                try:
+                    process.stdin.close()
+                except BrokenPipeError:
+                    pass
+                except OSError as error:
+                    failures.append(error)
+
+        writer = threading.Thread(target=feed, name="uv-stack-stdin", daemon=True)
+        writer.start()
+        tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
+        assert process.stderr is not None
+        try:
+            for line in process.stderr:
+                sys.stderr.write(line)
+                sys.stderr.flush()
+                tail.append(line.rstrip("\n"))
+        except BaseException:
+            # Kill before joining: a writer blocked on a full stdin pipe only
+            # returns once the child is gone and its pipe breaks.
+            process.kill()
+            raise
+        finally:
+            status = process.wait()
+            writer.join()
+            process.stderr.close()
+        if failures:
+            raise failures[0]
+        return status, "\n".join(tail)
+
     @staticmethod
     def _run_with_pty(command: Command) -> tuple[int, str]:
         """Run ``command`` with its stderr attached to a pseudo-terminal.
@@ -303,6 +368,8 @@ class RecordingRunner:
 
     responder: Callable[[Command], CommandResult] | None = None
     commands: list[Command] = field(default_factory=list)
+    inputs: list[str] = field(default_factory=list)
+    input_responder: Callable[[Command, str], tuple[int, str]] | None = None
 
     def run(
         self, command: Command, *, capture: bool = False, check: bool = True
@@ -318,3 +385,11 @@ class RecordingRunner:
         if self.responder is not None:
             return self.responder(command).returncode
         return 0
+
+    def run_with_input(self, command: Command, text: str) -> tuple[int, str]:
+        """Record the command and its stdin; answer from ``input_responder``."""
+        self.commands.append(command)
+        self.inputs.append(text)
+        if self.input_responder is None:
+            return 0, ""
+        return self.input_responder(command, text)

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import inspect
 import os
+import subprocess
 import sys
+import threading
+import time
+from typing import Any
 
 import pytest
 
@@ -353,3 +357,77 @@ def test_subprocess_runner_interactive_inherits_the_terminal(tmp_path):
         os.close(saved)
     assert status == 0
     assert seen.read_text() == expected
+
+
+def _py(code: str) -> Command:
+    return Command([sys.executable, "-c", code])
+
+
+def test_run_with_input_survives_a_full_stderr_pipe(capsys: pytest.CaptureFixture[str]) -> None:
+    code = ("import sys; sys.stderr.write('e' * 200000 + '\\nlast\\n'); sys.stderr.flush(); "
+            "sys.exit(0 if len(sys.stdin.read()) == 300000 else 3)")
+    status, tail = SubprocessRunner().run_with_input(_py(code), "x" * 300000)
+    assert status == 0 and tail.endswith("last")
+
+
+def test_run_with_input_child_exits_without_reading(capsys: pytest.CaptureFixture[str]) -> None:
+    before = threading.active_count()
+    status, _ = SubprocessRunner().run_with_input(_py("import sys; sys.exit(2)"), "x" * 1_000_000)
+    assert status == 2
+    assert threading.active_count() == before
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_run_with_input_keeps_the_last_20_stderr_lines(capsys: pytest.CaptureFixture[str]) -> None:
+    code = "import sys\nfor i in range(30): print(f'line {i}', file=sys.stderr)"
+    _, tail = SubprocessRunner().run_with_input(_py(code), "")
+    assert tail.splitlines() == [f"line {i}" for i in range(10, 30)]
+    assert "line 0" in capsys.readouterr().err
+
+
+def test_run_with_input_spawn_failure_is_a_tool_error() -> None:
+    with pytest.raises(ToolError):
+        SubprocessRunner().run_with_input(Command(["/nonexistent/uv-stack-ssh"]), "")
+
+
+class _ExplodingStream:
+    def write(self, text: str) -> int:
+        raise RuntimeError("stderr is gone")
+
+    def flush(self) -> None:
+        pass
+
+
+def test_run_with_input_reaps_the_child_when_streaming_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spawned: list[subprocess.Popen[str]] = []
+    real_popen = subprocess.Popen
+
+    def spy(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+        spawned.append(real_popen(*args, **kwargs))
+        return spawned[-1]
+
+    before = threading.active_count()
+    # The child never reads stdin, so the writer blocks on a full pipe until
+    # the child is killed; without the kill this test hangs for 60 seconds.
+    code = "import sys, time; sys.stderr.write('first\\n'); sys.stderr.flush(); time.sleep(60)"
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    monkeypatch.setattr(sys, "stderr", _ExplodingStream())
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="stderr is gone"):
+        SubprocessRunner().run_with_input(_py(code), "x" * 1_000_000)
+    assert time.monotonic() - started < 30
+    assert spawned[0].returncode is not None
+    assert threading.active_count() == before
+
+
+def test_recording_runner_records_input() -> None:
+    runner = RecordingRunner(input_responder=lambda cmd, text: (5, "tail"))
+    assert runner.run_with_input(Command(["ssh", "h", "stack import -"]), "doc") == (5, "tail")
+    assert runner.inputs == ["doc"] and runner.commands[0].args[0] == "ssh"
+
+
+def test_recording_runner_matches_the_real_signature() -> None:
+    assert inspect.signature(RecordingRunner.run_with_input) == inspect.signature(
+        SubprocessRunner.run_with_input)
