@@ -34,6 +34,7 @@ from uv_stack.operations.export import (
     ENV_FILES,
     ITEM_KINDS,
     OPTIONAL_ENV_FILES,
+    FileKey,
     closure,
     file_entries,
     file_key,
@@ -662,3 +663,71 @@ def used_by(config: ConfigRoot, keys: Iterable[str]) -> tuple[dict[str, list[str
         for key in sorted(wanted & reached):
             found.setdefault(key, []).append(env)
     return found, warnings
+
+
+_QUALIFIED_PREFIXES = ("@", "bundle:", "profile:", "package:", "pkg:")
+_FIX = {"bundle": "@{}", "profile": "profile:{}", "package": "pkg:{}"}
+
+
+def _meaning(root: ConfigRoot, token: str) -> str:
+    return Resolver(root).classify([token]).entries[0]
+
+
+def _describe(entry: str) -> str:
+    kind, _, name = entry.partition(":")
+    return f"the package '{name}'" if kind == "package" else f"{kind} '{name}'"
+
+
+def _bare_tokens(root: ConfigRoot, key: FileKey) -> list[str]:
+    if not (key.kind == "bundle" or key.filename == "stack.txt"):
+        return []
+    # The bundle model accepts a blank include, and classify() yields no entry
+    # for one, so an unstripped blank would leave _meaning nothing to index.
+    stripped = (entry.strip() for entry in file_entries(root, key))
+    return [t for t in stripped if t and not t.startswith(_QUALIFIED_PREFIXES)]
+
+
+def _refuse_change(token: str, path: Path, before: str, after: str, *, incoming: bool) -> None:
+    if before == after:
+        return
+    where = ("in the incoming document but would mean {} on this machine" if incoming
+             else "on this machine but would mean {} after the import")
+    fix = _FIX[before.partition(":")[0]].format(before.partition(":")[2])
+    raise ConfigError(
+        f"'{token}' in {path} means {_describe(before)} " + where.format(_describe(after)) + ".",
+        hint=f"Write {fix} in that file to keep its meaning; --overwrite cannot change "
+        "what a token means.",
+    )
+
+
+def check_meanings(
+    config: ConfigRoot, document: ExportDocument, doc_root: ConfigRoot, staged: Staged
+) -> None:
+    """Refuse an import that changes what an unqualified token means.
+
+    Direction 1 checks the shipped stack and bundle files: a token must mean
+    here what it meant in the document. Direction 2 checks the target's files
+    the import does not replace: a token must mean after the import what it
+    means now. A replaced environment's old stack is gone, so it is not checked.
+    """
+    for key in sorted(document.files):
+        parsed = parse_file_key(key)
+        assert parsed is not None  # phase 1 refused every other key
+        for token in _bare_tokens(doc_root, parsed):
+            _refuse_change(token, config.root / key, _meaning(doc_root, token),
+                           _meaning(staged.root, token), incoming=True)
+    shipped = set(document.files)
+    # Built from the listed names directly, not through parse_file_key: a
+    # target bundle whose stem validate_name rejects is still reachable by
+    # '@stem', so its tokens need the check as much as any other file's.
+    target = [FileKey("env", n, "stack.txt") for n in config.list_envs()]
+    target += [FileKey("bundle", n, None) for n in config.list_bundles()]
+    for parsed in target:
+        key = file_key(parsed.kind, parsed.name, parsed.filename)
+        if key in shipped:
+            continue
+        # A target file this check cannot read propagates its ConfigError: the
+        # import cannot show that file's tokens keep their meaning, so it stops.
+        for token in _bare_tokens(config, parsed):
+            _refuse_change(token, config.root / key, _meaning(config, token),
+                           _meaning(staged.root, token), incoming=False)

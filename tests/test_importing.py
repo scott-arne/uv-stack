@@ -20,6 +20,7 @@ from uv_stack.operations.importing import (
     ImportOptions,
     change_diff,
     check_document,
+    check_meanings,
     classify_changes,
     document_root,
     load_document,
@@ -590,3 +591,72 @@ def test_change_diff_keeps_brackets_and_marks_missing_newline() -> None:
 def test_used_by_follows_bundles(config_tree: ConfigRoot) -> None:
     found, warnings = used_by(config_tree, ["profiles/ds.yaml", "profiles/ghost.yaml"])
     assert found == {"profiles/ds.yaml": ["main"]} and warnings == []
+
+
+def _meanings(target: ConfigRoot, data: dict[str, Any]) -> None:
+    document = _load(data)
+    with document_root(document) as root:
+        names = check_document(document, root)
+        with staged_root(target, document, names) as staged:
+            check_meanings(target, document, root, staged)
+
+
+def test_direction_1_shipped_package_captured_by_target_profile(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    (target.root / "profiles").mkdir(parents=True)
+    target.profile_path("requests[security]").write_text("includes:\n  - requests\n")
+    data = _raw(config_tree, "main")
+    data["files"]["envs/main/stack.txt"] = "@standard\nrequests[security]\n"
+    with pytest.raises(ConfigError) as caught:
+        _meanings(target, data)
+    message = caught.value.message
+    assert "'requests[security]'" in message and "the package 'requests[security]'" in message
+    assert "profile 'requests[security]'" in message
+    assert caught.value.hint is not None and "pkg:requests[security]" in caught.value.hint
+
+
+def test_direction_2_target_package_captured_by_incoming_profile(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.env_dir("work").mkdir(parents=True)
+    target.env_stack_path("work").write_text("utils\n")
+    with pytest.raises(ConfigError, match="on this machine but would mean profile 'utils'"):
+        _meanings(target, _raw(config_tree, "profile:utils"))
+
+
+def test_a_replaced_env_old_token_is_not_checked(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.env_dir("main").mkdir(parents=True)
+    target.env_stack_path("main").write_text("utils\n")
+    _meanings(target, _raw(config_tree, "main", "profile:utils"))
+
+
+def test_blank_bundle_includes_are_skipped(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    config_tree.bundle_path("standard").write_text(
+        "includes:\n  - '   '\n  - ds\n  - chem\n  - utils\n")
+    target = ConfigRoot(tmp_path / "target")
+    target.bundles_dir.mkdir(parents=True)
+    target.bundle_path("spare").write_text("includes:\n  - ''\n  - rich\n")
+    _meanings(target, _raw(config_tree, "bundle:standard"))
+
+
+def test_an_unreadable_target_bundle_is_refused(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.bundles_dir.mkdir(parents=True)
+    target.bundle_path("bad").write_text("includes: 3\n")
+    with pytest.raises(ConfigError) as caught:
+        _meanings(target, _raw(config_tree, "profile:utils"))
+    assert str(target.bundle_path("bad")) in caught.value.message
+
+
+def test_a_target_bundle_with_an_invalid_stem_is_still_checked(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.bundles_dir.mkdir(parents=True)
+    target.bundle_path("-x").write_text("includes:\n  - utils\n")
+    with pytest.raises(ConfigError, match="would mean profile 'utils'"):
+        _meanings(target, _raw(config_tree, "profile:utils"))
