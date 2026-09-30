@@ -53,6 +53,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   config root. This changes an existing finding: the same root can now report
   a checkout missing from one directory and present from another.
   `stack import` checks editables the same way.
+- `stack doctor`'s missing-checkout finding also checks an editable given as a
+  local `file:` URL (`-e file:///src/pkg`), which it previously skipped as a
+  remote install. `stack import`'s pre-flight checks it the same way.
 
 ## 0.6.0 - 2026-09-28
 

@@ -505,8 +505,8 @@ file formats, environments in the wrong place, a name published as both a
 profile and a bundle) and its portability: declared
 variables with no value on this machine, references that are undeclared,
 malformed, or in an entry that may not hold one, editable checkouts that are
-absent (a relative path is looked up from the directory `stack doctor` runs
-in, where uv resolves it), a `project-python.txt` value that will not travel,
+absent (given as a path or a local `file:` URL; a relative path is looked up
+from the directory `stack doctor` runs in, where uv resolves it), a `project-python.txt` value that will not travel,
 and a missing or stale managed `.gitignore` block in a root that sits inside a
 git repository.
 
@@ -761,8 +761,9 @@ editable install (`-e /src/foo`), a local path (`/wheels/bar.whl`), or a
 `file://` URL, the export warns once per file: those paths must exist at the
 same locations on the target machine for its environments to build. The import
 writes the definitions either way. Its pre-flight refuses a missing editable
-checkout before anything is written (unless `--no-build`), and uv reports any
-other missing path when the build runs. Use `${NAME}` variable references to
+checkout, given as a path or a local `file:` URL, before anything is written
+(unless `--no-build`), and uv reports any other missing path when the build
+runs. Use `${NAME}` variable references to
 make paths portable across machines.
 
 **Pull from another machine.** You can export and import in one command by
@@ -834,8 +835,8 @@ Under `stack sync remote` that directory is the remote user's home.
 
 **Pre-flight refusals.** Unless `--no-build` is given, the import checks each
 imported environment before writing anything, and refuses when it references a
-variable with no value here, installs an editable checkout that is missing
-here, already runs a Python outside the plain version its imported
+variable with no value here, installs an editable checkout (a path or a local
+`file:` URL) that is missing here, already runs a Python outside the plain version its imported
 `python.txt` names (without `--recreate`; 3.12 when the document ships no
 `python.txt`), or has a `python.txt` that is not a plain version (with
 `--recreate`). Each refusal's hint also offers `--no-build`. uv reports any
