@@ -231,9 +231,10 @@ def _update_remotes(
                      "(NEL); edit the file with 'stack edit remotes' instead.",
                 path=path)
         # Catches a save from 'stack edit remotes' (which takes no lock), any
-        # writer while the lock is degraded, and a retargeted link. A change
-        # landing between here and the rename is still lost: POSIX has no
-        # compare-and-swap rename.
+        # writer while the lock is degraded, a writer from another root sharing
+        # this file through a symlink (the lock is per root), and a retargeted
+        # link. A change landing between here and the rename is still lost:
+        # POSIX has no compare-and-swap rename.
         if _read_target(path) != (target, text):
             raise ConfigError(f"{path} changed while it was being updated; nothing was written.",
                               hint="Run the command again.", path=path)
