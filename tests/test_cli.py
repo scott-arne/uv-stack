@@ -4038,6 +4038,33 @@ def test_complete_remote_hosts_survives_an_invalid_file(config_tree: ConfigRoot)
     assert complete_remote_hosts(ctx, None, "") == []
 
 
+def test_complete_remote_hosts_excludes_control_characters(config_tree: ConfigRoot):
+    import click as _click
+
+    from uv_stack.cli._complete import complete_remote_hosts
+
+    config_tree.remotes_path().write_text(
+        'gpu-box: {}\n"a\\nplain,forged": {}\n"c\\x1b[31md": {}\n'
+    )
+    ctx = _click.Context(cli)
+    ctx.params = {"root": str(config_tree.root)}
+    assert complete_remote_hosts(ctx, None, "") == ["gpu-box"]
+
+
+def test_complete_remote_hosts_bash_format_excludes_control_characters(
+    config_tree: ConfigRoot, monkeypatch
+):
+    from click.shell_completion import BashComplete
+
+    config_tree.remotes_path().write_text(
+        'gpu-box: {}\n"a\\nplain,forged": {}\n"c\\x1b[31md": {}\n'
+    )
+    monkeypatch.setenv("COMP_WORDS", f"stack --root {config_tree.root} config remote remove ")
+    monkeypatch.setenv("COMP_CWORD", "6")
+    output = BashComplete(cli, {}, "stack", "_STACK_COMPLETE").complete()
+    assert output == "plain,gpu-box"
+
+
 def test_help_contains_no_rest_double_backticks():
     runner = CliRunner()
     for args in (

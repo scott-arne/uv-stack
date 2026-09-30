@@ -12,6 +12,7 @@ from typing import Any
 import rich_click as click
 
 from uv_stack.config import ConfigRoot
+from uv_stack.hints import has_control
 from uv_stack.operations.remote import load_remotes
 
 #: KIND choices for the commands that accept a project as well as the three
@@ -81,4 +82,6 @@ def complete_remote_hosts(
         hosts = load_remotes(_config_from_ctx(ctx))
     except Exception:
         return []
-    return [host for host in hosts if host.startswith(incomplete)]
+    # Click's completion formats do not escape values, so a control character
+    # would corrupt or forge records. Such a host can still be typed in full.
+    return [host for host in hosts if host.startswith(incomplete) and not has_control(host)]
