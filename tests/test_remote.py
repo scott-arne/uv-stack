@@ -26,6 +26,7 @@ from uv_stack.operations.remote import (
     Removal,
     ResolvedRemote,
     check_destination,
+    entry_lines,
     explain_exit,
     has_comment,
     load_remotes,
@@ -217,6 +218,12 @@ def test_exit_255_allows_for_a_dropped_session() -> None:
     assert error is not None and error.hint is not None
     assert "failed or dropped" in error.message
     assert "re-running the same command is safe" in error.hint
+
+
+def test_entry_lines_escapes_stored_values() -> None:
+    """Control characters in stack and root values are escaped in the output."""
+    lines = entry_lines("h", RemoteSettings(stack="a\x1bb", root="c\x07d"))
+    assert lines == ["h", "  stack: a\\x1bb", "  root: c\\x07d"]
 
 
 def _options(command: click.Command) -> dict[str | None, click.Option]:

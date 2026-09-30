@@ -3359,6 +3359,84 @@ def test_edit_symlinked_remotes_names_the_real_file(tmp_path: Path, monkeypatch)
     assert f"Validated {real}" in result.output
 
 
+@pytest.mark.parametrize(
+    "break_it,expected",
+    [
+        (lambda path: path.mkdir(), "Not a regular file"),
+        (lambda path: path.symlink_to(path.parent / "nowhere"), "Broken symlink"),
+    ],
+    ids=["directory", "dangling-symlink"],
+)
+def test_edit_remotes_refuses_a_non_regular_target(
+    tmp_path: Path, monkeypatch, break_it, expected
+):
+    """The pre-launch guard must refuse a directory or dangling symlink.
+
+    Without it the editor would launch on a target that cannot be a valid
+    remotes file. Mirrors the env/profile/bundle guards.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = _seeded_root(tmp_path)
+    target = ConfigRoot(root).remotes_path()
+    target.unlink(missing_ok=True)
+    break_it(target)
+
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
+    assert result.exit_code == 1
+    assert expected in _flat_panel(result)
+    assert fake.commands == []
+
+
+@pytest.mark.parametrize(
+    "break_it,expected,hint",
+    [
+        (lambda path: path.mkdir(), "Not a regular file", "Remove or rename"),
+        (
+            lambda path: path.symlink_to(path.parent / "nowhere"),
+            "Broken symlink",
+            "Point it at a real file",
+        ),
+    ],
+    ids=["directory", "dangling-symlink"],
+)
+def test_edit_remotes_refuses_a_target_the_editor_made_non_regular(
+    tmp_path: Path, monkeypatch, break_it, expected, hint
+):
+    """The guard must run again after the editor exits, not only before it.
+
+    Without the post-edit guard the command blesses a path it refuses on the
+    very next invocation: the lexists check sees the broken target and skips
+    validation, reporting success. The user then sees "Re-open the editor?"
+    for a problem only the shell can fix. Mirrors the env file guards.
+    """
+    from uv_stack.config import ConfigRoot
+
+    root = _seeded_root(tmp_path)
+    target = ConfigRoot(root).remotes_path()
+    target.write_text("gpu-box: {}\n", encoding="utf-8")
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+
+    def _replace(path: Path) -> None:
+        path.unlink(missing_ok=True)
+        break_it(path)
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_replace))
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "remotes"], input="n\n"
+    )
+    assert result.exit_code == 1
+    output = _flat_panel(result)
+    assert f"{expected}: {target}" in output
+    assert hint in output
+    assert "Re-open the editor?" not in output
+    assert "Validated" not in output
+    assert "does not exist; nothing to validate." not in output
+    assert len(fake.commands) == 1
+
+
 def test_edit_symlinked_profile_names_the_real_file(tmp_path: Path, monkeypatch):
     """When the target is a symlink, the success line names the resolved file."""
     root = _seeded_root(tmp_path)
@@ -5865,6 +5943,44 @@ def test_config_remote_output_escapes_a_control_character(config_tree: ConfigRoo
     removed = _config_remote(config_tree, "remove", "a\x1b[31mb", color=True)
     assert removed.exit_code == 0, removed.output
     assert removed.output == f"Removed a\\x1b[31mb from {path}.\n"
+
+
+def test_config_remote_escapes_the_config_root_path(tmp_path: Path):
+    """Control characters in the config root path are escaped in the output."""
+    # Replicate the config_tree fixture with an ESC in the directory name.
+    root = tmp_path / "cfg\x1b[31mx" / "python-envs"
+    (root / "profiles").mkdir(parents=True)
+    (root / "bundles").mkdir(parents=True)
+    (root / "envs" / "main").mkdir(parents=True)
+    (root / "profiles" / "ds.yaml").write_text(
+        "description: Core data-science stack\n"
+        "tags: [data, core]\nincludes:\n  - numpy\n  - pandas\n"
+    )
+    (root / "bundles" / "standard.yaml").write_text(
+        "description: Standard bundle\ntags: [bundle, core]\nprofiles:\n  - ds\n"
+    )
+    (root / "envs" / "main" / "stack.txt").write_text("@standard\n")
+    cfg = ConfigRoot(root)
+
+    # Empty list names the path.
+    listed = CliRunner().invoke(
+        cli, ["--root", str(root), "config", "remote", "list"], color=True
+    )
+    assert listed.exit_code == 0, listed.output
+    escaped_path = str(cfg.remotes_path()).replace("\x1b", "\\x1b")
+    assert listed.output == f"No remotes in {escaped_path}.\n"
+    assert "\x1b" not in listed.output
+
+    # Set and remove name the path.
+    CliRunner().invoke(
+        cli, ["--root", str(root), "config", "remote", "set", "h", "--root", "/r"], color=True
+    )
+    removed = CliRunner().invoke(
+        cli, ["--root", str(root), "config", "remote", "remove", "h"], color=True
+    )
+    assert removed.exit_code == 0, removed.output
+    assert removed.output == f"Removed h from {escaped_path}.\n"
+    assert "\x1b" not in removed.output
 
 
 def test_repeated_environment_names_are_upgraded_once(tmp_path: Path):
