@@ -5672,6 +5672,42 @@ def test_sync_success_summary_uses_its_own_line(tmp_path: Path, monkeypatch):
     assert "All requested environments synced." in result.output
     assert "All requested environments upgraded." not in result.output
 
+
+def test_run_upgrade_gives_each_env_its_seed_and_reports_successes(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seeds are mapped to environments, and on_success is called for each.
+
+    The success hook is not called for environments that raise.
+    """
+    import uv_stack.cli.upgrade
+    from uv_stack.cli.upgrade import _run_upgrade
+    from uv_stack.errors import UvStackError
+    from uv_stack.operations.upgrade import UpgradeOptions, UpgradeResult
+
+    seen: dict[str, str | None] = {}
+    succeeded: list[str] = []
+
+    def fake_upgrade(config, runner, name, options):
+        seen[name] = options.seed
+        if name == "bad":
+            raise UvStackError("boom")
+        return UpgradeResult(env_name=name)
+
+    monkeypatch.setattr(uv_stack.cli.upgrade, "upgrade_env", fake_upgrade)
+    with pytest.raises(SystemExit) as exited:
+        _run_upgrade(
+            config_tree,
+            ["main", "bad"],
+            UpgradeOptions(no_upgrade=True),
+            seeds={"main": "numpy==1\n"},
+            on_success=succeeded.append,
+        )
+    assert exited.value.code == 1
+    assert seen == {"main": "numpy==1\n", "bad": None}
+    assert succeeded == ["main"]
+
+
 @pytest.mark.parametrize("command", [["upgrade"], ["sync", "env"]])
 def test_a_dry_run_success_line_claims_a_plan_and_nothing_more(
     tmp_path: Path, monkeypatch, command: list[str]

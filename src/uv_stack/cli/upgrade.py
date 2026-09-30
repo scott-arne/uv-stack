@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sys
+from collections.abc import Callable, Mapping
 
 import rich_click as click
 from rich.text import Text
@@ -47,6 +49,8 @@ def _run_upgrade(
     stop_on_error: bool = False,
     rule_verb: str = "Upgrading",
     all_succeeded: str = "All requested environments upgraded.",
+    seeds: Mapping[str, str] | None = None,
+    on_success: Callable[[str], None] | None = None,
 ) -> None:
     """Upgrade each environment, continuing past failures by default.
 
@@ -67,6 +71,11 @@ def _run_upgrade(
         from a call site in this package, never user input. A dry run ignores
         it in favour of :data:`_ALL_PLANNED`, since neither command upgraded
         nor synced anything.
+    :param seeds: Lock text shipped by an export, keyed by environment name.
+        Each environment runs with its own entry as ``UpgradeOptions.seed``,
+        and an environment absent from the mapping runs unseeded.
+    :param on_success: Called with each environment's name after it upgrades
+        without error.
     """
     runner = SubprocessRunner()
     failures: list[tuple[str, UvStackError | OSError]] = []
@@ -81,8 +90,11 @@ def _run_upgrade(
     for name in targets:
         attempted.append(name)
         console.rule(Text(f"{rule_verb} {name}"))
+        env_options = (
+            dataclasses.replace(options, seed=seeds.get(name)) if seeds is not None else options
+        )
         try:
-            result = upgrade_env(config, runner, name, options)
+            result = upgrade_env(config, runner, name, env_options)
         except UvStackError as error:
             render_warnings(error.resolution_warnings)
             render_error(error)
@@ -103,6 +115,8 @@ def _run_upgrade(
                 break
             continue
         render_warnings(result.warnings)
+        if on_success is not None:
+            on_success(name)
         if options.dry_run:
             echo("Planned commands:")
             for command in result.planned:
