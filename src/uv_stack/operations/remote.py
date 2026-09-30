@@ -34,10 +34,12 @@ def load_remotes(config: ConfigRoot) -> dict[str, RemoteSettings]:
                           hint="Fix the YAML syntax.", path=path) from exc
     if data is None:
         # PyYAML loads an empty document and an explicit null alike. Only the
-        # empty one means "no entries"; ``null`` or ``~`` is a value, and the
-        # file must be a mapping.
+        # empty one means "no entries": it composes to no node, or to the
+        # zero-width scalar a bare ``---`` leaves. ``null``, ``~`` or a
+        # ``!!null`` tag is written out, so it has width, and the file must be
+        # a mapping.
         node = yaml.compose(text, Loader=yaml.SafeLoader)
-        if node is None or node.value == "":
+        if node is None or node.start_mark.index == node.end_mark.index:
             return {}
     if not isinstance(data, dict):
         raise ConfigError(f"Expected a YAML mapping in {path}, got {type(data).__name__}.",
