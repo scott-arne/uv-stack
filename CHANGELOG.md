@@ -26,6 +26,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   and a pin report shows how many pins were kept, changed, dropped, or added.
   `--no-build` installs definitions without building. `--recreate` wipes and
   rebuilds each environment from the shipped pins (plain dotted Python only).
+- Unless `--no-build` is given, `stack import` refuses before writing anything
+  when an imported environment references a variable with no value on this
+  machine, installs an editable checkout that is missing, already runs a
+  Python outside its plain `python.txt` version without `--recreate`, or has a
+  `python.txt` that is not a plain version with `--recreate`.
+- `stack import` names the environments it did not rebuild that use a replaced
+  profile or bundle, and also those that reach an unchanged bundle whose bare
+  token a newly imported profile now captures.
+- On a target that folds letter case, `stack import` reports the environments
+  that use a definition a shipped case variant replaces (`profiles/Foo.yaml`
+  over `profiles/foo.yaml`), in both the conflict report and the not-rebuilt
+  line.
 - `stack sync remote [ITEMS...] DEST` exports the named items (or the whole
   root) and imports them on a remote machine over ssh, running `ssh DEST <stack>
   import -` with the document on stdin. The local exit status is the remote's.
@@ -33,6 +45,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `remotes.yaml` maps host names to optional `stack` and `root` settings,
   overridden by `--remote-stack` and `--remote-root`. Edited by hand. Portable
   across machines. `stack doctor` reports an invalid file.
+
+### Changed
+
+- `stack doctor`'s missing-checkout finding looks up a relative editable path
+  from the directory doctor runs in, where uv resolves it, instead of from the
+  config root. This changes an existing finding: the same root can now report
+  a checkout missing from one directory and present from another.
+  `stack import` checks editables the same way.
 
 ## 0.6.0 - 2026-09-28
 
