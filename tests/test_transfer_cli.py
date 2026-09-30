@@ -11,7 +11,7 @@ from click.testing import CliRunner, Result
 import uv_stack.cli.transfer_cmd
 import uv_stack.cli.upgrade
 from tests.test_operations import _compile_output
-from uv_stack import fsutil
+from uv_stack import __version__, fsutil
 from uv_stack.cli import cli
 from uv_stack.commands import micromamba_create, micromamba_python_info, micromamba_python_path
 from uv_stack.config import ConfigRoot
@@ -92,7 +92,7 @@ def test_import_installs_definitions(config_tree: ConfigRoot, tmp_path: Path) ->
     target = _target(tmp_path)
     result = _run_import(target, _export(config_tree, "main"))
     assert result.exit_code == 0, result.output
-    assert "Importing 1 item(s) exported by uv-stack 0.6.0 on " in result.output
+    assert f"Importing 1 item(s) exported by uv-stack {__version__} on " in result.output
     assert target.env_stack_path("main").read_text() == "@standard\n"
     assert "new: profiles/ds.yaml" in result.output
 
@@ -147,7 +147,7 @@ def test_import_reports_a_platform_difference(config_tree: ConfigRoot, tmp_path:
     data = json.loads(_export(config_tree, "profile:ds"))
     data["source_platform"] = "plan9-mips"
     result = _run_import(_target(tmp_path), json.dumps(data))
-    assert "exported by uv-stack 0.6.0 on plan9-mips." in result.output
+    assert f"exported by uv-stack {__version__} on plan9-mips." in result.output
     assert "pins re-resolved where this platform differs." in result.output
 
 
