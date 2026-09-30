@@ -8,6 +8,7 @@ import pytest
 
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
+from uv_stack.hints import has_control
 from uv_stack.operations.export import (
     AmbiguousItemError,
     build_document,
@@ -200,9 +201,43 @@ def test_crlf_is_preserved(config_tree: ConfigRoot) -> None:
 
 @pytest.mark.parametrize("key", ["../x.yaml", "/abs/profiles/x.yaml", "profiles/a/b.yaml",
                                  "envs/main/requirements.lock.txt", "profiles/-x.yaml",
-                                 "profiles/a\x00b.yaml", "profiles/ds.yaml\n"])
+                                 "profiles/a\x00b.yaml", "bundles/a\x00b.yaml",
+                                 "envs/a\x00b/stack.txt", "profiles/a\x1bb.yaml",
+                                 "envs/a\x9bb/stack.txt", "profiles/ds.yaml\n"])
 def test_parse_file_key_rejects_unsafe_keys(key: str) -> None:
     assert parse_file_key(key) is None
+
+
+def test_whole_root_export_refuses_a_control_character_in_a_name_on_disk(
+    config_tree: ConfigRoot,
+) -> None:
+    # Every import refuses such a name, so shipping it would only move the
+    # refusal to the other machine.
+    try:
+        (config_tree.profiles_dir / "a\x1bb.yaml").write_text("includes:\n  - numpy\n")
+    except OSError:
+        pytest.skip("this filesystem refuses an escape character in a file name")
+    with pytest.raises(ConfigError) as caught:
+        build_document(config_tree, [])
+    assert "a\\x1bb" in caught.value.message
+    assert not has_control(caught.value.message)
+
+
+@pytest.mark.parametrize("name", ["a\x1bb", "../a\x1bb"])
+def test_a_reference_holding_a_control_character_is_named_escaped(
+    config_tree: ConfigRoot, name: str
+) -> None:
+    # The file exists, so only the reference's own check can refuse it.
+    try:
+        config_tree.profile_path(name).write_text("includes:\n  - numpy\n")
+    except OSError:
+        pytest.skip("this filesystem refuses an escape character in a file name")
+    config_tree.env_dir("bad").mkdir()
+    config_tree.env_stack_path("bad").write_text(f"profile:{name}\n")
+    with pytest.raises(ConfigError) as caught:
+        build_document(config_tree, ["env:bad"])
+    assert name.replace("\x1b", "\\x1b") in caught.value.message
+    assert not has_control(caught.value.message)
 
 
 def test_closure_refuses_profile_reference_that_escapes_root(config_tree: ConfigRoot) -> None:

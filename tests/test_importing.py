@@ -175,9 +175,9 @@ def test_bad_json_is_refused() -> None:
 
 
 def test_a_nul_in_a_document_name_is_refused(config_tree: ConfigRoot) -> None:
-    # JSON carries \u0000 and validate_name allows it, but document_root would
-    # raise ValueError building a path from it. The item and file agree, and
-    # NUL is a control character, so the control-character check stops it.
+    # JSON carries \u0000, and document_root would raise ValueError building a
+    # path from it. The item and file agree, and NUL is a control character,
+    # so the control-character check stops it.
     data = _raw(config_tree, "profile:ds")
     data["items"] = sorted([*data["items"], "profile:a\0b"])
     data["files"]["profiles/a\0b.yaml"] = "includes:\n  - rich\n"

@@ -56,6 +56,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `stack doctor`'s missing-checkout finding also checks an editable given as a
   local `file:` URL (`-e file:///src/pkg`), which it previously skipped as a
   remote install. `stack import`'s pre-flight checks it the same way.
+- A name holding a control character, such as an escape or a NUL, is now
+  refused wherever a NAME is taken, as a name holding whitespace already was.
+  `stack export` refuses such a name on disk rather than ship a document that
+  every `stack import` would refuse.
 
 ## 0.6.0 - 2026-09-28
 

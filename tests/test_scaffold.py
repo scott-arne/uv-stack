@@ -8,6 +8,7 @@ from tests.conftest import _lock_held_by_another_process
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
 from uv_stack.fsutil import _LOCK_AVAILABLE
+from uv_stack.hints import has_control
 from uv_stack.operations.scaffold import (
     _SHADOW_HINT,
     write_bundle,
@@ -1009,3 +1010,28 @@ def test_validate_name_is_public():
     with pytest.raises(ConfigError) as excinfo:
         validate_name("profile", "../../../etc/passwd")
     assert "Invalid profile name" in excinfo.value.message
+
+
+@pytest.mark.parametrize(
+    ("bad", "escaped"),
+    [("a\x1bb", "a\\x1bb"), ("a\x07b", "a\\x07b"), ("a\x00b", "a\\x00b"), ("a\x9bb", "a\\x9bb")],
+)
+def test_validate_name_refuses_a_control_character(bad: str, escaped: str):
+    """A control character is no more a usable file stem than whitespace is.
+
+    The name is echoed escaped, since the message reaches a terminal.
+    """
+    from uv_stack.operations.scaffold import validate_name
+
+    with pytest.raises(ConfigError) as excinfo:
+        validate_name("profile", bad)
+    assert excinfo.value.message == f"Invalid profile name: '{escaped}'"
+    assert not has_control(excinfo.value.message)
+    assert "control characters" in (excinfo.value.hint or "")
+
+
+@pytest.mark.parametrize("good", ["ds", "my-env_2.0", "café", "Foo"])
+def test_validate_name_still_accepts_a_plain_name(good: str):
+    from uv_stack.operations.scaffold import validate_name
+
+    validate_name("profile", good)

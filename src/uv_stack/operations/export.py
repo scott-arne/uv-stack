@@ -22,6 +22,7 @@ from uv_stack import __version__
 from uv_stack.config import ConfigRoot, _parse_declarations
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.fsutil import read_text_utf8, require_regular_file
+from uv_stack.hints import escape_controls
 from uv_stack.models import EXPORT_FORMAT, EXPORT_VERSION, ExportDocument
 from uv_stack.operations.diff import parse_lock_text, read_lock_text
 from uv_stack.operations.scaffold import validate_name
@@ -57,14 +58,11 @@ def parse_file_key(key: str) -> FileKey | None:
     """Parse a document file key, or return ``None`` if it is not one.
 
     Keys are matched whole and each name passes :func:`validate_name`, so a
-    ``../`` segment, an absolute path, or an unlisted file never maps to a
-    path under the root. A NUL is refused here because :func:`validate_name`
-    allows it and any path built from it raises ``ValueError``; ``fullmatch``
-    rather than a ``$`` anchor, because ``$`` also matches before a trailing
-    newline that the key would still carry into the path.
+    ``../`` segment, an absolute path, an unlisted file, or a control
+    character (NUL among them) never maps to a path under the root.
+    ``fullmatch`` rather than a ``$`` anchor, because ``$`` also matches before
+    a trailing newline that the key would still carry into the path.
     """
-    if "\0" in key:
-        return None
     match = _KEY_RE.fullmatch(key)
     if match is None:
         return None
@@ -167,7 +165,7 @@ def reference_key(kind: str, name: str) -> str:
     if parse_file_key(key) is None:
         noun = kind.capitalize()
         raise ConfigError(
-            f"{noun} reference '{name}' does not map to a valid file key.",
+            f"{noun} reference '{escape_controls(name)}' does not map to a valid file key.",
             hint=f"A {kind} reference must be a plain name, not a path.",
         )
     return key
