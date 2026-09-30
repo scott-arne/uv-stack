@@ -412,6 +412,21 @@ def test_validate_profile_rejects_undecodable_bytes(config_tree: ConfigRoot):
     assert str(config_tree.profile_path("ds")) in excinfo.value.message
 
 
+def test_validate_remotes_accepts_a_good_file(config_tree: ConfigRoot):
+    config_tree.remotes_path().write_text("gpu-box:\n  root: /data\n", encoding="utf-8")
+    assert validate(config_tree, "remotes", "", config_tree.root).warnings == []
+
+
+def test_validate_remotes_accepts_an_absent_file(config_tree: ConfigRoot):
+    assert validate(config_tree, "remotes", "", config_tree.root).warnings == []
+
+
+def test_validate_remotes_rejects_an_invalid_file(config_tree: ConfigRoot):
+    config_tree.remotes_path().write_text("gpu-box: [1, 2]\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="remotes.yaml"):
+        validate(config_tree, "remotes", "", config_tree.root)
+
+
 def test_validate_bundle_rejects_undecodable_bytes(config_tree: ConfigRoot):
     """The bundle's own YAML, which only ``validate_bundle`` reads."""
     config_tree.bundle_path("standard").write_bytes(b"includes:\n  - \xff\xfe\n")

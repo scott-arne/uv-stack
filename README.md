@@ -278,7 +278,7 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack create env NAME [TOKENS]...` | Scaffold (optional) and build a shared environment (`--recreate` wipes and rebuilds it: the lock is compiled first, and the conda layer is destroyed only if that succeeds) |
 | `stack create profile NAME PKG...` | Write a new profile YAML (`--description`, `--tag`) |
 | `stack create bundle NAME TOKEN...` | Write a new bundle YAML (`--description`, `--tag`) |
-| `stack edit KIND [NAME]` | Open a profile, bundle, env source, or project file in your editor and validate it when the editor exits |
+| `stack edit KIND [NAME]` | Open a profile, bundle, env source, project file, or `remotes.yaml` in your editor and validate it when the editor exits |
 | `stack upgrade [NAMES]...` | Re-render, re-lock, and sync shared environments |
 | `stack sync` | Create, build, and recompile every environment the root declares (no prompt, keeps existing pins) |
 | `stack sync env NAME...` | The same, for only the named environments |
@@ -311,12 +311,16 @@ stack edit bundle standard         # bundles/standard.yaml
 stack edit env                     # envs/main/stack.txt
 stack edit env chem --file python  # envs/chem/python.txt
 stack edit project                 # ./pyproject.toml
+stack edit remotes                 # remotes.yaml
 ```
 
 On success the command names the file it validated and how to apply the change:
 `stack upgrade NAME` for an environment, `stack refresh` for a tracked project,
-and for a profile or bundle a reminder that it takes effect on the next upgrade
-or refresh.
+for a profile or bundle a reminder that it takes effect on the next upgrade or
+refresh, and for `remotes.yaml` a reminder that the next `stack sync remote`
+uses it. A `remotes.yaml` that does not exist when the editor exits (you quit
+without saving, or deleted it) is reported as such and the command exits 0: no
+file means no remotes.
 
 `--file` selects which environment source to open and accepts `stack`
 (default), `python`, `micromamba`, `channels`, and `local`

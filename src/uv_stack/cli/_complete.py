@@ -16,9 +16,14 @@ from uv_stack.config import ConfigRoot
 #: KIND choices for the commands that accept a project as well as the three
 #: named resources: ``stack show`` and ``stack edit``. Shared because the two
 #: must offer the same set — a KIND one accepts and the other rejects sends
-#: the user to a command that cannot help them. ``stack list`` deliberately
+#: the user to a command that cannot help them. The one exception is
+#: ``remotes``, which only ``stack edit`` takes (:data:`EDIT_KIND_CHOICES`):
+#: ``stack config remote list`` is its reader. ``stack list`` deliberately
 #: omits ``project``: there is no registry of projects to list.
 KIND_CHOICES = ("env", "profile", "bundle", "project")
+
+#: ``stack edit``'s KIND choices: :data:`KIND_CHOICES` plus ``remotes``.
+EDIT_KIND_CHOICES = (*KIND_CHOICES, "remotes")
 
 
 def _config_from_ctx(ctx: click.Context) -> ConfigRoot:

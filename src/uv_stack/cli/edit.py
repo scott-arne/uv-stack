@@ -1,4 +1,4 @@
-"""``stack edit KIND [NAME]``: open a config file in the user's editor.
+"""``stack edit KIND [NAME]``: open a config file or ``remotes.yaml`` in the user's editor.
 
 Owns every interaction the feature has: which file to open, how to launch the
 editor, and how to report what validation found. The loop here is the sole
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import rich_click as click
 
-from uv_stack.cli._complete import KIND_CHOICES, complete_show_names
+from uv_stack.cli._complete import EDIT_KIND_CHOICES, complete_show_names
 from uv_stack.cli._render import echo, render_error, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.editor import EditorCommand, editor_argv, resolve_editor
@@ -62,7 +62,7 @@ def _resolve_target(config: ConfigRoot, kind: str, name: str, file: str) -> Path
     ``edit`` never scaffolds: an absent profile, bundle, or env is an error
     with the ``create`` command as its hint. Absent *optional* env sources are
     the exception — ``channels.txt`` not existing yet is the normal reason to
-    open it.
+    open it. An absent ``remotes.yaml`` is opened too.
 
     :raises ConfigError: When the resource does not exist, or the target is
         not a regular file.
@@ -95,6 +95,9 @@ def _resolve_target(config: ConfigRoot, kind: str, name: str, file: str) -> Path
         # looks at.
         config.require_env(name)
         target = _env_target(config, name, file)
+        require_regular_file(target)
+    elif kind == "remotes":
+        target = config.remotes_path()
         require_regular_file(target)
     else:
         target = Path.cwd() / "pyproject.toml"
@@ -130,7 +133,7 @@ def _argv(editor: EditorCommand, target: Path) -> list[str]:
 def _next_step(kind: str, name: str, tracked: bool | None) -> None:
     """Print the command that makes the edit take effect.
 
-    :param kind: One of ``profile``, ``bundle``, ``env``, ``project``.
+    :param kind: One of ``profile``, ``bundle``, ``env``, ``project``, ``remotes``.
     :param name: The resource name; ignored unless ``kind`` is ``env``.
     :param tracked: Whether the project carries a ``[tool.uv-stack]`` table,
         as reported by validation; ignored unless ``kind`` is ``project``.
@@ -142,6 +145,8 @@ def _next_step(kind: str, name: str, tracked: bool | None) -> None:
         # it outright, so naming refresh here would contradict that warning.
         if tracked:
             echo("Apply it with: stack refresh")
+    elif kind == "remotes":
+        echo("Used by the next 'stack sync remote'.")
     else:
         echo("Applies on the next 'stack upgrade' or 'stack refresh'.")
 
@@ -183,6 +188,11 @@ def _edit_loop(
         # or a dangling symlink absent, so validation would pass on a target
         # the next `stack edit` refuses.
         require_regular_file(target)
+        if kind == "remotes" and not os.path.lexists(target):
+            # No file means no remotes, which is valid; a Validated line would
+            # name a file that is not there.
+            echo(f"{target} does not exist; nothing to validate.")
+            return
         try:
             result = validate(config, kind, name, cwd)
         except NewerSchemaError:
@@ -205,7 +215,7 @@ def _edit_loop(
 
 
 @click.command("edit")
-@click.argument("kind", type=click.Choice(KIND_CHOICES))
+@click.argument("kind", type=click.Choice(EDIT_KIND_CHOICES))
 @click.argument("name", required=False, shell_complete=complete_show_names)
 @click.option(
     "--file",
@@ -235,7 +245,8 @@ def edit(
     place.
 
     NAME defaults to 'main' for 'env'. 'project' takes no NAME: it edits the
-    pyproject.toml in the current directory.
+    pyproject.toml in the current directory. 'remotes' takes no NAME either:
+    it edits remotes.yaml in the config root.
     """
     # --file defaults to None rather than "stack" so that "not supplied" stays
     # distinguishable from an explicit value; a click default is otherwise
@@ -251,6 +262,13 @@ def edit(
             raise click.UsageError(
                 "'edit project' takes no NAME; it edits the project in the "
                 "current directory."
+            )
+        resource = ""
+    elif kind == "remotes":
+        if name is not None:
+            raise click.UsageError(
+                "'edit remotes' takes no NAME; remotes.yaml is a single file in the "
+                "config root."
             )
         resource = ""
     elif kind == "env":

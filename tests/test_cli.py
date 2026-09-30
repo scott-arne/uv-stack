@@ -2889,7 +2889,8 @@ def test_edit_env_opens_an_absent_optional_file(tmp_path: Path, monkeypatch):
     ["stack", "python"],
 )
 @pytest.mark.parametrize(
-    "kind,name", [("profile", ["ds"]), ("bundle", ["standard"]), ("project", [])]
+    "kind,name",
+    [("profile", ["ds"]), ("bundle", ["standard"]), ("project", []), ("remotes", [])],
 )
 def test_edit_rejects_file_on_non_env_kinds(
     tmp_path: Path, monkeypatch, kind, name, file
@@ -2974,6 +2975,15 @@ def test_edit_project_rejects_a_name(tmp_path: Path, monkeypatch):
     result = CliRunner().invoke(cli, ["--root", str(root), "edit", "project", "x"])
     assert result.exit_code == 2
     assert "takes no NAME" in _combined_output(result)
+
+
+def test_edit_remotes_rejects_a_name(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes", "gpu-box"])
+    assert result.exit_code == 2
+    assert "takes no NAME" in _combined_output(result)
+    assert fake.commands == []
 
 
 @pytest.mark.parametrize(
@@ -3302,6 +3312,53 @@ def test_edit_still_validates_an_optional_env_file_left_absent(
     assert "Apply it with: stack upgrade main" in result.output
 
 
+def test_edit_remotes_left_absent_is_not_validated(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    path = ConfigRoot(root).remotes_path()
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
+    assert result.exit_code == 0
+    assert fake.commands == [Command(["fake-editor", str(path)])]
+    assert f"{path} does not exist; nothing to validate." in result.output
+    assert "Validated" not in result.output
+
+
+def test_edit_remotes_deleted_in_the_editor_is_not_validated(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    path = ConfigRoot(root).remotes_path()
+    path.write_text("gpu-box: {}\n")
+    _install_editor(monkeypatch, _FakeEditor(lambda target: target.unlink()))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
+    assert result.exit_code == 0
+    assert f"{path} does not exist; nothing to validate." in result.output
+    assert "Validated" not in result.output
+
+
+def test_edit_remotes_names_the_next_sync(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    path = ConfigRoot(root).remotes_path()
+
+    def _write(target: Path) -> None:
+        target.write_text("gpu-box:\n  root: /data\n", encoding="utf-8")
+
+    _install_editor(monkeypatch, _FakeEditor(_write))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
+    assert result.exit_code == 0
+    assert f"Validated {path}" in result.output
+    assert "Used by the next 'stack sync remote'." in result.output
+
+
+def test_edit_symlinked_remotes_names_the_real_file(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    real = tmp_path / "real-remotes.yaml"
+    real.write_text("gpu-box: {}\n", encoding="utf-8")
+    ConfigRoot(root).remotes_path().symlink_to(real)
+    _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
+    assert result.exit_code == 0
+    assert f"Validated {real}" in result.output
+
+
 def test_edit_symlinked_profile_names_the_real_file(tmp_path: Path, monkeypatch):
     """When the target is a symlink, the success line names the resolved file."""
     root = _seeded_root(tmp_path)
@@ -3474,6 +3531,36 @@ def test_edit_does_not_prompt_without_a_tty(tmp_path: Path, monkeypatch):
 
     fake = _install_editor(monkeypatch, _FakeEditor(_break_it))
     result = CliRunner().invoke(cli, ["--root", str(root), "edit", "profile", "ds"])
+    assert result.exit_code == 1
+    assert len(fake.commands) == 1
+    assert "Re-open the editor?" not in _combined_output(result)
+
+
+def test_edit_remotes_reoffers_until_the_file_is_valid(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    monkeypatch.setattr("uv_stack.cli.edit._stdin_is_tty", lambda: True)
+
+    def _break_it(path: Path) -> None:
+        path.write_text("gpu-box: [1, 2]\n", encoding="utf-8")
+
+    def _fix_it(path: Path) -> None:
+        path.write_text("gpu-box:\n  root: /data\n", encoding="utf-8")
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_break_it, _fix_it))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"], input="y\n")
+    assert result.exit_code == 0
+    assert len(fake.commands) == 2
+    assert "Validated" in _combined_output(result)
+
+
+def test_edit_remotes_without_a_tty_exits_nonzero(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+
+    def _break_it(path: Path) -> None:
+        path.write_text("gpu-box: [1, 2]\n", encoding="utf-8")
+
+    fake = _install_editor(monkeypatch, _FakeEditor(_break_it))
+    result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
     assert result.exit_code == 1
     assert len(fake.commands) == 1
     assert "Re-open the editor?" not in _combined_output(result)
