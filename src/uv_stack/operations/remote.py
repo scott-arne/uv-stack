@@ -199,10 +199,19 @@ def _update_remotes(
     :raises OSError: When the file cannot be read or written.
     """
     path = config.remotes_path()
+    # Resolve the root once so the lock and the target both resolve through the
+    # same tree; a retargeted root link must not leave the writer holding one
+    # tree's lock while it updates another tree's file.
+    locked_root = ConfigRoot(os.path.realpath(config.root))
     # Where locking is unsupported, name_lock degrades to a no-op as it does
     # for every caller; the re-read before publishing is then the only guard.
-    with name_lock(config.remotes_lock_path(), "remotes.yaml", action="updating"):
+    with name_lock(locked_root.remotes_lock_path(), "remotes.yaml", action="updating"):
         target, text = _read_target(path)
+        # Refuse if the target does not resolve through the locked root.
+        if target != Path(os.path.realpath(locked_root.remotes_path())):
+            raise ConfigError(f"{path} changed while it was being updated; nothing was written.",
+                              hint="Run the command again.",
+                              path=path)
         remotes = {} if text is None else parse_remotes(text, path)
         if text is not None and has_comment(text):
             raise ConfigError(f"{path} contains comments, which rewriting would drop.",

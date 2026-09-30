@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
@@ -783,3 +784,35 @@ def test_a_root_link_retargeted_before_the_first_write_is_refused(
         set_remote(ConfigRoot(link), "a", root="/r")
     assert not (first / "remotes.yaml").exists()
     assert not (second / "remotes.yaml").exists()
+
+
+def test_a_root_link_retargeted_just_after_locking_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Both trees have identical remotes.yaml files initially.
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "remotes.yaml").write_text("a: {}\n")
+    (second / "remotes.yaml").write_text("a: {}\n")
+    link = tmp_path / "root"
+    link.symlink_to(first)
+
+    # Retarget the link immediately after the lock is acquired but before the
+    # first read, so the writer holds first's lock while it reads and writes
+    # second's file.
+    original_name_lock = remote_ops.name_lock
+
+    @contextlib.contextmanager
+    def retargeting_lock(*args, **kwargs):  # type: ignore[no-untyped-def]
+        with original_name_lock(*args, **kwargs):
+            link.unlink()
+            link.symlink_to(second)
+            yield
+
+    monkeypatch.setattr(remote_ops, "name_lock", retargeting_lock)
+    with pytest.raises(ConfigError, match="changed while it was being updated"):
+        set_remote(ConfigRoot(link), "a", root="/r")
+    assert (first / "remotes.yaml").read_text() == "a: {}\n"
+    assert (second / "remotes.yaml").read_text() == "a: {}\n"
