@@ -13,6 +13,7 @@ from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.hints import has_control
 from uv_stack.operations.export import (
     AmbiguousItemError,
+    absolute_path_warnings,
     build_document,
     closure,
     normalize_items,
@@ -180,6 +181,16 @@ def test_file_urls_warn_as_absolute_paths(config_tree: ConfigRoot) -> None:
     result = build_document(config_tree, ["profile:ds"])
     assert result.warnings == [
         "profiles/ds.yaml: 5 absolute editable or local path(s); these build only where "
+        "the same paths exist. Use ${NAME} to make them portable."
+    ]
+
+
+@pytest.mark.parametrize("entry", ["pkg @ FILE:///wheels/a.whl", "-e File:///src/pkg"])
+def test_file_urls_warn_whatever_their_case(config_tree: ConfigRoot, entry: str) -> None:
+    # A URL scheme is case-insensitive, and pip and uv install from either spelling.
+    config_tree.profile_path("ds").write_text(f"includes:\n  - {entry}\n")
+    assert absolute_path_warnings(config_tree, ["profiles/ds.yaml"]) == [
+        "profiles/ds.yaml: 1 absolute editable or local path(s); these build only where "
         "the same paths exist. Use ${NAME} to make them portable."
     ]
 

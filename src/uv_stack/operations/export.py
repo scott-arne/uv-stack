@@ -280,7 +280,8 @@ def _check_declared(config: ConfigRoot, key: str, entries: list[str], declared: 
         )
 
 
-_FILE_URL = re.compile(r"(?:^|[\s=@])file://(\S*)")
+# A URL scheme is case-insensitive, and uv installs from FILE:// as readily.
+_FILE_URL = re.compile(r"(?:^|[\s=@])file://(\S*)", re.IGNORECASE)
 
 
 def _file_url_path(entry: str) -> str | None:
