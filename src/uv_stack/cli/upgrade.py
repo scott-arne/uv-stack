@@ -90,7 +90,7 @@ def _run_upgrade(
 
     for name in targets:
         attempted.append(name)
-        console.rule(Text(f"{rule_verb} {name}"))
+        console.rule(Text(f"{rule_verb} {escape_controls(name)}"))
         env_options = (
             dataclasses.replace(options, seed=seeds.get(name)) if seeds is not None else options
         )
@@ -182,25 +182,28 @@ def _print_summary(
     reasons = {name: _failure_reason(error) for name, error in failures}
     reached = set(attempted)
     skipped = [name for name in names if name not in reached]
-    width = max((len(name) for name in names), default=0)
+    # Names discovered on disk can hold control characters. The width is
+    # measured on the spelled form, which is what the columns align.
+    shown = {name: escape_controls(name) for name in names}
+    width = max((len(label) for label in shown.values()), default=0)
     console.rule("Summary")
     for name in names:
         if name in reasons:
             console.print(
                 Text.assemble(
-                    "  ", ("✗", "red"), f" {name.ljust(width)}  ",
+                    "  ", ("✗", "red"), f" {shown[name].ljust(width)}  ",
                     (reasons[name], "dim"),
                 )
             )
         elif name not in reached:
             console.print(
                 Text.assemble(
-                    "  ", ("–", "yellow"), f" {name.ljust(width)}  ",
+                    "  ", ("–", "yellow"), f" {shown[name].ljust(width)}  ",
                     ("skipped after an earlier failure", "dim"),
                 )
             )
         else:
-            console.print(Text.assemble("  ", ("✓", "green"), f" {name}"))
+            console.print(Text.assemble("  ", ("✓", "green"), f" {shown[name]}"))
     if failures and skipped:
         succeeded = len(names) - len(failures) - len(skipped)
         console.print(
@@ -288,7 +291,7 @@ def upgrade(
             return
         echo("Discovered environments:")
         for name in targets:
-            echo(f"  - {name}")
+            echo(f"  - {escape_controls(name)}")
         # The confirmation guards the *implicit* bulk path (``upgrade`` with no
         # arguments). An explicit ``--all`` is itself the confirmation, as is -y.
         if not all_envs and not yes and not click.confirm("Upgrade all of these?"):

@@ -16,6 +16,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   that an environment could not be read. Its output keeps newlines and tabs
   for the conflict diff's layout, so a directory under `envs/` whose name held
   one could print a line of its choosing.
+- Tables and plain output print a control character as its escape, keeping
+  newlines and tabs, as error panels and warnings already did. That covers
+  `stack list`, `stack show`, `stack status`, `stack diff` and the other plain
+  lines, plus `stack doctor --fix` outcomes and the rules and summary of
+  `stack upgrade` and `stack sync`. Before, an escape sequence in a profile or
+  bundle description or tag, which `stack import` installs from another
+  machine, or in a directory name under `envs/`, reached the terminal, which
+  acts on it. The note under `stack status`, those upgrade and sync lines,
+  and `doctor --fix` outcomes spell a newline too, since each names an
+  environment listed from disk on a single line it could otherwise break.
 
 ## 0.7.0 - 2026-09-30
 

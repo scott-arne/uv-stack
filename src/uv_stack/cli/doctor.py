@@ -94,16 +94,16 @@ def doctor(config_root: ConfigRoot, fix: bool, as_json: bool) -> None:
         echo(json.dumps(payload, indent=2))
     else:
         for action in actions:
+            # A description is one line naming paths, which run through
+            # directories listed from disk, so it is spelled in full; a
+            # reason can quote an error's own lines, as a finding can.
+            description = escape_controls(action.description)
             if action.applied:
-                console.print(
-                    Text.assemble(("fixed:", "green"), f" {action.description}")
-                )
+                console.print(Text.assemble(("fixed:", "green"), f" {description}"))
             else:
+                reason = escape_controls(action.reason or "", keep_layout=True)
                 console.print(
-                    Text.assemble(
-                        ("skipped:", "yellow"),
-                        f" {action.description} ({action.reason or ''})",
-                    )
+                    Text.assemble(("skipped:", "yellow"), f" {description} ({reason})")
                 )
         _print_findings(remaining)
     if any(f.level == "error" for f in remaining):

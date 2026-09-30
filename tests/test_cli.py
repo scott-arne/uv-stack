@@ -5164,6 +5164,124 @@ def test_doctor_fix_line_escapes_a_control_character(tmp_path: Path, monkeypatch
     assert "a\\x1bb/python.txt." in output
 
 
+def test_table_cells_escape_control_characters_but_keep_their_lines(capsys, monkeypatch):
+    """Rich passes ESC and C1 through a table cell as it does through a panel."""
+    from uv_stack.cli._render import render_table
+
+    monkeypatch.setenv("COLUMNS", "200")
+    render_table("t", [("A", "left")], [("bad \x1b[2J cell\nsecond \x9b line",)])
+    lines = capsys.readouterr().out.splitlines()
+    assert not any("\x1b" in line or "\x9b" in line for line in lines)
+    first = next(i for i, line in enumerate(lines) if "bad \\x1b[2J cell" in line)
+    assert "second \\x9b line" in lines[first + 1]
+
+
+def test_echo_escapes_control_characters_but_keeps_layout(capsys):
+    from uv_stack.cli._render import echo
+
+    echo("odd \x1b[31m name \x9b end\n\tindented")
+    assert capsys.readouterr().out == "odd \\x1b[31m name \\x9b end\n\tindented\n"
+
+
+def test_echo_leaves_json_unchanged(capsys):
+    """JSON already spells every control character, so the escaping must not touch it."""
+    import json
+
+    from uv_stack.cli._render import echo
+
+    text = json.dumps({"name": "a\x1bb\nc", "path": "d\\e"}, indent=2)
+    echo(text)
+    assert capsys.readouterr().out == text + "\n"
+
+
+def test_list_and_show_profile_escape_control_characters(tmp_path: Path, monkeypatch):
+    """Import installs profiles another machine wrote, and both commands print their text."""
+    root = _seeded_root(tmp_path)
+    ConfigRoot(root).profile_path("odd").write_text(
+        'description: "evil\\e[2J here"\ntags: ["t\\e[31mg"]\nincludes:\n  - rich\n'
+    )
+    monkeypatch.setenv("COLUMNS", "200")
+    runner = CliRunner()
+    listed = _combined_output(runner.invoke(cli, ["--root", str(root), "list", "profile"]))
+    assert "\x1b" not in listed
+    assert "evil\\x1b[2J here" in listed
+    assert "t\\x1b[31mg" in listed
+    shown = runner.invoke(cli, ["--root", str(root), "show", "profile", "odd"])
+    assert shown.exit_code == 0
+    assert "\x1b" not in shown.output
+    assert "Description: evil\\x1b[2J here\n" in shown.output
+    assert "Tags: t\\x1b[31mg\n" in shown.output
+
+
+# A directory under envs/ is listed from disk, where nothing refuses a control
+# character. A line that names one is spelled in full, newline included, so
+# the name cannot start a line of its own.
+_LISTED_NAMES = pytest.mark.parametrize(
+    ("name", "escaped"), [("a\x1bb", "a\\x1bb"), ("a\nb", "a\\nb")], ids=["escape", "newline"]
+)
+
+
+def _listed_env(root: Path, name: str, stack: str) -> Path:
+    """Create ``envs/<name>`` holding ``stack.txt``, skipping where the name is refused."""
+    env_dir = root / "envs" / name
+    try:
+        env_dir.mkdir()
+    except OSError:
+        pytest.skip("this filesystem refuses a control character in a file name")
+    (env_dir / "stack.txt").write_text(stack)
+    return env_dir
+
+
+@_LISTED_NAMES
+def test_status_note_escapes_a_listed_environment_name(
+    tmp_path: Path, monkeypatch, name, escaped
+):
+    """The note under the table names the environment outside the table's border."""
+    root = _seeded_root(tmp_path)
+    ConfigRoot(root).profile_path("web").write_text(_ESC_KEY_YAML)
+    (_listed_env(root, name, "profile:web\n") / "python.txt").write_text("3.12\n")
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "status"])
+    output = _combined_output(result)
+    assert "\x1b" not in output
+    assert f"{escaped}: Invalid profile config" in output
+
+
+@_LISTED_NAMES
+def test_bulk_upgrade_escapes_a_listed_environment_name(
+    tmp_path: Path, monkeypatch, name, escaped
+):
+    """The discovered list, the rule, and the summary each name the environment."""
+    root = _seeded_root(tmp_path)
+    ConfigRoot(root).profile_path("web").write_text(_ESC_KEY_YAML)
+    (_listed_env(root, name, "profile:web\n") / "python.txt").write_text("3.12\n")
+    monkeypatch.setenv("COLUMNS", "200")
+    result = CliRunner().invoke(cli, ["--root", str(root), "upgrade", "--all"])
+    assert result.exit_code == 1
+    output = _combined_output(result)
+    assert "\x1b" not in output
+    lines = output.splitlines()
+    assert f"  - {escaped}" in lines
+    assert any(f" Upgrading {escaped} " in line for line in lines)
+    summary = output.split("Summary", 1)[1].splitlines()
+    assert any(line.startswith(f"  ✗ {escaped}  Invalid profile config") for line in summary)
+
+
+@_LISTED_NAMES
+def test_doctor_fix_escapes_a_listed_environment_name(
+    tmp_path: Path, monkeypatch, name, escaped
+):
+    """Writing a missing python.txt reports its path, which runs through the name."""
+    root = _seeded_root(tmp_path)
+    _listed_env(root, name, "rich\n")
+    monkeypatch.setenv("COLUMNS", "1000")
+    result = CliRunner().invoke(cli, ["--root", str(root), "doctor", "--fix"])
+    output = _combined_output(result)
+    assert "\x1b" not in output
+    wrote = f"fixed: wrote {root / 'envs'}/{escaped}/python.txt with default 3.12"
+    assert wrote in output.splitlines()
+
+
 def test_table_directory_line_preserves_bracketed_path(tmp_path: Path, monkeypatch):
     """The ``<title> in <directory>`` line above a table carries the config root.
 

@@ -12,10 +12,12 @@ any user-controlled text is assembled as :class:`~rich.text.Text`, which does
 not parse markup at all; markup strings stay reserved for wholly literal lines
 the author controls. :func:`echo` is plain click output and is unaffected.
 
-The error and warning renderers print messages that carry names and text read
-from disk or from an export document, and Rich passes ESC and C1 characters
-through to the terminal. So they spell control characters as escapes, keeping
-newlines and tabs for layout.
+Every renderer here prints names and text read from disk or from an export
+document, and neither Rich nor click stops ESC and C1 characters reaching the
+terminal. So each one spells control characters as escapes, keeping newlines
+and tabs for layout. A caller assembling its own :class:`~rich.text.Text` owes
+the same, and spells a newline too when the line names something listed from
+disk, since nothing refuses one there.
 """
 
 from __future__ import annotations
@@ -133,24 +135,26 @@ def render_table(
     if directory is not None:
         # A full-width line, not a table caption: captions wrap to the
         # content-sized table width and mangle long absolute paths.
-        console.print(Text(f"{title} in {directory}", style="dim"))
+        console.print(Text(f"{title} in {escape_controls(str(directory))}", style="dim"))
     table = Table(title=Text(title))
     for header, justify in columns:
         table.add_column(header, justify=justify, overflow=overflow)
     for row in rows:
         # Cells carry user text (profile descriptions, tags, paths), so they
-        # are wrapped as Text rather than parsed as markup.
-        table.add_row(*(Text(cell) for cell in row))
+        # are wrapped as Text rather than parsed as markup. A newline stays
+        # inside the cell's border, so only the other controls are spelled.
+        table.add_row(*(Text(escape_controls(cell, keep_layout=True)) for cell in row))
     console.print(table)
 
 
 def echo(message: str) -> None:
-    """Print a plain line to stdout.
+    """Print a plain line to stdout, with its control characters spelled as escapes.
 
-    Unlike the console renderers above, this never parses markup, so callers
-    printing user data through it need no escaping.
+    This never parses markup, so callers printing user data through it need no
+    markup escaping. Newlines and tabs are kept, which leaves JSON unchanged:
+    :func:`json.dumps` already spells every control character inside a string.
     """
-    click.echo(message)
+    click.echo(escape_controls(message, keep_layout=True))
 
 
 def print_activation_hint(name: str) -> None:

@@ -77,4 +77,4 @@ def status(config: ConfigRoot, names: tuple[str, ...], as_json: bool) -> None:
         if s.message:
             # The message can quote a load error, and so a key read from disk.
             message = escape_controls(s.message, keep_layout=True)
-            console.print(Text(f"{s.name}: {message}", style="dim"))
+            console.print(Text(f"{escape_controls(s.name)}: {message}", style="dim"))
