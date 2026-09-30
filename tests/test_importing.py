@@ -7,7 +7,8 @@ import json
 import re
 import shutil
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -940,6 +941,34 @@ def test_profile_and_bundle_of_one_name_share_one_stem_lock(
     target = ConfigRoot(tmp_path / "target")
     _plan(target, _raw(config_tree, "profile:utils", "bundle:utils"))
     assert target.bundle_path("utils").is_file()
+
+
+def test_locks_are_taken_in_one_order_and_held_through_the_block(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Stems interleave profiles (chem, ds, utils) with bundles (qsar,
+    # standard), so a profiles-then-bundles order would not pass as sorted.
+    config_tree.env_dir("alpha").mkdir()
+    config_tree.env_stack_path("alpha").write_text("profile:ds\n")
+    target = ConfigRoot(tmp_path / "target")
+    events: list[tuple[str, Path]] = []
+    real = importing.name_lock
+
+    @contextmanager
+    def recording(path: Path, name: str, **kwargs: Any) -> Iterator[None]:
+        with real(path, name, **kwargs):
+            events.append(("acquire", path))
+            yield
+            events.append(("release", path))
+
+    monkeypatch.setattr(importing, "name_lock", recording)
+    with prepared_import(target, _load(_raw(config_tree)), ImportOptions(), dry_run=False):
+        events.append(("block", target.root))
+    stems = ["chem", "ds", "qsar", "standard", "utils"]
+    order = [target.import_lock_path(), *map(target.stem_lock_path, stems),
+             *map(target.env_lock_path, ["alpha", "main"])]
+    assert events == [*(("acquire", p) for p in order), ("block", target.root),
+                      *(("release", p) for p in reversed(order))]
 
 
 def _probe(python: str | None) -> Callable[[Command], CommandResult]:

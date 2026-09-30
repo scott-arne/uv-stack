@@ -5682,7 +5682,7 @@ def test_run_upgrade_gives_each_env_its_seed_and_reports_successes(
     """
     import uv_stack.cli.upgrade
     from uv_stack.cli.upgrade import _run_upgrade
-    from uv_stack.errors import UvStackError
+    from uv_stack.errors import EnvError
     from uv_stack.operations.upgrade import UpgradeOptions, UpgradeResult
 
     seen: dict[str, str | None] = {}
@@ -5691,7 +5691,7 @@ def test_run_upgrade_gives_each_env_its_seed_and_reports_successes(
     def fake_upgrade(config, runner, name, options):
         seen[name] = options.seed
         if name == "bad":
-            raise UvStackError("boom")
+            raise EnvError("boom")
         return UpgradeResult(env_name=name)
 
     monkeypatch.setattr(uv_stack.cli.upgrade, "upgrade_env", fake_upgrade)
@@ -5706,6 +5706,38 @@ def test_run_upgrade_gives_each_env_its_seed_and_reports_successes(
     assert exited.value.code == 1
     assert seen == {"main": "numpy==1\n", "bad": None}
     assert succeeded == ["main"]
+
+
+def test_run_upgrade_without_seeds_passes_options_through_and_orders_success(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without seeds each env gets the caller's options object itself.
+
+    ``on_success`` runs after the env's warnings and before its planned
+    commands, so an import's pin report follows the warnings it may explain.
+    """
+    import uv_stack.cli.upgrade
+    from uv_stack.cli.upgrade import _run_upgrade
+    from uv_stack.operations.upgrade import UpgradeOptions, UpgradeResult
+    from uv_stack.runner import Command
+
+    options = UpgradeOptions(no_upgrade=True, dry_run=True)
+    received: list[UpgradeOptions] = []
+    events: list[str] = []
+
+    def fake_upgrade(config, runner, name, env_options):
+        received.append(env_options)
+        return UpgradeResult(env_name=name, planned=[Command(["uv", "pip", "compile"])],
+                             warnings=["w"])
+
+    monkeypatch.setattr(uv_stack.cli.upgrade, "upgrade_env", fake_upgrade)
+    monkeypatch.setattr(uv_stack.cli.upgrade, "render_warnings",
+                        lambda warnings: events.extend(f"warning {w}" for w in warnings))
+    monkeypatch.setattr(uv_stack.cli.upgrade, "echo", lambda text: events.append(text))
+    _run_upgrade(config_tree, ["main"], options, seeds=None,
+                 on_success=lambda name: events.append(f"success {name}"))
+    assert received == [options] and received[0] is options
+    assert events == ["warning w", "success main", "Planned commands:", "  uv pip compile"]
 
 
 @pytest.mark.parametrize("command", [["upgrade"], ["sync", "env"]])

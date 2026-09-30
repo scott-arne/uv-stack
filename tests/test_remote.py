@@ -198,6 +198,52 @@ def test_sync_remote_exit_status_is_the_remotes(
     assert result.exit_code == 255 and "connect" in result.output
 
 
+@pytest.mark.parametrize(("flags", "sent"), [
+    (["--strict"], "--strict"),
+    (["--recreate"], "--recreate"),
+    (["--no-build"], "--no-build"),
+    (["--strict", "--dry-run", "--no-build", "--overwrite"],
+     "--overwrite --no-build --dry-run --strict"),
+])
+def test_sync_remote_forwards_its_import_flags(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch, flags: list[str], sent: str
+) -> None:
+    runner = RecordingRunner(input_responder=lambda cmd, text: (0, ""))
+    monkeypatch.setattr(uv_stack.cli.sync_cmd, "SubprocessRunner", lambda: runner)
+    result = CliRunner().invoke(cli, ["--root", str(config_tree.root), "sync", "remote",
+                                      "main", "box", *flags])
+    assert result.exit_code == 0, result.output
+    assert runner.commands[0].args == ["ssh", "box", f"stack import - {sent}"]
+
+
+def test_sync_remote_explains_a_remote_too_old_for_import(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tail = "Usage: stack [OPTIONS] COMMAND\nError: No such command 'import'.\n"
+    runner = RecordingRunner(input_responder=lambda cmd, text: (2, tail))
+    monkeypatch.setattr(uv_stack.cli.sync_cmd, "SubprocessRunner", lambda: runner)
+    result = CliRunner().invoke(cli, ["--root", str(config_tree.root), "sync", "remote",
+                                      "main", "box"], env={"COLUMNS": "200"})
+    assert result.exit_code == 2
+    assert "Upgrade uv-stack on box: 'uv tool upgrade uv-stack'." in result.output
+
+
+def test_sync_remote_takes_its_command_and_root_from_remotes_yaml(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_tree.remotes_path().write_text(
+        "box:\n  stack: PATH=$HOME/.local/bin:$PATH stack\n  root: ~/envs\n")
+    runner = RecordingRunner(input_responder=lambda cmd, text: (0, ""))
+    monkeypatch.setattr(uv_stack.cli.sync_cmd, "SubprocessRunner", lambda: runner)
+    result = CliRunner().invoke(cli, ["--root", str(config_tree.root), "sync", "remote",
+                                      "main", "box"])
+    assert result.exit_code == 0, result.output
+    # The stack value arrives verbatim for the remote shell to expand; the
+    # root arrives quoted, so only the remote's own expanduser reads its '~'.
+    assert runner.commands[0].args == [
+        "ssh", "box", "PATH=$HOME/.local/bin:$PATH stack --root '~/envs' import -"]
+
+
 def test_sync_remote_refuses_recreate_with_no_build_before_connecting(
     config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -322,5 +368,9 @@ def test_sync_remote_round_trip(
 
     assert remote.profile_path("ds").read_text() == "includes:\n  - scipy\n"
 
+    logged = len(log.read_text().splitlines())
     assert main_exit([*base, "--overwrite", "--no-build"]) == 0
     assert remote.profile_path("ds").read_text() == config_tree.profile_path("ds").read_text()
+    # Each run is a fresh remote process that finds no environment, so a
+    # dropped --no-build would show up here as a create and a compile.
+    assert not any('"compile"' in line for line in log.read_text().splitlines()[logged:])

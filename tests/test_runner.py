@@ -480,7 +480,9 @@ def test_run_with_input_bounds_a_newline_free_stderr(
     assert len(tail) <= _STDERR_TAIL_LINES * 1024
 
 
-def test_run_with_input_spawns_nothing_when_the_document_cannot_be_encoded() -> None:
+def test_run_with_input_spawns_nothing_when_the_document_cannot_be_encoded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _Unencodable(str):
         def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
             raise ValueError("cannot encode")
@@ -492,14 +494,10 @@ def test_run_with_input_spawns_nothing_when_the_document_cannot_be_encoded() -> 
         spawned.append(real_popen(*args, **kwargs))
         return spawned[-1]
 
-    real_popen_ref = subprocess.Popen
-    subprocess.Popen = spy
-    try:
-        with pytest.raises(ValueError, match="cannot encode"):
-            SubprocessRunner().run_with_input(_py("pass"), _Unencodable("x"))
-    finally:
-        subprocess.Popen = real_popen_ref
-    assert len(spawned) == 0
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    with pytest.raises(ValueError, match="cannot encode"):
+        SubprocessRunner().run_with_input(_py("pass"), _Unencodable("x"))
+    assert spawned == []
 
 
 def test_run_with_input_reaps_the_child_when_the_writer_cannot_start(

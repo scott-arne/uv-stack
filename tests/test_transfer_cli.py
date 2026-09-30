@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from click.testing import CliRunner, Result
@@ -17,6 +18,7 @@ from uv_stack.commands import micromamba_create, micromamba_python_info, microma
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ToolError, UvStackError
 from uv_stack.fsutil import name_lock
+from uv_stack.operations.upgrade import UpgradeOptions
 from uv_stack.runner import Command, CommandResult, RecordingRunner
 
 
@@ -185,21 +187,26 @@ def test_import_refuses_a_nul_in_a_name_without_writing(
     assert list(target.root.iterdir()) == []
 
 
-def _fake_build(monkeypatch: pytest.MonkeyPatch, target: ConfigRoot, *, fail: bool = False,
+def _fake_build(monkeypatch: pytest.MonkeyPatch, target: ConfigRoot, *,
+                envs: tuple[str, ...] = ("main",), fail: tuple[str, ...] = (),
                 lock_text: str = "numpy==1.26.4\nrich==14.0.0\n") -> dict[str, bool | str]:
-    # The env is absent until micromamba creates it, so pre-flight plans a
+    # Each env is absent until micromamba creates it, so pre-flight plans a
     # create and upgrade_env's interpreter probe then finds a real path.
-    state: dict[str, bool | str] = {"locked": False, "created": False}
+    state: dict[str, bool | str] = {"locked": False}
+    created: set[str] = set()
 
     def respond(cmd: Command) -> CommandResult:
-        if cmd.args == micromamba_create(target.env_environment_yml("main")).args:
-            state["created"] = True
-        if cmd.args == micromamba_python_path("main").args:
-            if state["created"]:
-                return CommandResult(0, "/envs/main/bin/python\n")
-            return CommandResult(1, "")
+        for name in envs:
+            if cmd.args == micromamba_create(target.env_environment_yml(name)).args:
+                created.add(name)
+            if cmd.args == micromamba_python_path(name).args:
+                if name in created:
+                    return CommandResult(0, f"/envs/{name}/bin/python\n")
+                return CommandResult(1, "")
+            if cmd.args == micromamba_python_info(name).args:
+                return CommandResult(1, "")
         if cmd.args[:3] == ["uv", "pip", "compile"]:
-            if fail:
+            if _compile_output(cmd).parent.name in fail:
                 raise ToolError("uv pip compile failed.", command=cmd.args, returncode=1)
             monkeypatch.setattr(fsutil, "_LOCK_TIMEOUT", 0.05)
             try:
@@ -210,8 +217,6 @@ def _fake_build(monkeypatch: pytest.MonkeyPatch, target: ConfigRoot, *, fail: bo
             candidate = _compile_output(cmd)
             state["candidate"] = candidate.read_text() if candidate.exists() else ""
             candidate.write_text(lock_text)
-        if cmd.args == micromamba_python_info("main").args:
-            return CommandResult(1, "")
         return CommandResult(0, "")
 
     runner = RecordingRunner(responder=respond)
@@ -253,7 +258,7 @@ def test_build_failure_keeps_definitions_and_prints_rerun_and_dependents(
     target.env_dir("work").mkdir(parents=True)
     target.env_stack_path("work").write_text("profile:ds\n")
     target.profile_path("ds").write_text("includes:\n  - scipy\n")
-    _fake_build(monkeypatch, target, fail=True)
+    _fake_build(monkeypatch, target, fail=("main",))
     result = _run_import(target, _export(config_tree, "main"), "--overwrite", build=True)
     assert result.exit_code == 1
     assert "stack sync env main" in result.output
@@ -287,3 +292,148 @@ def test_missing_bracketed_editable_is_printed_intact(
     result = _run_import(target, _export(config_tree, "main"), build=True)
     assert result.exit_code == 1 and "./check[1]/x" in result.output
     assert not target.env_stack_path("main").exists()
+
+
+def test_import_strict_refuses_a_name_that_falls_through_to_a_package(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    # qsar's bare umap-learn names no profile or bundle; a profile's own
+    # entries are never checked, as they reference nothing.
+    target = _target(tmp_path)
+    doc = _export(config_tree, "bundle:qsar")
+    result = _run_import(target, doc, "--strict")
+    assert result.exit_code == 1
+    assert "Unqualified token 'umap-learn' resolved to a literal package." \
+        in _flat_import(result)
+    assert not target.bundle_path("qsar").exists()
+    assert _run_import(target, doc).exit_code == 0
+
+
+def test_import_strict_reaches_the_build(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name, package in (("ds", "numpy"), ("chem", "rdkit"), ("utils", "rich")):
+        config_tree.profile_path(name).write_text(f"includes:\n  - pkg:{package}\n")
+    target = _target(tmp_path)
+    _fake_build(monkeypatch, target)
+    seen: list[UpgradeOptions] = []
+    real = uv_stack.cli.transfer_cmd._run_upgrade
+
+    def spy(config: ConfigRoot, names: list[str], options: UpgradeOptions, **kwargs: Any) -> None:
+        seen.append(options)
+        real(config, names, options, **kwargs)
+
+    monkeypatch.setattr(uv_stack.cli.transfer_cmd, "_run_upgrade", spy)
+    result = _run_import(target, _export(config_tree, "main"), "--strict", build=True)
+    assert result.exit_code == 0, result.output
+    assert [options.strict for options in seen] == [True]
+
+
+def test_import_prints_the_variable_names_it_declares(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    config_tree.variables_path().write_text("WORK\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e ${WORK}/pkg\n")
+    target = _target(tmp_path)
+    result = _run_import(target, _export(config_tree, "profile:ds"))
+    assert result.exit_code == 0, result.output
+    assert "  declare in variables.txt: WORK\n" in result.output
+    assert "WORK" in target.variables_path().read_text().splitlines()
+
+
+def test_import_lists_an_identical_file(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    doc = _export(config_tree, "profile:ds")
+    _run_import(target, doc)
+    result = _run_import(target, doc)
+    assert result.exit_code == 0, result.output
+    assert "  identical: profiles/ds.yaml\n" in result.output
+
+
+def test_dependents_line_prints_on_a_dry_run(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    target = _target(tmp_path)
+    _run_import(target, _export(config_tree, "main"))
+    target.env_dir("work").mkdir(parents=True)
+    target.env_stack_path("work").write_text("profile:ds\n")
+    target.profile_path("ds").write_text("includes:\n  - scipy\n")
+    result = _run_import(target, _export(config_tree, "main"), "--overwrite", "--dry-run")
+    assert result.exit_code == 0, result.output
+    assert ("Not rebuilt, but using changed definitions: work. "
+            "Rebuild them with 'stack sync env work'.") in result.output
+
+
+@pytest.mark.parametrize(("flags", "action"), [((), "create"), (("--recreate",), "recreate")])
+def test_dry_run_lists_each_build_step(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    flags: tuple[str, ...], action: str,
+) -> None:
+    target = _target(tmp_path)
+    state = _fake_build(monkeypatch, target)
+    result = _run_import(target, _export(config_tree, "main"), "--dry-run", *flags, build=True)
+    assert result.exit_code == 0, result.output
+    assert f"  build: main ({action})\n" in result.output
+    assert "candidate" not in state and not target.env_stack_path("main").exists()
+
+
+# Rich reads '[x]' as a style tag and drops it, while '[1]' is not a tag and
+# survives either way, so these use letters to prove the text is not markup.
+
+
+def test_import_header_and_plan_keep_bracketed_text(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    config_tree.profile_path("p[x]").write_text("includes:\n  - rich\n")
+    data = json.loads(_export(config_tree, "profile:p[x]"))
+    data["created_by"] = "uv-stack [dev]"
+    data["source_platform"] = "plan[x]-mips"
+    result = _run_import(_target(tmp_path), json.dumps(data))
+    assert result.exit_code == 0, result.output
+    assert "exported by uv-stack [dev] on plan[x]-mips.\n" in result.output
+    assert "  new: profiles/p[x].yaml\n" in result.output
+
+
+def test_import_used_by_line_keeps_bracketed_names(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    config_tree.profile_path("p[x]").write_text("includes:\n  - rich\n")
+    target = _target(tmp_path)
+    target.profiles_dir.mkdir()
+    target.profile_path("p[x]").write_text("includes:\n  - scipy\n")
+    target.env_dir("e[x]").mkdir(parents=True)
+    target.env_stack_path("e[x]").write_text("profile:p[x]\n")
+    result = _run_import(target, _export(config_tree, "profile:p[x]"))
+    assert result.exit_code == 1
+    assert "profiles/p[x].yaml is used by: e[x]\n" in result.output
+
+
+def test_pin_report_keeps_bracketed_text(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_tree.env_requirements_lock("main").write_text(
+        "numpy==1.26.4\nwidget @ file:///w/widget[x].whl\n")
+    target = _target(tmp_path)
+    _fake_build(monkeypatch, target, lock_text=(
+        "numpy==1.26.4\n-e ./src[x]/w\nwidget @ file:///w/widget[y].whl\n"))
+    result = _run_import(target, _export(config_tree, "main"), build=True)
+    assert result.exit_code == 0, result.output
+    assert "  changed: widget file:///w/widget[x].whl -> file:///w/widget[y].whl\n" \
+        in result.output
+    assert "  added: -e ./src[x]/w\n" in result.output
+
+
+def test_a_mixed_build_reruns_only_the_failure_and_reports_the_success(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("alpha", "beta"):
+        config_tree.env_dir(name).mkdir()
+        config_tree.env_stack_path(name).write_text("profile:ds\n")
+        config_tree.env_requirements_lock(name).write_text("numpy==1.26.4\n")
+    target = _target(tmp_path)
+    _fake_build(monkeypatch, target, envs=("alpha", "beta"), fail=("beta",),
+                lock_text="numpy==1.26.4\n")
+    result = _run_import(target, _export(config_tree, "env:alpha", "env:beta"), build=True)
+    assert result.exit_code == 1
+    assert "alpha: 1 pins kept, 0 changed, 0 dropped, 0 added\n" in result.output
+    assert not any(line.startswith("beta: ") for line in result.output.splitlines())
+    assert "Re-run the failed build(s) once the cause is fixed: stack sync env beta\n" \
+        in result.output
