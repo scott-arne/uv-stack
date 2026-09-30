@@ -201,6 +201,51 @@ def closure(config: ConfigRoot, items: Iterable[str]) -> set[str]:
     return keys
 
 
+def _spelled_as_stored(config: ConfigRoot, key: FileKey) -> bool:
+    # listdir returns names as the directory stores them, so a spelling that
+    # differs in letter case or Unicode normalization is not among them.
+    if key.kind == "env":
+        return key.name in os.listdir(config.envs_dir)
+    path = _item_path(config, key.kind, key.name)
+    return path.name in os.listdir(path.parent)
+
+
+def _refuse_folded_aliases(config: ConfigRoot, keys: Iterable[str]) -> None:
+    """Refuse two keys that reach one file when one is not the file's own name.
+
+    A filesystem that folds letter case or Unicode normalization opens
+    ``profiles/Foo.yaml`` for a reference spelled ``foo``, which would ship one
+    file under two keys: a folding target refuses the document as aliased, and
+    a case-sensitive one gets two definitions where this root has one. Two
+    stored names for one file, a hard link or a symlink, are not refused. A
+    lone key spelled unlike its file is not either, since its reference finds
+    it on the target under that spelling.
+
+    :raises ConfigError: When two keys name one file and either is not spelled
+        as the directory entry it reaches.
+    """
+    by_file: dict[tuple[int, int], list[tuple[str, FileKey]]] = {}
+    for key in sorted(keys):
+        parsed = parse_file_key(key)
+        assert parsed is not None  # closure only emits well-formed keys
+        if parsed.kind == "env":
+            path = config.env_dir(parsed.name) / (parsed.filename or "stack.txt")
+        else:
+            path = _item_path(config, parsed.kind, parsed.name)
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            continue
+        by_file.setdefault((info.st_dev, info.st_ino), []).append((key, parsed))
+    for group in by_file.values():
+        if len(group) > 1 and not all(_spelled_as_stored(config, p) for _, p in group):
+            raise ConfigError(
+                f"{group[0][0]} and {group[1][0]} name the same file on this machine.",
+                hint="This filesystem ignores letter case or Unicode normalization in names. "
+                "Spell each reference exactly as its file is named.",
+            )
+
+
 def file_entries(config: ConfigRoot, key: FileKey) -> list[str]:
     """Return the requirement entries of a profile, bundle, or ``stack.txt``."""
     if key.kind == "profile":
@@ -308,10 +353,15 @@ def build_document(config: ConfigRoot, raw_items: Iterable[str]) -> ExportResult
     """Build the export document for the requested items.
 
     :raises ConfigError: For a missing or ambiguous item, a non-regular file,
-        an undeclared variable reference, or a malformed seed lock.
+        an undeclared variable reference, a malformed seed lock, or two keys
+        that name one file only because this filesystem folds a spelling.
     """
     items = normalize_items(config, raw_items)
     keys = closure(config, items)
+    # Checked here rather than in closure, which import also runs over the
+    # document's files: there a reference that folds onto a shipped key is
+    # already refused as reaching a file the document does not ship.
+    _refuse_folded_aliases(config, keys)
     # Declarations only: the document ships no values, so a malformed
     # variables.local.txt or environment override must not stop an export.
     declared = set(_parse_declarations(config.variables_path()))

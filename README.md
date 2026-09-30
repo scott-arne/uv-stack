@@ -766,6 +766,12 @@ checkout, given as a path or a local `file:` URL, before anything is written
 runs. Use `${NAME}` variable references to
 make paths portable across machines.
 
+**References are matched by spelling.** On a filesystem that ignores letter
+case, such as a default macOS install, a stack file's `foo` reaches
+`profiles/Foo.yaml`, and the export ships it as `profiles/foo.yaml`, the key
+the reference names. An export that would ship that file under both spellings
+is refused and names both; spell the reference as the file is named.
+
 **Pull from another machine.** You can export and import in one command by
 piping over ssh:
 

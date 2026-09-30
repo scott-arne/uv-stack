@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -238,6 +240,71 @@ def test_a_reference_holding_a_control_character_is_named_escaped(
         build_document(config_tree, ["env:bad"])
     assert name.replace("\x1b", "\\x1b") in caught.value.message
     assert not has_control(caught.value.message)
+
+
+def _folded_root(tmp_path: Path) -> ConfigRoot:
+    """Return a root whose env ``main`` says ``foo`` beside ``profiles/Foo.yaml``.
+
+    Skips unless ``tmp_path`` is on a filesystem that folds letter case.
+    """
+    (tmp_path / "Probe").write_text("")
+    if not (tmp_path / "probe").exists():
+        pytest.skip("this filesystem does not fold letter case")
+    root = tmp_path / "root"
+    (root / "profiles").mkdir(parents=True)
+    (root / "bundles").mkdir()
+    (root / "envs" / "main").mkdir(parents=True)
+    (root / "profiles" / "Foo.yaml").write_text("includes:\n  - numpy\n")
+    (root / "envs" / "main" / "stack.txt").write_text("foo\n")
+    return ConfigRoot(root)
+
+
+def test_a_file_reached_under_two_spellings_is_refused(tmp_path: Path) -> None:
+    # The listing gives Foo and the env's reference gives foo. Shipping both
+    # makes a folding target refuse the document and gives a case-sensitive
+    # one two definitions where this root has one.
+    config = _folded_root(tmp_path)
+    with pytest.raises(ConfigError) as caught:
+        build_document(config, [])
+    assert caught.value.message == (
+        "profiles/Foo.yaml and profiles/foo.yaml name the same file on this machine."
+    )
+    assert "letter case" in caught.value.hint
+
+
+def test_an_env_named_under_two_spellings_is_refused(tmp_path: Path) -> None:
+    config = _folded_root(tmp_path)
+    with pytest.raises(ConfigError) as caught:
+        build_document(config, ["main", "env:Main"])
+    assert caught.value.message == (
+        "envs/Main/stack.txt and envs/main/stack.txt name the same file on this machine."
+    )
+
+
+def test_a_lone_reference_spelled_unlike_its_file_ships_as_spelled(tmp_path: Path) -> None:
+    # Respelling it Foo would leave the env's foo unmatched on a
+    # case-sensitive target.
+    config = _folded_root(tmp_path)
+    files = build_document(config, ["main"]).document.files
+    assert "profiles/foo.yaml" in files
+    assert "profiles/Foo.yaml" not in files
+
+
+def test_hard_linked_profiles_both_ship(config_tree: ConfigRoot) -> None:
+    # Both are names the directory stores, so neither reached the file by
+    # folding; import decides what the link means on the target.
+    config_tree.profile_path("a").write_text("includes:\n  - numpy\n")
+    os.link(config_tree.profile_path("a"), config_tree.profile_path("b"))
+    config_tree.env_dir("linked").mkdir()
+    config_tree.env_stack_path("linked").write_text("profile:a\nprofile:b\n")
+    files = build_document(config_tree, ["env:linked"]).document.files
+    assert {"profiles/a.yaml", "profiles/b.yaml"} <= files.keys()
+
+
+def test_a_symlinked_env_directory_ships_under_both_names(config_tree: ConfigRoot) -> None:
+    os.symlink("main", config_tree.env_dir("alt"))
+    files = build_document(config_tree, ["env:alt", "env:main"]).document.files
+    assert {"envs/alt/stack.txt", "envs/main/stack.txt"} <= files.keys()
 
 
 def test_closure_refuses_profile_reference_that_escapes_root(config_tree: ConfigRoot) -> None:
