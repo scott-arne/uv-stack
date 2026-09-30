@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import stat
 import sys
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -12,12 +14,16 @@ import rich_click as click
 from click.testing import CliRunner
 
 import uv_stack.cli.sync_cmd
+from tests.conftest import _lock_held_by_another_process
+from uv_stack import fsutil
 from uv_stack.cli import cli
 from uv_stack.cli.transfer_cmd import import_cmd
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.models import RemoteSettings
+from uv_stack.operations import remote as remote_ops
 from uv_stack.operations.remote import (
+    Removal,
     ResolvedRemote,
     check_destination,
     explain_exit,
@@ -25,7 +31,9 @@ from uv_stack.operations.remote import (
     load_remotes,
     parse_remotes,
     remote_command,
+    remove_remote,
     resolve_settings,
+    set_remote,
 )
 from uv_stack.runner import RecordingRunner
 
@@ -447,3 +455,324 @@ def test_sync_remote_round_trip(
     # Each run is a fresh remote process that finds no environment, so a
     # dropped --no-build would show up here as a create and a compile.
     assert not any('"compile"' in line for line in log.read_text().splitlines()[logged:])
+
+
+def _umask() -> int:
+    umask = os.umask(0)
+    os.umask(umask)
+    return umask
+
+
+def _racing(monkeypatch: pytest.MonkeyPatch, race: Callable[[], None]) -> None:
+    """Run ``race`` after the writer's read and before its publish."""
+    serialize = remote_ops._serialize_remotes
+
+    def racing(remotes: dict[str, remote_ops.RemoteSettings]) -> str:
+        race()
+        return serialize(remotes)
+
+    monkeypatch.setattr(remote_ops, "_serialize_remotes", racing)
+
+
+def test_set_remote_creates_the_file(config_tree: ConfigRoot) -> None:
+    entry = set_remote(config_tree, "gpu-box", stack="/opt/stack")
+    assert entry == RemoteSettings(stack="/opt/stack")
+    assert config_tree.remotes_path().read_text() == "gpu-box:\n  stack: /opt/stack\n"
+
+
+def test_set_remote_merges_and_keeps_host_order(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("a:\n  root: /a\nb:\n  stack: s\n")
+    assert set_remote(config_tree, "a", stack="/s") == RemoteSettings(stack="/s", root="/a")
+    set_remote(config_tree, "c", root="/c")
+    assert config_tree.remotes_path().read_text() == (
+        "a:\n  stack: /s\n  root: /a\nb:\n  stack: s\nc:\n  root: /c\n")
+
+
+def test_set_remote_twice_with_a_hash_in_a_value(config_tree: ConfigRoot) -> None:
+    # The first write quotes the value, so the second must not read it as a
+    # comment and refuse.
+    set_remote(config_tree, "a", stack="run # not a comment")
+    set_remote(config_tree, "a", root="/r")
+    assert load_remotes(config_tree) == {
+        "a": RemoteSettings(stack="run # not a comment", root="/r")}
+
+
+def test_set_remote_quotes_hosts_yaml_would_retype(config_tree: ConfigRoot) -> None:
+    for host in ("yes", "null", "1"):
+        set_remote(config_tree, host, root=f"/{host}")
+    assert load_remotes(config_tree) == {
+        "yes": RemoteSettings(root="/yes"),
+        "null": RemoteSettings(root="/null"),
+        "1": RemoteSettings(root="/1"),
+    }
+
+
+def test_set_remote_rewrites_a_null_entry_as_empty(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("laptop:\n")
+    set_remote(config_tree, "gpu-box", stack="/opt/stack")
+    assert config_tree.remotes_path().read_text() == (
+        "laptop: {}\ngpu-box:\n  stack: /opt/stack\n")
+
+
+def test_set_remote_refuses_a_commented_file(config_tree: ConfigRoot) -> None:
+    original = b"# my hosts\na:\n  root: /a\n"
+    config_tree.remotes_path().write_bytes(original)
+    with pytest.raises(ConfigError, match="contains comments") as caught:
+        set_remote(config_tree, "a", stack="/s")
+    assert caught.value.hint == "Edit it with 'stack edit remotes', or remove the comments first."
+    assert config_tree.remotes_path().read_bytes() == original
+
+
+@pytest.mark.parametrize("text", ["gpu-box: [1, 2]\n", "a: [\n", "yes:\n"])
+def test_set_remote_refuses_an_invalid_file(config_tree: ConfigRoot, text: str) -> None:
+    config_tree.remotes_path().write_text(text)
+    with pytest.raises(ConfigError, match="remotes.yaml"):
+        set_remote(config_tree, "a", stack="/s")
+    assert config_tree.remotes_path().read_text() == text
+
+
+def test_set_remote_refuses_a_non_regular_file(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().mkdir()
+    with pytest.raises(ConfigError, match="Not a regular file"):
+        set_remote(config_tree, "a", stack="/s")
+
+
+def test_set_remote_refuses_an_empty_value(config_tree: ConfigRoot) -> None:
+    with pytest.raises(ConfigError, match="Invalid remotes config") as caught:
+        set_remote(config_tree, "a", stack="")
+    assert "at least 1 character" in caught.value.message
+    assert not config_tree.remotes_path().exists()
+
+
+def test_set_remote_refuses_a_value_that_would_not_read_back(config_tree: ConfigRoot) -> None:
+    # safe_dump writes U+0085 as a line break, which loads back as a space.
+    with pytest.raises(ConfigError, match="would not read back"):
+        set_remote(config_tree, "a", root="a\x85b")
+    assert not config_tree.remotes_path().exists()
+
+
+@pytest.mark.parametrize("host,message", [
+    ("", "empty host name"),
+    ("-oProxyCommand=x", "begins with '-'"),
+    ("a\x1b[31mb", "control character"),
+    ("a\nb", "control character"),
+])
+def test_set_remote_refuses_a_bad_host_before_any_io(
+    config_tree: ConfigRoot, host: str, message: str
+) -> None:
+    with pytest.raises(UvStackError, match=message):
+        set_remote(config_tree, host, stack="/s")
+    assert not config_tree.remotes_path().exists()
+    assert not config_tree.remotes_lock_path().exists()
+
+
+def test_remove_remote_deletes_the_entry(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("a:\n  root: /a\nb: {}\n")
+    assert remove_remote(config_tree, "a") == Removal(None, ())
+    assert config_tree.remotes_path().read_text() == "b: {}\n"
+
+
+def test_remove_remote_of_the_last_entry_leaves_an_empty_mapping(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("a: {}\n")
+    remove_remote(config_tree, "a")
+    assert config_tree.remotes_path().read_text() == "{}\n"
+    assert load_remotes(config_tree) == {}
+
+
+def test_remove_remote_clears_a_field(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("a:\n  stack: s\n  root: /a\n")
+    assert remove_remote(config_tree, "a", ["root"]) == Removal(RemoteSettings(stack="s"), ())
+    assert config_tree.remotes_path().read_text() == "a:\n  stack: s\n"
+
+
+def test_remove_remote_of_the_last_field_keeps_the_entry(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("a:\n  root: /a\n")
+    assert remove_remote(config_tree, "a", ["root"]) == Removal(RemoteSettings(), ())
+    assert config_tree.remotes_path().read_text() == "a: {}\n"
+
+
+def test_remove_remote_refuses_a_missing_host(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("a: {}\n")
+    with pytest.raises(ConfigError, match="No remote named 'b'") as caught:
+        remove_remote(config_tree, "b")
+    assert caught.value.hint == "Run 'stack config remote list' to see the configured hosts."
+    assert config_tree.remotes_path().read_text() == "a: {}\n"
+
+
+def test_remove_remote_from_an_absent_file_names_the_host(config_tree: ConfigRoot) -> None:
+    with pytest.raises(ConfigError, match="No remote named 'a'"):
+        remove_remote(config_tree, "a")
+    assert not config_tree.remotes_path().exists()
+
+
+def test_remove_remote_of_an_unset_field_writes_nothing(config_tree: ConfigRoot) -> None:
+    # Not in normalized form, so any rewrite would show.
+    original = "a:\n    root:   /a\n"
+    config_tree.remotes_path().write_text(original)
+    assert remove_remote(config_tree, "a", ["stack"]) == Removal(
+        RemoteSettings(root="/a"), ("stack",))
+    assert config_tree.remotes_path().read_text() == original
+
+
+def test_remove_remote_notes_only_the_unset_fields(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("a:\n  stack: s\n")
+    assert remove_remote(config_tree, "a", ["root", "stack"]) == Removal(
+        RemoteSettings(), ("root",))
+    assert config_tree.remotes_path().read_text() == "a: {}\n"
+
+
+def test_remove_remote_handles_a_repeated_field_once(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("a:\n  stack: s\n")
+    assert remove_remote(config_tree, "a", ["root", "root"]).not_set == ("root",)
+    assert remove_remote(config_tree, "a", ["stack", "stack"]) == Removal(RemoteSettings(), ())
+
+
+def test_remove_remote_takes_hosts_set_would_refuse(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text('"-bad": {}\n"a\\eb": {}\nok: {}\n')
+    remove_remote(config_tree, "-bad")
+    remove_remote(config_tree, "a\x1bb")
+    assert config_tree.remotes_path().read_text() == "ok: {}\n"
+
+
+def test_remove_remote_refuses_a_commented_file(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("a: {} # c\n")
+    with pytest.raises(ConfigError, match="contains comments"):
+        remove_remote(config_tree, "a")
+    assert config_tree.remotes_path().read_text() == "a: {} # c\n"
+
+
+def test_set_remote_writes_through_a_symlink(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    real = tmp_path / "dotfiles" / "remotes.yaml"
+    real.parent.mkdir()
+    real.write_text("a: {}\n")
+    config_tree.remotes_path().symlink_to(real)
+    set_remote(config_tree, "a", root="/r")
+    assert config_tree.remotes_path().is_symlink()
+    assert os.readlink(config_tree.remotes_path()) == str(real)
+    assert real.read_text() == "a:\n  root: /r\n"
+
+
+def test_set_remote_keeps_a_private_mode(config_tree: ConfigRoot) -> None:
+    config_tree.remotes_path().write_text("a: {}\n")
+    config_tree.remotes_path().chmod(0o600)
+    set_remote(config_tree, "a", root="/r")
+    assert stat.S_IMODE(config_tree.remotes_path().stat().st_mode) == 0o600
+
+
+def test_set_remote_keeps_a_private_mode_through_a_symlink(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    real = tmp_path / "remotes-real.yaml"
+    real.write_text("a: {}\n")
+    real.chmod(0o600)
+    config_tree.remotes_path().symlink_to(real)
+    set_remote(config_tree, "a", root="/r")
+    assert stat.S_IMODE(real.stat().st_mode) == 0o600
+    assert config_tree.remotes_path().is_symlink()
+
+
+def test_set_remote_gives_a_new_file_the_conventional_mode(config_tree: ConfigRoot) -> None:
+    set_remote(config_tree, "a", root="/r")
+    assert stat.S_IMODE(config_tree.remotes_path().stat().st_mode) == 0o666 & ~_umask()
+
+
+def test_set_remote_refuses_while_the_lock_is_held(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fsutil, "_LOCK_TIMEOUT", 0.05)
+    with _lock_held_by_another_process(config_tree.remotes_lock_path()), \
+            pytest.raises(ConfigError, match="updating 'remotes.yaml'"):
+        set_remote(config_tree, "a", root="/r")
+    assert not config_tree.remotes_path().exists()
+
+
+def test_a_rewrite_during_the_update_is_not_overwritten(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fsutil, "_LOCK_AVAILABLE", False)
+    path = config_tree.remotes_path()
+    path.write_text("a: {}\n")
+    _racing(monkeypatch, lambda: path.write_text("b: {}\n"))
+    with pytest.raises(ConfigError, match="changed while it was being updated") as caught:
+        set_remote(config_tree, "a", root="/r")
+    assert caught.value.hint == "Run the command again."
+    assert path.read_text() == "b: {}\n"
+
+
+def test_a_file_created_during_the_update_is_not_overwritten(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = config_tree.remotes_path()
+    _racing(monkeypatch, lambda: path.write_text("b: {}\n"))
+    with pytest.raises(ConfigError, match="changed while it was being updated"):
+        set_remote(config_tree, "a", root="/r")
+    assert path.read_text() == "b: {}\n"
+
+
+def test_a_link_retargeted_during_the_update_is_refused(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Identical text in both files, so only the resolution check can see it.
+    first = tmp_path / "first.yaml"
+    second = tmp_path / "second.yaml"
+    first.write_text("a: {}\n")
+    second.write_text("a: {}\n")
+    path = config_tree.remotes_path()
+    path.symlink_to(first)
+
+    def retarget() -> None:
+        path.unlink()
+        path.symlink_to(second)
+
+    _racing(monkeypatch, retarget)
+    with pytest.raises(ConfigError, match="changed while it was being updated"):
+        set_remote(config_tree, "a", root="/r")
+    assert os.readlink(path) == str(second)
+    assert first.read_text() == "a: {}\n"
+    assert second.read_text() == "a: {}\n"
+
+
+def test_a_root_link_retargeted_during_the_update_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The config root is the link and remotes.yaml is a regular file in both
+    # trees, with identical text, so only resolving the whole path can see it.
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    for tree in (first, second):
+        tree.mkdir()
+        (tree / "remotes.yaml").write_text("a: {}\n")
+    link = tmp_path / "root"
+    link.symlink_to(first)
+
+    def retarget() -> None:
+        link.unlink()
+        link.symlink_to(second)
+
+    _racing(monkeypatch, retarget)
+    with pytest.raises(ConfigError, match="changed while it was being updated"):
+        set_remote(ConfigRoot(link), "a", root="/r")
+    assert (first / "remotes.yaml").read_text() == "a: {}\n"
+    assert (second / "remotes.yaml").read_text() == "a: {}\n"
+
+
+def test_a_root_link_retargeted_before_the_first_write_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Neither tree has the file, so both reads see the same absence.
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    link = tmp_path / "root"
+    link.symlink_to(first)
+
+    def retarget() -> None:
+        link.unlink()
+        link.symlink_to(second)
+
+    _racing(monkeypatch, retarget)
+    with pytest.raises(ConfigError, match="changed while it was being updated"):
+        set_remote(ConfigRoot(link), "a", root="/r")
+    assert not (first / "remotes.yaml").exists()
+    assert not (second / "remotes.yaml").exists()
