@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import stat
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import NoReturn
@@ -47,12 +48,17 @@ def validate_name(kind: str, name: str) -> None:
         or name.startswith("-")
         or any(char.isspace() for char in name)
         or has_control(name)
+        # A lone surrogate is how Python decodes a file name that is not valid
+        # UTF-8. It cannot be encoded for a UTF-8 terminal, and a filesystem
+        # such as APFS refuses the name outright.
+        or any(unicodedata.category(char) == "Cs" for char in name)
     ):
         raise ConfigError(
             f"Invalid {kind} name: '{escape_controls(name)}'",
             hint=(
                 "Names are file stems: no path separators, dot segments, "
-                "':', '@', whitespace, control characters, or leading '-'. "
+                "':', '@', whitespace, control characters, invalid UTF-8, "
+                "or leading '-'. "
                 "Anything already on disk under such a name stays listed, "
                 "because hiding it would be no easier to act on; renaming it "
                 "on disk is what makes it nameable."

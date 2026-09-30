@@ -225,6 +225,21 @@ def test_whole_root_export_refuses_a_control_character_in_a_name_on_disk(
     assert not has_control(caught.value.message)
 
 
+def test_whole_root_export_refuses_a_name_on_disk_that_is_not_valid_utf8(
+    config_tree: ConfigRoot,
+) -> None:
+    # Python reads such a name as lone surrogates, which no UTF-8 terminal
+    # can print, so the name is refused like any other unusable file stem.
+    path = config_tree.profiles_dir / os.fsdecode(b"a\xffb.yaml")
+    try:
+        path.write_text("includes:\n  - numpy\n")
+    except OSError:
+        pytest.skip("this filesystem refuses a file name that is not valid UTF-8")
+    with pytest.raises(ConfigError) as caught:
+        build_document(config_tree, [])
+    assert "a\\udcffb" in caught.value.message
+
+
 @pytest.mark.parametrize("name", ["a\x1bb", "../a\x1bb"])
 def test_a_reference_holding_a_control_character_is_named_escaped(
     config_tree: ConfigRoot, name: str

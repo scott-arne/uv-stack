@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from unittest import mock
 
 import pytest
@@ -1028,6 +1029,21 @@ def test_validate_name_refuses_a_control_character(bad: str, escaped: str):
     assert excinfo.value.message == f"Invalid profile name: '{escaped}'"
     assert not has_control(excinfo.value.message)
     assert "control characters" in (excinfo.value.hint or "")
+
+
+def test_validate_name_refuses_a_name_that_is_not_valid_utf8():
+    """Python reads a file name that is not valid UTF-8 as lone surrogates.
+
+    No UTF-8 terminal can print one, so the name is refused and echoed escaped.
+    """
+    from uv_stack.operations.scaffold import validate_name
+
+    with pytest.raises(ConfigError) as excinfo:
+        validate_name("profile", "a\udcffb")
+    message = excinfo.value.message
+    assert message == "Invalid profile name: 'a\\udcffb'"
+    assert not any(unicodedata.category(char) == "Cs" for char in message)
+    assert "invalid UTF-8" in (excinfo.value.hint or "")
 
 
 @pytest.mark.parametrize("good", ["ds", "my-env_2.0", "café", "Foo"])
