@@ -716,7 +716,10 @@ def check_meanings(
         for token in _bare_tokens(doc_root, parsed):
             _refuse_change(token, config.root / key, _meaning(doc_root, token),
                            _meaning(staged.root, token), incoming=True)
-    shipped = set(document.files)
+    # Compared by filesystem identity, not spelling: on a target that folds
+    # letter case, envs/Main/stack.txt is the file a shipped envs/main/stack.txt
+    # replaces, and its old tokens are gone after the import.
+    shipped = {_physical_identity(config.root / key) for key in document.files}
     # Built from the listed names directly, not through parse_file_key: a
     # target bundle whose stem validate_name rejects is still reachable by
     # '@stem', so its tokens need the check as much as any other file's.
@@ -724,7 +727,7 @@ def check_meanings(
     target += [FileKey("bundle", n, None) for n in config.list_bundles()]
     for parsed in target:
         key = file_key(parsed.kind, parsed.name, parsed.filename)
-        if key in shipped:
+        if _physical_identity(config.root / key) in shipped:
             continue
         # A target file this check cannot read propagates its ConfigError: the
         # import cannot show that file's tokens keep their meaning, so it stops.

@@ -634,6 +634,28 @@ def test_a_replaced_env_old_token_is_not_checked(config_tree: ConfigRoot, tmp_pa
     _meanings(target, _raw(config_tree, "main", "profile:utils"))
 
 
+def test_a_folded_replaced_env_old_token_is_not_checked(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.env_dir("Main").mkdir(parents=True)
+    target.env_stack_path("Main").write_text("utils\n")
+    if not target.env_dir("main").exists():
+        pytest.skip("this filesystem does not fold letter case")
+    _meanings(target, _raw(config_tree, "main", "profile:utils"))
+
+
+def test_a_folded_replaced_bundle_old_token_is_not_checked(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.bundles_dir.mkdir(parents=True)
+    target.bundle_path("STANDARD").write_text("includes:\n  - utils\n")
+    if not target.bundle_path("standard").exists():
+        pytest.skip("this filesystem does not fold letter case")
+    _meanings(target, _raw(config_tree, "bundle:standard", "profile:utils"))
+
+
 def test_blank_bundle_includes_are_skipped(config_tree: ConfigRoot, tmp_path: Path) -> None:
     config_tree.bundle_path("standard").write_text(
         "includes:\n  - '   '\n  - ds\n  - chem\n  - utils\n")
