@@ -26,6 +26,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   and a pin report shows how many pins were kept, changed, dropped, or added.
   `--no-build` installs definitions without building. `--recreate` wipes and
   rebuilds each environment from the shipped pins (plain dotted Python only).
+- `stack sync remote [ITEMS...] DEST` exports the named items (or the whole
+  root) and imports them on a remote machine over ssh, running `ssh DEST <stack>
+  import -` with the document on stdin. The local exit status is the remote's.
+  `--remote-stack` and `--remote-root` customize the remote command and root.
+- `remotes.yaml` maps host names to optional `stack` and `root` settings,
+  overridden by `--remote-stack` and `--remote-root`. Edited by hand. Portable
+  across machines. `stack doctor` reports an invalid file.
 
 ## 0.6.0 - 2026-09-28
 

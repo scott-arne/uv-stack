@@ -822,6 +822,80 @@ uv during the build.
 prints the re-run command for the failed environments plus any dependents (other
 environments using changed profiles or bundles) that were not rebuilt.
 
+### stack sync remote
+
+`stack sync remote [ITEMS...] DEST` exports the named items (or the whole root
+if no ITEMS are given) and imports them on a remote machine, running:
+
+```bash
+ssh DEST <stack> [--root ROOT] import - [FLAGS]
+```
+
+The document is sent to ssh's stdin; ssh's stdout and stderr stream to the local
+terminal as they arrive; the local exit status is the remote's. Everything the
+import does—pre-flight checks, building environments, pin reports—happens on the
+remote and prints locally.
+
+**Re-run commands are for the remote.** When a build fails during the import,
+the remote prints re-run commands (`stack sync env NAME ...`). Those must be run
+on the remote machine (for example over `ssh DEST`), not locally.
+
+**Customizing the remote command.** `--remote-stack CMD` sets the stack command
+to run on the remote. `--remote-root PATH` sets the remote's config root. Both
+can be specified per-host in `remotes.yaml` (see below), with the command-line
+flags taking precedence.
+
+**Exit status hints:**
+
+- Exit 255 (ssh's connection failure) gets a connection error message.
+- Exit 127 (command not found) includes a hint to run `uv tool install uv-stack`
+  on the remote and add a `remotes.yaml` entry mapping the host to
+  `stack: ~/.local/bin/stack`.
+- Exit 2 with "No such command 'import'" in the stderr means the remote has an
+  old version of uv-stack; upgrade it on the remote.
+
+**Options forwarded to the remote:**
+
+- `--overwrite`: Replace files that differ and remove environment files the
+  source no longer has.
+- `--no-build`: Install definitions without building environments.
+- `--recreate`: Wipe and rebuild each environment from the shipped pins.
+- `--dry-run`: Report what the remote would change without writing anything.
+  This still probes the remote's micromamba installation.
+- `--strict`: Refuse unqualified names that fall through to package literals.
+
+**Using ssh prompts.** Password and passphrase prompts still work—ssh reads them
+from the terminal, not stdin.
+
+**Without a remote uv-stack install.** You can use `uvx --from uv-stack stack`
+as the `stack:` value in `remotes.yaml` for a remote that doesn't have uv-stack
+permanently installed.
+
+**Pull from another machine.** To pull items from a remote into the local
+machine, reverse the direction by piping the remote export into a local import:
+
+```bash
+ssh HOST stack export ITEMS | stack import -
+```
+
+### remotes.yaml
+
+A root-level file mapping host names to optional settings:
+
+```yaml
+gpu-box:
+  stack: ~/.local/bin/stack
+  root: /data/python-envs
+```
+
+Each entry allows only `stack` (the command to run on the remote) and `root`
+(the remote's config root), both optional non-empty strings. Command-line flags
+(`--remote-stack`, `--remote-root`) take precedence over the file's values.
+
+The file is portable across machines—the remote's paths are properties of the
+remote, not of the machine that pushes. Edited by hand. `stack doctor` reports
+an unreadable or invalid `remotes.yaml` file.
+
 ## Tips and gotchas
 
 - **Edit sources, not generated files.** `requirements.in`,

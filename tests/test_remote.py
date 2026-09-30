@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import sys
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -202,3 +205,83 @@ def test_sync_remote_refuses_empty_flag_values(
                                       "main", "box", flag, ""])
     assert result.exit_code == 2 and runner.commands == []
     assert message in result.output
+
+
+_FAKE_STACK = '''
+import json, sys
+from pathlib import Path
+from uv_stack.commands import micromamba_python_info, micromamba_python_path
+from uv_stack.runner import CommandResult, RecordingRunner
+import uv_stack.cli.transfer_cmd, uv_stack.cli.upgrade
+
+log = Path(sys.argv.pop(1))
+# The env is absent until micromamba creates it; after that the interpreter
+# probe must report a path, or upgrade_env cannot find one to sync into.
+created = False
+
+def respond(cmd):
+    global created
+    with log.open("a") as handle:
+        handle.write(json.dumps(cmd.args) + "\\n")
+    if cmd.args[1:2] == ["create"]:
+        created = True
+    if cmd.args == micromamba_python_path("main").args:
+        return CommandResult(0, "/envs/main/bin/python\\n") if created else CommandResult(1, "")
+    if cmd.args[:3] == ["uv", "pip", "compile"]:
+        out = cmd.args[cmd.args.index("-o") + 1]
+        Path(out).write_text("numpy==1.26.4\\n")
+    if cmd.args == micromamba_python_info("main").args:
+        return CommandResult(1, "")
+    return CommandResult(0, "")
+
+runner = RecordingRunner(responder=respond)
+uv_stack.cli.transfer_cmd.SubprocessRunner = lambda: runner
+uv_stack.cli.upgrade.SubprocessRunner = lambda: runner
+from uv_stack.cli import main
+main()
+'''
+
+
+def _fake_ssh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    ssh = bin_dir / "ssh"
+    ssh.write_text('#!/bin/sh\nshift\nexec /bin/sh -c "$1"\n')
+    ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    script = tmp_path / "fake_stack.py"
+    script.write_text(_FAKE_STACK)
+    log = tmp_path / "commands.log"
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(script))} {shlex.quote(str(log))}", log
+
+
+def main_exit(argv: list[str]) -> int:
+    with pytest.raises(SystemExit) as exited:
+        cli.main(args=argv, prog_name="stack")
+    code = exited.value.code
+    return code if isinstance(code, int) else 0
+
+
+def test_sync_remote_round_trip(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    stack, log = _fake_ssh(tmp_path, monkeypatch)
+    remote = ConfigRoot(tmp_path / "remote")
+    remote.root.mkdir()
+    base = ["--root", str(config_tree.root), "sync", "remote", "main", "box",
+            "--remote-stack", stack, "--remote-root", str(remote.root)]
+
+    assert main_exit(base) == 0
+    assert remote.env_stack_path("main").read_text() == "@standard\n"
+    assert any('"compile"' in line for line in log.read_text().splitlines())
+
+    remote.profile_path("ds").write_text("includes:\n  - scipy\n")
+    assert main_exit(base) == 1
+    captured = capfd.readouterr()
+    assert "profiles/ds.yaml (this machine)" in captured.out + captured.err
+
+    assert remote.profile_path("ds").read_text() == "includes:\n  - scipy\n"
+
+    assert main_exit([*base, "--overwrite", "--no-build"]) == 0
+    assert remote.profile_path("ds").read_text() == config_tree.profile_path("ds").read_text()
