@@ -1732,6 +1732,29 @@ def test_a_present_checkout_and_a_remote_editable_are_not_flagged(
     assert not [f for f in diagnose(config_tree) if f.kind == "missing-checkout"]
 
 
+def test_a_missing_file_url_checkout_is_a_warning(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text(f"DEV={tmp_path / 'gone'}\n")
+    config_tree.profile_path("dev").write_text("includes:\n  - -e file://${DEV}/widget\n")
+    finding = next(f for f in diagnose(config_tree) if f.kind == "missing-checkout")
+    assert finding.level == "warn"
+    assert str(tmp_path / "gone" / "widget") in finding.message
+
+
+def test_a_present_file_url_checkout_and_another_hosts_file_url_are_not_flagged(
+    config_tree: ConfigRoot, tmp_path: Path
+):
+    (tmp_path / "co" / "widget").mkdir(parents=True)
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.variables_local_path().write_text(f"DEV={tmp_path / 'co'}\n")
+    config_tree.profile_path("dev").write_text(
+        "includes:\n  - -e file://${DEV}/widget\n  - -e file://server/share/widget\n"
+    )
+    assert not [f for f in diagnose(config_tree) if f.kind == "missing-checkout"]
+
+
 def test_the_long_editable_spelling_is_recognized(
     config_tree: ConfigRoot, tmp_path: Path
 ):

@@ -1027,6 +1027,38 @@ def test_preflight_checks_a_relative_editable_against_the_working_directory(
     _build_plan(target, _raw(config_tree, "main"))
 
 
+@pytest.mark.parametrize("flag", ["-e ", "-e="])
+def test_preflight_refuses_a_missing_file_url_editable_before_writing(
+    config_tree: ConfigRoot, tmp_path: Path, flag: str
+) -> None:
+    # A local file URL names a checkout as surely as a path does; passing over
+    # it as remote let the definitions be written before uv failed on it.
+    checkout = tmp_path / "co" / "pkg"
+    config_tree.profile_path("ds").write_text(f"includes:\n  - {flag}{checkout.as_uri()}\n")
+    target = ConfigRoot(tmp_path / "target")
+    with pytest.raises(ConfigError) as caught:
+        _build_plan(target, _raw(config_tree, "main"), dry_run=False)
+    assert str(checkout) in caught.value.message
+    assert caught.value.hint is not None and "--no-build" in caught.value.hint
+    assert not target.profile_path("ds").exists()
+    assert not target.env_stack_path("main").exists()
+    checkout.mkdir(parents=True)
+    assert _build_plan(target, _raw(config_tree, "main")).builds == [BuildStep("main", "create")]
+
+
+def test_preflight_checks_a_file_url_editable_after_expanding_its_variable(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    config_tree.variables_path().write_text("DEV\n")
+    config_tree.profile_path("ds").write_text("includes:\n  - -e file://${DEV}/pkg\n")
+    target = ConfigRoot(tmp_path / "target")
+    target.root.mkdir(parents=True)
+    target.variables_local_path().write_text(f"DEV={tmp_path / 'dev'}\n")
+    with pytest.raises(ConfigError) as caught:
+        _build_plan(target, _raw(config_tree, "main"))
+    assert str(tmp_path / "dev" / "pkg") in caught.value.message
+
+
 def test_preflight_reports_a_nul_in_a_tilde_user_editable(
     config_tree: ConfigRoot, tmp_path: Path
 ) -> None:

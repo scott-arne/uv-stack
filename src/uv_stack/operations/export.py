@@ -257,8 +257,9 @@ def _file_url_path(entry: str) -> str | None:
 
 
 def _is_absolute_path(entry: str) -> bool:
-    # A file URL always names an absolute path, but editable_target and the
-    # '://' test below both pass over it as a remote location.
+    # A file URL always names an absolute path, but editable_target reads only
+    # a local editable one, and the '://' test below passes over the rest as
+    # a remote location.
     url_path = _file_url_path(entry)
     if url_path is not None:
         return "${" not in url_path

@@ -122,3 +122,28 @@ def test_editable_target_extracts_the_path() -> None:
     assert editable_target("-e ./pkg") == "./pkg"
     assert editable_target("--editable=/src/pkg") == "/src/pkg"
     assert editable_target("numpy") is None
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        ("-e file:///src/pkg", "/src/pkg"),
+        ("-e=file:///src/pkg", "/src/pkg"),
+        ("--editable file://localhost/src/pkg", "/src/pkg"),
+        ("-e file://LOCALHOST/src/pkg", "/src/pkg"),
+        ("-e file:/src/pkg", "/src/pkg"),
+        ("-e file:///src/my%20pkg", "/src/my pkg"),
+        ("-e file:///src/pkg#egg=pkg", "/src/pkg"),
+        ("-e FILE:///src/pkg", "/src/pkg"),
+        ("-e file://server/share/pkg", None),
+        ("-e file:pkg", None),
+        ("-e git+file:///src/pkg", None),
+        ("-e https://example.invalid/x.tar.gz", None),
+        # urlsplit raises on the unclosed bracket; the entry is left to uv.
+        ("-e file://[/src/pkg", None),
+    ],
+)
+def test_editable_target_reads_a_local_file_url_as_its_path(
+    entry: str, expected: str | None
+) -> None:
+    assert editable_target(entry) == expected

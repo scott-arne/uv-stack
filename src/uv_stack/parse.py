@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from uv_stack.fsutil import read_text_utf8
 
@@ -111,7 +112,11 @@ def editable_target(entry: str) -> str | None:
 
     An entry counts as a local editable when its first whitespace-separated
     token is ``-e`` or ``--editable``, alone or with the operand attached by
-    ``=``, and the value carries no URL scheme. Anything else is a remote
+    ``=``, and the value is either a plain path or a local ``file:`` URL: one
+    with an empty or ``localhost`` authority and an absolute path, such as
+    ``file:///src/pkg`` or ``file:/src/pkg``. A local file URL yields the path
+    it names, percent-decoded, without its query or fragment. Any other URL,
+    including a file URL naming another host or a relative path, is a remote
     install with no path to check.
 
     The operand is extracted verbatim from the original entry to preserve
@@ -188,7 +193,22 @@ def editable_target(entry: str) -> str | None:
             if after < len(remainder) and remainder[after] in ("-", "#"):
                 target = remainder[:index]
                 break
-    if "://" in target or target.startswith("git+"):
+    # A local file URL names a checkout on this machine exactly as a path does,
+    # so passing over it as remote would let a missing one reach uv unchecked.
+    # Only 'file:' is read this way; another scheme without '//' still falls
+    # through as a literal path, as it always has.
+    if target[:5].lower() == "file:":
+        # urlsplit raises ValueError on a malformed authority such as an
+        # unclosed '['. uv cannot install from that either, so it is left to
+        # uv's own error rather than raised out of doctor or the pre-flight.
+        try:
+            url = urlsplit(target)
+        except ValueError:
+            return None
+        if url.netloc.lower() not in ("", "localhost") or not url.path.startswith("/"):
+            return None
+        target = unquote(url.path)
+    elif "://" in target or target.startswith("git+"):
         return None
     # pip reads '-e ./pkg[dev]' as the path './pkg' carrying extras, so probing
     # the whole token would report a checkout that is present as missing. The
