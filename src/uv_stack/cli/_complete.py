@@ -12,6 +12,7 @@ from typing import Any
 import rich_click as click
 
 from uv_stack.config import ConfigRoot
+from uv_stack.operations.remote import load_remotes
 
 #: KIND choices for the commands that accept a project as well as the three
 #: named resources: ``stack show`` and ``stack edit``. Shared because the two
@@ -70,3 +71,14 @@ def complete_show_names(
     except Exception:
         return []
     return [name for name in names if name.startswith(incomplete)]
+
+
+def complete_remote_hosts(
+    ctx: click.Context, param: Any, incomplete: str
+) -> list[str]:
+    """Complete HOST for ``stack config remote set`` and ``remove``."""
+    try:
+        hosts = load_remotes(_config_from_ctx(ctx))
+    except Exception:
+        return []
+    return [host for host in hosts if host.startswith(incomplete)]

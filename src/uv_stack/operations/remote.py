@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.fsutil import atomic_write, name_lock, read_text_utf8, require_regular_file
-from uv_stack.hints import has_control
+from uv_stack.hints import escape_controls, has_control
 from uv_stack.models import RemoteSettings
 from uv_stack.runner import Command
 
@@ -342,6 +342,22 @@ def resolve_settings(config: ConfigRoot, dest: str, *, stack_flag: str | None,
     """
     entry = load_remotes(config).get(dest, RemoteSettings())
     return ResolvedRemote(stack_flag or entry.stack or _DEFAULT_STACK, root_flag or entry.root)
+
+
+def entry_lines(host: str, settings: RemoteSettings) -> list[str]:
+    """Render one host's entry as ``stack config remote list`` prints it.
+
+    An unset field shows its effective value. Hosts and values are escaped
+    because a hand-written one may hold a control character.
+
+    :param host: The host name.
+    :param settings: Its stored settings.
+    :returns: The host line and one indented line per field.
+    """
+    stack = settings.stack or f"{_DEFAULT_STACK} (default)"
+    root = settings.root or "(remote's default)"
+    return [escape_controls(host), f"  stack: {escape_controls(stack)}",
+            f"  root: {escape_controls(root)}"]
 
 
 def remote_command(dest: str, stack: str, root: str | None, flags: list[str]) -> Command:

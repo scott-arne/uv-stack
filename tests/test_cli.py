@@ -4015,6 +4015,29 @@ def test_complete_show_names_dispatches_on_kind(tmp_path: Path):
     assert complete_show_names(ctx, None, "d") == ["ds"]
 
 
+def test_complete_remote_hosts_lists_the_configured_hosts(config_tree: ConfigRoot):
+    import click as _click
+
+    from uv_stack.cli._complete import complete_remote_hosts
+
+    config_tree.remotes_path().write_text("gpu-box: {}\nlaptop: {}\n")
+    ctx = _click.Context(cli)
+    ctx.params = {"root": str(config_tree.root)}
+    assert complete_remote_hosts(ctx, None, "") == ["gpu-box", "laptop"]
+    assert complete_remote_hosts(ctx, None, "g") == ["gpu-box"]
+
+
+def test_complete_remote_hosts_survives_an_invalid_file(config_tree: ConfigRoot):
+    import click as _click
+
+    from uv_stack.cli._complete import complete_remote_hosts
+
+    config_tree.remotes_path().write_text("a: [\n")
+    ctx = _click.Context(cli)
+    ctx.params = {"root": str(config_tree.root)}
+    assert complete_remote_hosts(ctx, None, "") == []
+
+
 def test_help_contains_no_rest_double_backticks():
     runner = CliRunner()
     for args in (
@@ -4032,6 +4055,10 @@ def test_help_contains_no_rest_double_backticks():
         ["status", "--help"],
         ["doctor", "--help"],
         ["config", "--help"],
+        ["config", "remote", "--help"],
+        ["config", "remote", "list", "--help"],
+        ["config", "remote", "set", "--help"],
+        ["config", "remote", "remove", "--help"],
         ["init", "--help"],
         ["completion", "--help"],
     ):
@@ -5691,6 +5718,125 @@ def test_config_portable_reports_a_malformed_block(config_tree: ConfigRoot):
     )
     assert result.exit_code != 0
     assert "Malformed" in result.output
+
+
+def _config_remote(config_tree: ConfigRoot, *args: str, color: bool = False):
+    return CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "remote", *args], color=color
+    )
+
+
+def test_config_remote_list_fills_in_defaults(config_tree: ConfigRoot):
+    config_tree.remotes_path().write_text(
+        "gpu-box:\n  stack: PATH=$HOME/.local/bin:$PATH stack\n  root: /data/python-envs\n"
+        "laptop:\n"
+    )
+    result = _config_remote(config_tree, "list")
+    assert result.exit_code == 0, result.output
+    assert result.output == (
+        "gpu-box\n"
+        "  stack: PATH=$HOME/.local/bin:$PATH stack\n"
+        "  root: /data/python-envs\n"
+        "laptop\n"
+        "  stack: stack (default)\n"
+        "  root: (remote's default)\n"
+    )
+
+
+def test_config_remote_list_json_gives_the_stored_values(config_tree: ConfigRoot):
+    import json
+
+    config_tree.remotes_path().write_text("gpu-box:\n  stack: /opt/stack\nlaptop:\n")
+    result = _config_remote(config_tree, "list", "--json")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {
+        "gpu-box": {"stack": "/opt/stack", "root": None},
+        "laptop": {"stack": None, "root": None},
+    }
+
+
+@pytest.mark.parametrize("text", [None, "", "# nothing yet\n"])
+def test_config_remote_list_with_no_remotes(config_tree: ConfigRoot, text: str | None):
+    import json
+
+    if text is not None:
+        config_tree.remotes_path().write_text(text)
+    result = _config_remote(config_tree, "list")
+    assert result.exit_code == 0, result.output
+    assert result.output == f"No remotes in {config_tree.remotes_path()}.\n"
+    as_json = _config_remote(config_tree, "list", "--json")
+    assert json.loads(as_json.output) == {}
+
+
+@pytest.mark.parametrize("host", ["gpu-box", "-bad", ""])
+def test_config_remote_set_needs_a_field(config_tree: ConfigRoot, host: str):
+    result = _config_remote(config_tree, "set", "--", host)
+    assert result.exit_code == 2
+    assert "needs --stack, --root, or both" in _combined_output(result)
+    assert not config_tree.remotes_path().exists()
+
+
+def test_config_remote_set_prints_the_entry(config_tree: ConfigRoot):
+    result = _config_remote(config_tree, "set", "gpu-box", "--stack", "/opt/stack")
+    assert result.exit_code == 0, result.output
+    assert result.output == "gpu-box\n  stack: /opt/stack\n  root: (remote's default)\n"
+    assert config_tree.remotes_path().read_text() == "gpu-box:\n  stack: /opt/stack\n"
+
+
+def test_config_remote_set_refuses_a_dash_host(config_tree: ConfigRoot, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
+    result = _config_remote(config_tree, "set", "--root", "/r", "--", "-bad")
+    assert result.exit_code == 1
+    assert "begins with '-'" in _flat_panel(result)
+    assert not config_tree.remotes_path().exists()
+
+
+def test_config_remote_remove_prints_the_removed_line(config_tree: ConfigRoot):
+    config_tree.remotes_path().write_text("gpu-box: {}\nlaptop: {}\n")
+    result = _config_remote(config_tree, "remove", "gpu-box")
+    assert result.exit_code == 0, result.output
+    assert result.output == f"Removed gpu-box from {config_tree.remotes_path()}.\n"
+    assert config_tree.remotes_path().read_text() == "laptop: {}\n"
+
+
+def test_config_remote_remove_field_notes_what_was_not_set(config_tree: ConfigRoot):
+    config_tree.remotes_path().write_text("gpu-box:\n  root: /data\n")
+    result = _config_remote(config_tree, "remove", "gpu-box", "stack", "root")
+    assert result.exit_code == 0, result.output
+    assert result.output == (
+        "stack is not set for gpu-box.\n"
+        "gpu-box\n"
+        "  stack: stack (default)\n"
+        "  root: (remote's default)\n"
+    )
+    assert config_tree.remotes_path().read_text() == "gpu-box: {}\n"
+
+
+def test_config_remote_remove_of_a_missing_host_is_refused(config_tree: ConfigRoot, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "200")
+    config_tree.remotes_path().write_text("gpu-box: {}\n")
+    result = _config_remote(config_tree, "remove", "gpu")
+    assert result.exit_code == 1
+    assert "No remote named 'gpu'" in _flat_panel(result)
+    assert "stack config remote list" in _flat_panel(result)
+
+
+def test_config_remote_output_escapes_a_control_character(config_tree: ConfigRoot):
+    # color=True stops CliRunner stripping ANSI sequences from the output, so
+    # a raw ESC reaching echo would still be there for the assertions to find.
+    path = config_tree.remotes_path()
+    path.write_text('"a\\e[31mb":\n  root: /r\n')
+    listed = _config_remote(config_tree, "list", color=True)
+    assert listed.exit_code == 0, listed.output
+    assert listed.output.startswith("a\\x1b[31mb\n")
+    assert "\x1b" not in listed.output
+    cleared = _config_remote(config_tree, "remove", "a\x1b[31mb", "root", color=True)
+    assert cleared.exit_code == 0, cleared.output
+    assert cleared.output.startswith("a\\x1b[31mb\n")
+    assert "\x1b" not in cleared.output
+    removed = _config_remote(config_tree, "remove", "a\x1b[31mb", color=True)
+    assert removed.exit_code == 0, removed.output
+    assert removed.output == f"Removed a\\x1b[31mb from {path}.\n"
 
 
 def test_repeated_environment_names_are_upgraded_once(tmp_path: Path):

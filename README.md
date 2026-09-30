@@ -294,6 +294,9 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack completion bash\|zsh\|fish` | Print the shell-completion script |
 | `stack config init` | Create missing config directories (bare primitive) |
 | `stack config portable` | Write the managed `.gitignore` block so the config root can be committed |
+| `stack config remote list` | Per-host settings for `stack sync remote`, with defaults filled in (`--json` for the stored values) |
+| `stack config remote set HOST` | Set a host's `--stack` command, `--root`, or both in `remotes.yaml` |
+| `stack config remote remove HOST [stack\|root]...` | Remove a host's entry, or only the named fields |
 
 ### Editing configuration
 
@@ -1011,10 +1014,22 @@ Each entry allows only `stack` (the command to run on the remote) and `root`
 - **Quote host names that YAML reads as something else.** A key such as `yes`,
   `no`, `null`, or `1` is a boolean, null, or number to YAML, and
   `stack sync remote` refuses the file until it is quoted (`"yes":`).
+  `stack config remote set` quotes such names itself.
+
+Two commands change the file. `stack edit remotes` opens it in your editor and
+validates it on exit (see [Editing configuration](#editing-configuration)).
+`stack config remote set HOST --stack CMD --root PATH` merges the given fields
+into HOST's entry, creating it if needed. `stack config remote remove HOST`
+deletes the entry, and `remove HOST stack` or `remove HOST root` clears only
+that field, leaving `HOST: {}` when none remain. `stack config remote list`
+prints each entry with an unset field shown as its default. `set` and `remove`
+rewrite the whole file, normalizing its quoting and indentation, so they refuse
+a file that holds comments, which the rewrite would drop; edit a commented file
+with `stack edit remotes` instead.
 
 The file is portable across machines—the remote's paths are properties of the
-remote, not of the machine that pushes. Edited by hand. `stack doctor` reports
-an unreadable or invalid `remotes.yaml` file.
+remote, not of the machine that pushes. `stack doctor` reports an unreadable or
+invalid `remotes.yaml` file.
 
 ## Tips and gotchas
 
