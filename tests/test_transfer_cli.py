@@ -172,10 +172,10 @@ def test_import_refuses_a_nul_in_a_name_without_writing(
 
 
 def _fake_build(monkeypatch: pytest.MonkeyPatch, target: ConfigRoot, *, fail: bool = False,
-                lock_text: str = "numpy==1.26.4\nrich==14.0.0\n") -> dict[str, bool]:
+                lock_text: str = "numpy==1.26.4\nrich==14.0.0\n") -> dict[str, bool | str]:
     # The env is absent until micromamba creates it, so pre-flight plans a
     # create and upgrade_env's interpreter probe then finds a real path.
-    state = {"locked": False, "created": False}
+    state: dict[str, bool | str] = {"locked": False, "created": False}
 
     def respond(cmd: Command) -> CommandResult:
         if cmd.args == micromamba_create(target.env_environment_yml("main")).args:
@@ -193,7 +193,9 @@ def _fake_build(monkeypatch: pytest.MonkeyPatch, target: ConfigRoot, *, fail: bo
                     pass
             except UvStackError:
                 state["locked"] = True
-            _compile_output(cmd).write_text(lock_text)
+            candidate = _compile_output(cmd)
+            state["candidate"] = candidate.read_text() if candidate.exists() else ""
+            candidate.write_text(lock_text)
         if cmd.args == micromamba_python_info("main").args:
             return CommandResult(1, "")
         return CommandResult(0, "")
@@ -214,6 +216,7 @@ def test_import_builds_under_the_locks_and_reports_pins(
     result = _run_import(target, _export(config_tree, "main"), build=True)
     assert result.exit_code == 0, result.output
     assert state["locked"] is True
+    assert state["candidate"] == "numpy==1.26.4\npandas==2.2.0\nrich==13.7.0\n"
     assert "main: 1 pins kept, 1 changed, 1 dropped, 0 added" in result.output
 
 
@@ -221,9 +224,10 @@ def test_import_without_a_seed_prints_no_pin_report(
     config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     target = _target(tmp_path)
-    _fake_build(monkeypatch, target)
+    state = _fake_build(monkeypatch, target)
     result = _run_import(target, _export(config_tree, "main"), build=True)
     assert result.exit_code == 0, result.output
+    assert state["candidate"] == ""
     assert "pins kept" not in result.output
 
 
@@ -240,7 +244,7 @@ def test_build_failure_keeps_definitions_and_prints_rerun_and_dependents(
     assert result.exit_code == 1
     assert "stack sync env main" in result.output
     assert "Not rebuilt, but using changed definitions: work." in result.output
-    assert target.env_stack_path("main").exists()
+    assert target.profile_path("ds").read_text() == config_tree.profile_path("ds").read_text()
 
 
 def test_dependents_line_prints_with_no_build(config_tree: ConfigRoot, tmp_path: Path) -> None:
