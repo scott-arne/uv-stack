@@ -109,6 +109,20 @@ def test_import_conflict_prints_diff_and_users(config_tree: ConfigRoot, tmp_path
     assert target.profile_path("ds").read_text() == "includes:\n  - requests[security]\n"
 
 
+def test_import_conflict_prints_why_used_by_may_be_incomplete(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = _target(tmp_path)
+    _run_import(target, _export(config_tree, "main"))
+    target.profile_path("ds").write_text("includes:\n  - scipy\n")
+    target.env_dir("broken[1]").mkdir()
+    target.env_stack_path("broken[1]").write_text("profile:ghost\n")
+    result = _run_import(target, _export(config_tree, "profile:ds"))
+    assert result.exit_code == 1
+    assert "profiles/ds.yaml is used by: main" in result.output
+    assert "warning: Cannot tell what environment 'broken[1]' uses: " in result.stderr
+
+
 def test_import_overwrite_replaces(config_tree: ConfigRoot, tmp_path: Path) -> None:
     target = _target(tmp_path)
     _run_import(target, _export(config_tree, "main"))

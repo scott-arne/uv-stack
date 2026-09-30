@@ -149,6 +149,9 @@ def import_cmd(config: ConfigRoot, source: str, overwrite: bool, dry_run: bool,
                 if plan.dependents:
                     echo(dependents_line(plan.dependents))
     except ConflictError as error:
+        # First, so a warning that an environment could not be read qualifies
+        # the "used by" lists below.
+        render_warnings(error.resolution_warnings)
         print_conflicts(error)
         raise
     if dry_run:

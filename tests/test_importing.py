@@ -601,8 +601,53 @@ def test_change_diff_keeps_brackets_and_marks_missing_newline() -> None:
 
 
 def test_used_by_follows_bundles(config_tree: ConfigRoot) -> None:
-    found, warnings = used_by(config_tree, ["profiles/ds.yaml", "profiles/ghost.yaml"])
-    assert found == {"profiles/ds.yaml": ["main"]} and warnings == []
+    keys = ["profiles/ds.yaml", "profiles/ghost.yaml", "bundles/standard.yaml", "bundles/qsar.yaml"]
+    found, warnings = used_by(config_tree, keys)
+    assert found == {"bundles/standard.yaml": ["main"], "profiles/ds.yaml": ["main"]}
+    assert warnings == []
+
+
+def test_used_by_warns_about_an_environment_it_cannot_read(config_tree: ConfigRoot) -> None:
+    # A component longer than any filesystem allows makes the resolver's
+    # profile probe raise OSError, as an unreadable file would.
+    config_tree.env_dir("work").mkdir()
+    config_tree.env_stack_path("work").write_text("x" * 300 + "\n")
+    found, warnings = used_by(config_tree, ["profiles/ds.yaml"])
+    assert found == {"profiles/ds.yaml": ["main"]}
+    assert len(warnings) == 1
+    assert warnings[0].startswith("Cannot tell what environment 'work' uses: ")
+    assert str(config_tree.profiles_dir) in warnings[0]
+
+
+def _folds_case(directory: Path) -> bool:
+    """Whether this filesystem opens a file under another letter case."""
+    probe = directory / "FoldProbe"
+    probe.write_text("")
+    try:
+        return (directory / "foldprobe").exists()
+    finally:
+        probe.unlink()
+
+
+def test_a_case_variant_reports_the_users_of_the_definition_it_replaces(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    if not _folds_case(tmp_path):
+        pytest.skip("this filesystem does not fold letter case")
+    # 'work' spells the profile differently again, so the match cannot be by
+    # the target file's spelling either.
+    config_tree.env_dir("work").mkdir()
+    config_tree.env_stack_path("work").write_text("UTILS\n")
+    data = _raw(config_tree, "profile:utils")
+    data["items"] = ["profile:Utils"]
+    data["files"] = {"profiles/Utils.yaml": "includes:\n  - rich\n  - typer\n"}
+    expected = {"profiles/Utils.yaml": ["main", "work"]}
+    with pytest.raises(ConflictError) as caught:
+        _plan(config_tree, data)
+    assert caught.value.used_by == expected
+    plan = _plan(config_tree, data, overwrite=True, dry_run=True)
+    assert plan.used_by == expected
+    assert plan.dependents == ["main", "work"]
 
 
 def _meanings(target: ConfigRoot, data: dict[str, Any]) -> None:
@@ -696,6 +741,18 @@ def test_a_target_bundle_with_an_invalid_stem_is_still_checked(
         _meanings(target, _raw(config_tree, "profile:utils"))
 
 
+def test_a_staged_os_error_names_the_target_path(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    # The target has no profiles/ to probe, so only the staged view, which the
+    # shipped profile gives one, meets the overlong name.
+    target = ConfigRoot(tmp_path / "target")
+    target.env_dir("work").mkdir(parents=True)
+    target.env_stack_path("work").write_text("x" * 300 + "\n")
+    with pytest.raises(OSError) as caught:
+        _meanings(target, _raw(config_tree, "profile:utils"))
+    assert caught.value.filename == str(target.profiles_dir / ("x" * 300 + ".yaml"))
+    assert "uv-stack-" not in str(caught.value)
+
+
 def _plan(target: ConfigRoot, data: dict[str, Any], *, overwrite: bool = False,
           dry_run: bool = False) -> ImportPlan:
     with prepared_import(target, _load(data), ImportOptions(overwrite=overwrite),
@@ -751,6 +808,44 @@ def test_a_file_conflict_is_reported_before_a_meaning_change(
     with pytest.raises(ConfigError, match="would mean profile 'utils'"):
         _plan(target, data, overwrite=True)
     assert target.profile_path("ds").read_text() == "includes:\n  - scipy\n"
+
+
+def test_a_conflict_carries_the_validation_and_used_by_warnings(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.profile_path("ds").parent.mkdir(parents=True)
+    target.profile_path("ds").write_text("includes:\n  - scipy\n")
+    target.env_dir("broken").mkdir(parents=True)
+    target.env_stack_path("broken").write_text("profile:ghost\n")
+    data = _raw(config_tree, "main")
+    # 'util' is one letter from the shipped profile 'utils', which the
+    # validator reports as a likely typo.
+    data["files"]["envs/main/stack.txt"] = "@standard\nutil\n"
+    with pytest.raises(ConflictError) as caught:
+        _plan(target, data)
+    warnings = caught.value.resolution_warnings
+    assert any("'util' resolved to a literal package" in w for w in warnings)
+    assert any(w.startswith("Cannot tell what environment 'broken' uses: ") for w in warnings)
+
+
+def test_an_identical_bundle_whose_bare_token_a_new_profile_captures_has_dependents(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    config_tree.bundle_path("b").write_text("includes:\n  - x\n  - rich\n")
+    config_tree.profile_path("x").write_text("includes:\n  - numpy\n")
+    data = _raw(config_tree, "bundle:b")
+    assert sorted(data["files"]) == ["bundles/b.yaml", "profiles/x.yaml"]
+    target = ConfigRoot(tmp_path / "target")
+    target.bundles_dir.mkdir(parents=True)
+    target.bundle_path("b").write_text(config_tree.bundle_path("b").read_text())
+    target.env_dir("main").mkdir(parents=True)
+    target.env_stack_path("main").write_text("@b\n")
+    plan = _plan(target, data, dry_run=True)
+    assert {c.key: c.status for c in plan.changes} == {
+        "bundles/b.yaml": "identical", "profiles/x.yaml": "new"}
+    assert plan.dependents == ["main"]
+    assert plan.used_by == {}
 
 
 @pytest.mark.parametrize("outcome", ["refused", "dry-run", "overwrite"])

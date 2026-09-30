@@ -269,6 +269,14 @@ def _relabeled(root: Path, replacement: str) -> Iterator[None]:
         if isinstance(error, ConfigError) and error.path is not None:
             error.path = Path(_relabel_text(str(error.path), prefix, replacement))
         raise
+    except OSError as error:
+        # A bare OSError (a probe of an overlong name, say) carries its path in
+        # filename, which both str() and the CLI's panel print.
+        for attribute in ("filename", "filename2"):
+            value = getattr(error, attribute)
+            if isinstance(value, str):
+                setattr(error, attribute, _relabel_text(value, prefix, replacement))
+        raise
 
 
 def referenced_variables(root: ConfigRoot, keys: Iterable[str]) -> list[str]:
@@ -453,7 +461,10 @@ def _refuse_non_directory_blockers(config: ConfigRoot, document: ExportDocument)
             )
 
 
-def _physical_identity(path: Path) -> tuple[int, int, tuple[str, ...]]:
+_Identity = tuple[int, int, tuple[str, ...]]
+
+
+def _physical_identity(path: Path) -> _Identity:
     # Identifies a path by the deepest part of it that exists, so two keys the
     # target's own directory links route to one place compare equal before
     # either file is written.
@@ -463,6 +474,14 @@ def _physical_identity(path: Path) -> tuple[int, int, tuple[str, ...]]:
         path = path.parent
     info = os.stat(path)
     return info.st_dev, info.st_ino, tuple(reversed(tail))
+
+
+def _by_identity(config: ConfigRoot, keys: Iterable[str]) -> dict[_Identity, list[str]]:
+    """Group keys by the file each names under the root, keeping their order."""
+    grouped: dict[_Identity, list[str]] = {}
+    for key in keys:
+        grouped.setdefault(_physical_identity(config.root / key), []).append(key)
+    return grouped
 
 
 def _refuse_linked_keys(config: ConfigRoot, document: ExportDocument) -> None:
@@ -479,10 +498,8 @@ def _refuse_linked_keys(config: ConfigRoot, document: ExportDocument) -> None:
     keys = [file_key("profile", name) for name in config.list_profiles()]
     keys += [file_key("bundle", name) for name in config.list_bundles()]
     keys += [file_key("env", name, f) for name in config.list_envs() for f in ENV_FILES]
-    existing: dict[tuple[int, int, tuple[str, ...]], list[str]] = {}
-    for key in keys:
-        existing.setdefault(_physical_identity(config.root / key), []).append(key)
-    seen: dict[tuple[int, int, tuple[str, ...]], str] = {}
+    existing = _by_identity(config, keys)
+    seen: dict[_Identity, str] = {}
     for key in sorted(document.files):
         identity = _physical_identity(config.root / key)
         if identity in seen:
@@ -523,6 +540,10 @@ def staged_root(
     """
     _refuse_non_directory_blockers(config, document)
     _refuse_linked_keys(config, document)
+    # Staged outside the config root, which nothing touches before phase 6.
+    # The cost: checks of whether two names are one file observe this
+    # directory's filesystem, so they are exact only when it folds letter case
+    # and Unicode normalization the same way as the config root's.
     directory = Path(os.path.realpath(tempfile.mkdtemp(prefix="uv-stack-staged-")))
     staged = ConfigRoot(directory)
     try:
@@ -594,15 +615,24 @@ class FileChange:
 
 
 class ConflictError(ConfigError):
-    """Different or target-only files met an import without ``--overwrite``."""
+    """Different or target-only files met an import without ``--overwrite``.
 
-    def __init__(self, conflicts: list[FileChange], found: dict[str, list[str]]) -> None:
+    :param conflicts: The different and target-only files.
+    :param found: The target environments that use each conflicting key.
+    :param warnings: The staged validation and "used by" warnings, carried as
+        ``resolution_warnings`` so they print with the conflict report: an
+        environment that could not be read leaves ``found`` incomplete.
+    """
+
+    def __init__(self, conflicts: list[FileChange], found: dict[str, list[str]],
+                 warnings: list[str]) -> None:
         super().__init__(
             f"{len(conflicts)} file(s) differ from this machine's copy; nothing was written.",
             hint="Review the differences above, then re-run with --overwrite to replace them.",
         )
         self.conflicts = conflicts
         self.used_by = found
+        self.resolution_warnings = warnings
 
 
 def _read_target(path: Path) -> str | None:
@@ -648,13 +678,28 @@ def change_diff(change: FileChange) -> str:
     ))
 
 
+def _os_reason(error: OSError) -> str:
+    # render_os_error's shape: the errno text alone does not say which file.
+    reason = error.strerror or str(error)
+    return f"{reason}: {error.filename}" if error.filename else reason
+
+
 def used_by(config: ConfigRoot, keys: Iterable[str]) -> tuple[dict[str, list[str]], list[str]]:
     """Map each profile or bundle key to the target environments that reach it.
 
+    Keys match by the file they name here, not by spelling: on a filesystem
+    that folds letter case, a shipped ``profiles/Foo.yaml`` replaces
+    ``profiles/foo.yaml``, so whatever reaches ``foo``, under any spelling, is
+    reported under the shipped key.
+
+    :param config: The unmodified target root.
+    :param keys: Document file keys.
     :returns: Non-empty entries only, and a warning per environment that
-        does not resolve (its users cannot be known, which the user should see).
+        does not resolve or cannot be read (its users cannot be known, which
+        the user should see).
     """
-    wanted = set(keys)
+    wanted = _by_identity(config, keys)
+    identities: dict[str, _Identity] = {}
     found: dict[str, list[str]] = {}
     warnings: list[str] = []
     for env in config.list_envs():
@@ -663,9 +708,17 @@ def used_by(config: ConfigRoot, keys: Iterable[str]) -> tuple[dict[str, list[str
         except UvStackError as error:
             warnings.append(f"Cannot tell what environment '{env}' uses: {error.message}")
             continue
-        reached = {file_key("profile", p) for p in resolved.profiles}
-        reached |= {file_key("bundle", b) for b in resolved.bundles}
-        for key in sorted(wanted & reached):
+        except OSError as error:
+            warnings.append(f"Cannot tell what environment '{env}' uses: {_os_reason(error)}")
+            continue
+        reached = [file_key("profile", p) for p in resolved.profiles]
+        reached += [file_key("bundle", b) for b in resolved.bundles]
+        hits: set[str] = set()
+        for key in reached:
+            if key not in identities:
+                identities[key] = _physical_identity(config.root / key)
+            hits.update(wanted.get(identities[key], []))
+        for key in sorted(hits):
             found.setdefault(key, []).append(env)
     return found, warnings
 
@@ -714,31 +767,60 @@ def check_meanings(
     here what it meant in the document. Direction 2 checks the target's files
     the import does not replace: a token must mean after the import what it
     means now. A replaced environment's old stack is gone, so it is not checked.
+
+    :raises ConfigError: When a token's meaning would change, or a target
+        file cannot be read.
+    :raises OSError: When a name cannot be probed; a staged path in it is
+        relabeled to the target root.
     """
-    for key in sorted(document.files):
-        parsed = parse_file_key(key)
-        assert parsed is not None  # phase 1 refused every other key
-        for token in _bare_tokens(doc_root, parsed):
-            _refuse_change(token, config.root / key, _meaning(doc_root, token),
-                           _meaning(staged.root, token), incoming=True)
-    # Compared by filesystem identity, not spelling: on a target that folds
-    # letter case, envs/Main/stack.txt is the file a shipped envs/main/stack.txt
-    # replaces, and its old tokens are gone after the import.
-    shipped = {_physical_identity(config.root / key) for key in document.files}
-    # Built from the listed names directly, not through parse_file_key: a
-    # target bundle whose stem validate_name rejects is still reachable by
-    # '@stem', so its tokens need the check as much as any other file's.
-    target = [FileKey("env", n, "stack.txt") for n in config.list_envs()]
-    target += [FileKey("bundle", n, None) for n in config.list_bundles()]
-    for parsed in target:
-        key = file_key(parsed.kind, parsed.name, parsed.filename)
-        if _physical_identity(config.root / key) in shipped:
+    with _relabeled(staged.root.root, str(config.root) + os.sep):
+        for key in sorted(document.files):
+            parsed = parse_file_key(key)
+            assert parsed is not None  # phase 1 refused every other key
+            for token in _bare_tokens(doc_root, parsed):
+                _refuse_change(token, config.root / key, _meaning(doc_root, token),
+                               _meaning(staged.root, token), incoming=True)
+        # Compared by filesystem identity, not spelling: on a target that folds
+        # letter case, envs/Main/stack.txt is the file a shipped
+        # envs/main/stack.txt replaces, and its old tokens are gone after the
+        # import.
+        shipped = {_physical_identity(config.root / key) for key in document.files}
+        # Built from the listed names directly, not through parse_file_key: a
+        # target bundle whose stem validate_name rejects is still reachable by
+        # '@stem', so its tokens need the check as much as any other file's.
+        target = [FileKey("env", n, "stack.txt") for n in config.list_envs()]
+        target += [FileKey("bundle", n, None) for n in config.list_bundles()]
+        for parsed in target:
+            key = file_key(parsed.kind, parsed.name, parsed.filename)
+            if _physical_identity(config.root / key) in shipped:
+                continue
+            # A target file this check cannot read propagates its ConfigError:
+            # the import cannot show that file's tokens keep their meaning, so
+            # it stops.
+            for token in _bare_tokens(config, parsed):
+                _refuse_change(token, config.root / key, _meaning(config, token),
+                               _meaning(staged.root, token), incoming=False)
+
+
+def _recaptured_bundles(
+    config: ConfigRoot, changes: list[FileChange], staged: ConfigRoot
+) -> list[str]:
+    """Return the identical shipped bundles whose bare tokens change meaning here.
+
+    Direction 1 judges a shipped bundle against the document alone, and
+    direction 2 skips it as shipped, so a bare token that a newly imported
+    profile captures in an unchanged bundle passes both. The environments
+    that reach such a bundle change meaning without a refusal.
+    """
+    keys = []
+    for change in changes:
+        parsed = parse_file_key(change.key)
+        if change.status != "identical" or parsed is None or parsed.kind != "bundle":
             continue
-        # A target file this check cannot read propagates its ConfigError: the
-        # import cannot show that file's tokens keep their meaning, so it stops.
-        for token in _bare_tokens(config, parsed):
-            _refuse_change(token, config.root / key, _meaning(config, token),
-                           _meaning(staged.root, token), incoming=False)
+        tokens = _bare_tokens(config, parsed)
+        if any(_meaning(config, token) != _meaning(staged, token) for token in tokens):
+            keys.append(change.key)
+    return keys
 
 
 _NO_BUILD = "Or pass --no-build to install the definitions without building."
@@ -889,6 +971,9 @@ def plan_import(
 
     The conflict refusal (phase 3) comes before the meaning check (phase 4) so
     a document with both reports the diffs and the ``--overwrite`` hint first.
+    The dependents also count users of an identical bundle whose bare token
+    now means something else; they change meaning though no file of theirs
+    is written, so ``used_by`` and the conflict report leave them out.
     """
     refuse_shadowing(config, document)
     with staged_root(config, document, referenced) as staged:
@@ -898,13 +983,17 @@ def plan_import(
         found, used_warnings = used_by(config, touched)
         conflicts = [c for c in changes if c.status in ("different", "target-only")]
         if conflicts and not options.overwrite:
-            raise ConflictError(conflicts, found)
+            raise ConflictError(conflicts, found, warnings + used_warnings)
         check_meanings(config, document, doc_root, staged)
+        recaptured = _recaptured_bundles(config, changes, staged.root)
+        extra, extra_warnings = used_by(config, recaptured) if recaptured else ({}, [])
         builds = preflight(config, staged.root, document, build) if build is not None else []
-    users = {env for envs in found.values() for env in envs}
+    users = {env for envs in (*found.values(), *extra.values()) for env in envs}
     return ImportPlan(
         document=document, changes=changes, missing_variables=staged.missing_variables,
-        variables_text=staged.variables_text, warnings=warnings + used_warnings,
+        variables_text=staged.variables_text,
+        # An environment both calls cannot read would otherwise warn twice.
+        warnings=list(dict.fromkeys(warnings + used_warnings + extra_warnings)),
         used_by=found, dependents=sorted(users - set(_env_items(document))), builds=builds,
     )
 
