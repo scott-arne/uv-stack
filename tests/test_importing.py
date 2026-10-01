@@ -22,6 +22,7 @@ from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.hints import has_control
 from uv_stack.operations import importing
+from uv_stack.operations.edit import Validation
 from uv_stack.operations.export import build_document, serialize_document
 from uv_stack.operations.importing import (
     BuildRequest,
@@ -452,6 +453,63 @@ def _stage(config: ConfigRoot, data: dict[str, Any], strict: bool = False) -> li
     refuse_shadowing(config, document)
     with staged_root(config, document, names) as staged:
         return validate_staged(config, staged, document, ImportOptions(strict=strict))
+
+
+def test_the_staged_view_is_what_an_overwrite_would_leave(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    (config_tree.env_dir("main") / "channels.txt").unlink()
+    target = ConfigRoot(tmp_path / "target")
+    target.profiles_dir.mkdir(parents=True)
+    target.bundles_dir.mkdir()
+    target.profile_path("spare").write_text("includes:\n  - typer\n")
+    target.bundle_path("extra").write_text("includes:\n  - spare\n")
+    for env in ("main", "work"):
+        target.env_dir(env).mkdir(parents=True)
+        target.env_stack_path(env).write_text("spare\n")
+    (target.env_dir("main") / "python.txt").write_text("3.11\n")
+    (target.env_dir("main") / "channels.txt").write_text("conda-forge\n")
+    document = _load(_raw(config_tree, "main"))
+    with document_root(document) as root:
+        names = check_document(document, root)
+    with staged_root(target, document, names) as staged:
+        view = staged.root
+        assert view.profile_path("spare").read_text() == "includes:\n  - typer\n"
+        assert view.bundle_path("extra").read_text() == "includes:\n  - spare\n"
+        assert view.env_stack_path("work").read_text() == "spare\n"
+        assert view.env_stack_path("main").read_text() == "@standard\n"
+        assert (view.env_dir("main") / "python.txt").read_text() == "3.12\n"
+        assert not (view.env_dir("main") / "channels.txt").exists()
+
+
+def test_staged_warnings_are_deduplicated_in_order(config_tree: ConfigRoot, tmp_path: Path) -> None:
+    """The bundle and the environment that includes it both warn about 'utilz'."""
+    config_tree.bundle_path("standard").write_text(
+        "includes:\n  - ds\n  - chem\n  - utils\n  - utilz\n"
+    )
+    config_tree.env_stack_path("main").write_text("@standard\nchemm\n")
+    target = ConfigRoot(tmp_path / "target")
+    target.root.mkdir()
+    assert _stage(target, _raw(config_tree, "main")) == [
+        "'utilz' resolved to a literal package; did you mean 'utils'? (use pkg:utilz to silence)",
+        "'chemm' resolved to a literal package; did you mean 'chem'? (use pkg:chemm to silence)",
+    ]
+
+
+def test_a_staged_warning_names_the_target_path(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No validator names a file in a warning today; one that does must name
+    # the target's file, not the scratch copy it was validated in.
+    def naming(config: ConfigRoot, name: str, *, strict: bool = False) -> Validation:
+        return Validation([f"{config.profile_path(name)} was checked"])
+
+    monkeypatch.setattr(importing, "validate_profile", naming)
+    target = ConfigRoot(tmp_path / "target")
+    target.root.mkdir()
+    assert _stage(target, _raw(config_tree, "profile:utils")) == [
+        f"{target.profile_path('utils')} was checked"
+    ]
 
 
 def test_validator_refusal_names_the_target_path(config_tree: ConfigRoot, tmp_path: Path) -> None:
