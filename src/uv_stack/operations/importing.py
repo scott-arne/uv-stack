@@ -1157,10 +1157,13 @@ def write_plan(config: ConfigRoot, plan: ImportPlan) -> int:
     :returns: The number of files written or removed.
     :raises ConfigError: When a write fails part-way.
     """
-    steps = sorted((c for c in plan.changes if c.status != "identical"), key=_write_order)
-    definitions = [c for c in steps if _write_order(c)[0] < 3]
-    env_steps = [c for c in steps if _write_order(c)[0] == 3]
-    total = len(steps) + (plan.variables_text is not None)
+    ranked = sorted(
+        ((_write_order(c), c) for c in plan.changes if c.status != "identical"),
+        key=lambda pair: pair[0],
+    )
+    definitions = [c for order, c in ranked if order[0] < 3]
+    env_steps = [c for order, c in ranked if order[0] == 3]
+    total = len(ranked) + (plan.variables_text is not None)
     done = 0
     try:
         for change in definitions:
