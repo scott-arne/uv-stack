@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import unicodedata
+from collections.abc import Callable
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -10,11 +13,14 @@ from uv_stack.config import ConfigRoot
 from uv_stack.errors import ConfigError
 from uv_stack.fsutil import _LOCK_AVAILABLE
 from uv_stack.hints import has_control
+from uv_stack.operations import scaffold
 from uv_stack.operations.scaffold import (
     _SHADOW_HINT,
     write_bundle,
+    write_env_python,
     write_env_sources,
     write_profile,
+    write_starter_profile,
 )
 
 
@@ -719,12 +725,12 @@ def test_write_profile_withdraws_when_bundle_appears_during_publish(
     path = config_tree.profile_path("racy")
     bundle_path = config_tree.bundle_path("racy")
 
-    def racing_bundle_exists(name: str) -> bool:
+    def racing_bundle_exists(_self: ConfigRoot, name: str) -> bool:
         if name == "racy" and path.exists() and not bundle_path.exists():
             bundle_path.write_text("includes: [racing-bundle]\n")
         return name == "racy" and bundle_path.exists()
 
-    monkeypatch.setattr(config_tree, "bundle_exists", racing_bundle_exists)
+    monkeypatch.setattr(ConfigRoot, "bundle_exists", racing_bundle_exists)
 
     with pytest.raises(ConfigError) as excinfo:
         write_profile(config_tree, "racy", ["numpy"])
@@ -742,7 +748,7 @@ def test_write_profile_withdrawal_spares_a_concurrent_replacement(
     import os
     path = config_tree.profile_path("racy")
 
-    def racing_bundle_exists(name: str) -> bool:
+    def racing_bundle_exists(_self: ConfigRoot, name: str) -> bool:
         if name != "racy" or not path.exists():
             return False
         # Simulate the third writer replacing our file before we withdraw.
@@ -751,7 +757,7 @@ def test_write_profile_withdrawal_spares_a_concurrent_replacement(
         os.replace(temp, path)
         return True
 
-    monkeypatch.setattr(config_tree, "bundle_exists", racing_bundle_exists)
+    monkeypatch.setattr(ConfigRoot, "bundle_exists", racing_bundle_exists)
 
     with pytest.raises(ConfigError) as excinfo:
         write_profile(config_tree, "racy", ["numpy"])
@@ -766,12 +772,12 @@ def test_write_bundle_withdraws_when_profile_appears_during_publish(
     path = config_tree.bundle_path("racy")
     profile_path = config_tree.profile_path("racy")
 
-    def racing_profile_exists(name: str) -> bool:
+    def racing_profile_exists(_self: ConfigRoot, name: str) -> bool:
         if name == "racy" and path.exists() and not profile_path.exists():
             profile_path.write_text("includes: [racing-profile]\n")
         return name == "racy" and profile_path.exists()
 
-    monkeypatch.setattr(config_tree, "profile_exists", racing_profile_exists)
+    monkeypatch.setattr(ConfigRoot, "profile_exists", racing_profile_exists)
 
     with pytest.raises(ConfigError) as excinfo:
         write_bundle(config_tree, "racy", ["ds"])
@@ -791,12 +797,12 @@ def test_write_starter_profile_withdraws_when_bundle_appears_during_publish(
     path = config_tree.profile_path("starter")
     bundle_path = config_tree.bundle_path("starter")
 
-    def racing_bundle_exists(name: str) -> bool:
+    def racing_bundle_exists(_self: ConfigRoot, name: str) -> bool:
         if name == "starter" and path.exists() and not bundle_path.exists():
             bundle_path.write_text("includes: [racing-bundle]\n")
         return name == "starter" and bundle_path.exists()
 
-    monkeypatch.setattr(config_tree, "bundle_exists", racing_bundle_exists)
+    monkeypatch.setattr(ConfigRoot, "bundle_exists", racing_bundle_exists)
 
     with pytest.raises(ConfigError) as excinfo:
         write_starter_profile(config_tree)
@@ -817,7 +823,7 @@ def test_write_profile_reports_failed_withdrawal(
     bundle_path = config_tree.bundle_path("racy")
     original_unlink = Path.unlink
 
-    def racing_bundle_exists(name: str) -> bool:
+    def racing_bundle_exists(_self: ConfigRoot, name: str) -> bool:
         if name == "racy" and path.exists() and not bundle_path.exists():
             bundle_path.write_text("includes: [racing-bundle]\n")
         return name == "racy" and bundle_path.exists()
@@ -827,7 +833,7 @@ def test_write_profile_reports_failed_withdrawal(
             raise PermissionError("Simulated permission error")
         return original_unlink(self, missing_ok=missing_ok)
 
-    monkeypatch.setattr(config_tree, "bundle_exists", racing_bundle_exists)
+    monkeypatch.setattr(ConfigRoot, "bundle_exists", racing_bundle_exists)
     monkeypatch.setattr(Path, "unlink", failing_unlink)
 
     with pytest.raises(ConfigError) as excinfo:
@@ -852,13 +858,13 @@ def test_write_bundle_probe_failure_after_publish(
     """
     path = config_tree.bundle_path("probe-failure")
 
-    def probe_raises(name: str) -> bool:
+    def probe_raises(_self: ConfigRoot, name: str) -> bool:
         if name == "probe-failure":
             if path.exists():
                 raise PermissionError("Simulated config dir probe failure")
         return False
 
-    monkeypatch.setattr(config_tree, "profile_exists", probe_raises)
+    monkeypatch.setattr(ConfigRoot, "profile_exists", probe_raises)
 
     with pytest.raises(ConfigError) as excinfo:
         write_bundle(config_tree, "probe-failure", ["ds"])
@@ -877,7 +883,7 @@ def test_write_bundle_probe_failure_with_failed_withdrawal(
     path = config_tree.bundle_path("probe-failure-residual")
     original_unlink = Path.unlink
 
-    def probe_raises(name: str) -> bool:
+    def probe_raises(_self: ConfigRoot, name: str) -> bool:
         if name == "probe-failure-residual":
             if path.exists():
                 raise PermissionError("Simulated config dir probe failure")
@@ -888,7 +894,7 @@ def test_write_bundle_probe_failure_with_failed_withdrawal(
             raise PermissionError("Simulated permission error")
         return original_unlink(self, missing_ok=missing_ok)
 
-    monkeypatch.setattr(config_tree, "profile_exists", probe_raises)
+    monkeypatch.setattr(ConfigRoot, "profile_exists", probe_raises)
     monkeypatch.setattr(Path, "unlink", failing_unlink)
 
     with pytest.raises(ConfigError) as excinfo:
@@ -968,6 +974,63 @@ def test_writers_still_work_when_locking_is_unavailable(tmp_path, monkeypatch):
     assert write_bundle(config, "y", ["x"]).is_file()
     assert all(p.is_file() for p in write_env_sources(config, "e", ["x"], python="3.12"))
     assert not config.locks_dir.exists()
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+@pytest.mark.parametrize(
+    ("write", "written"),
+    [
+        (lambda config: [write_profile(config, "x", ["rich"])], "profiles/x.yaml"),
+        (lambda config: [write_bundle(config, "x", ["rich"])], "bundles/x.yaml"),
+        (lambda config: [write_starter_profile(config)], "profiles/starter.yaml"),
+        (lambda config: write_env_sources(config, "e", ["rich"], python="3.12"),
+         "envs/e/python.txt"),
+        (lambda config: [write_env_python(config, "main", "3.13")], "envs/main/python.txt"),
+    ],
+    ids=["profile", "bundle", "starter", "env-sources", "env-python"],
+)
+def test_a_writer_locks_and_writes_in_the_tree_it_resolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write: Callable[[ConfigRoot], list[Path]],
+    written: str,
+) -> None:
+    """A root symlink retargeted as the lock is taken must not split the operation.
+
+    The retarget lands before the lock opens, so a lock, check or write that
+    goes through the unresolved root reaches the second tree. That tree holds
+    what would refuse each write if a check looked there: the other kind of
+    each stem, and an env that already exists or does not.
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    (first / "envs" / "main").mkdir(parents=True)
+    (first / "envs" / "main" / "stack.txt").write_text("rich\n")
+    for decoy in ("profiles/x.yaml", "bundles/x.yaml", "bundles/starter.yaml", "envs/e/stack.txt"):
+        (second / decoy).parent.mkdir(parents=True, exist_ok=True)
+        (second / decoy).write_text("includes: []\n")
+
+    def snapshot(root: Path) -> dict[Path, str | None]:
+        return {p: p.read_text() if p.is_file() else None for p in root.rglob("*")}
+
+    before = snapshot(second)
+    link = tmp_path / "root"
+    link.symlink_to(first)
+    original_name_lock = scaffold.name_lock
+
+    @contextlib.contextmanager
+    def retargeting_lock(*args, **kwargs):  # type: ignore[no-untyped-def]
+        link.unlink()
+        link.symlink_to(second)
+        with original_name_lock(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(scaffold, "name_lock", retargeting_lock)
+    paths = write(ConfigRoot(link))
+    assert link / written in paths
+    for path in paths:
+        assert (first / path.relative_to(link)).is_file()
+    assert (first / ".locks").is_dir()
+    assert snapshot(second) == before
 
 
 def test_write_env_python_overwrites_existing(config_tree: ConfigRoot):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 from tests.conftest import _deadline, _lock_held_by_another_process
 from uv_stack.config import ConfigRoot
 from uv_stack.fsutil import _LOCK_AVAILABLE
+from uv_stack.operations import doctor
 from uv_stack.operations.doctor import Finding, diagnose, repair
 from uv_stack.operations.portable import (
     BEGIN_MARKER,
@@ -1395,6 +1397,45 @@ def test_repair_conversion_serializes_against_a_concurrent_create(
     assert unrelated and unrelated[0].applied, (
         "one unavailable stem lock aborted the rest of the repair pass"
     )
+
+
+@pytest.mark.skipif(not _LOCK_AVAILABLE, reason="requires fcntl")
+def test_repair_converts_in_the_tree_whose_stem_lock_it_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root symlink retargeted as the stem lock is taken must not split the conversion.
+
+    The retarget lands before the lock opens, so a lock, check or write that
+    goes through the unresolved root reaches the second tree, whose bundle of
+    the same stem would stop the conversion if the shadow check looked there.
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    for tree in (first, second):
+        for directory in ("profiles", "bundles", "envs"):
+            (tree / directory).mkdir(parents=True)
+        (tree / "profiles" / "old.in").write_text("numpy\n")
+    (second / "bundles" / "old.yaml").write_text("includes: []\n")
+    link = tmp_path / "root"
+    link.symlink_to(first)
+    config = ConfigRoot(link)
+    findings = [f for f in diagnose(config) if f.kind == "legacy-profile"]
+    original_name_lock = doctor.name_lock
+
+    @contextlib.contextmanager
+    def retargeting_lock(*args, **kwargs):  # type: ignore[no-untyped-def]
+        link.unlink()
+        link.symlink_to(second)
+        with original_name_lock(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(doctor, "name_lock", retargeting_lock)
+    [action] = repair(config, findings)
+    assert action.applied, action.reason
+    assert sorted(os.listdir(first / "profiles")) == ["old.in.bak", "old.yaml"]
+    assert os.path.isdir(first / ".locks")
+    assert os.listdir(second / "profiles") == ["old.in"]
+    assert os.listdir(second / "bundles") == ["old.yaml"]
+    assert not os.path.lexists(second / ".locks")
 
 
 def test_diagnose_reports_degraded_locks(config_tree: ConfigRoot, monkeypatch):

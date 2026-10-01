@@ -34,6 +34,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   read the new content, and the refusal now says the other file is a symbolic
   link. An environment that uses a hard link to a shipped profile or bundle is
   no longer listed as one of its users.
+- `stack create profile`, `stack create bundle`, `stack create env` (including
+  `--python` with `--recreate`), `stack init`, and the legacy-profile
+  conversion in `stack doctor --fix` take their lock, check for conflicts, and
+  write in one tree when the config root is reached through a symbolic link.
+  Before, a link retargeted while one of them ran could leave the lock held in
+  one tree while the checks and the file went to another, where nothing
+  serialized them with a concurrent writer.
 
 ## 0.7.0 - 2026-09-30
 

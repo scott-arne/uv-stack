@@ -988,9 +988,14 @@ def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
     # disk with diagnose reporting nothing wrong. The collision spans two paths,
     # so no single no-clobber write can reserve it; only the shared lock can.
     stem = finding.path.stem
+    # The finding names the root as given; the lock and every path the
+    # conversion touches go through one resolution of it.
+    locked = config.resolved()
+    source = locked.root / finding.path.relative_to(config.root)
+    dest = locked.root / finding.dest.relative_to(config.root)
     try:
-        with name_lock(config.stem_lock_path(stem), stem):
-            return _convert_under_stem_lock(config, finding, description, stem)
+        with name_lock(locked.stem_lock_path(stem), stem):
+            return _convert_under_stem_lock(locked, finding, description, stem, source, dest)
     except ConfigError as error:
         # Either the lock — contended past its timeout, or standing on
         # something name_lock refuses — or the source read inside, which
@@ -1006,7 +1011,8 @@ def _fix_convert_yaml(config: ConfigRoot, finding: Finding) -> RepairAction:
 
 
 def _convert_under_stem_lock(
-    config: ConfigRoot, finding: Finding, description: str, stem: str
+    config: ConfigRoot, finding: Finding, description: str, stem: str, source: Path,
+    dest: Path,
 ) -> RepairAction:
     """Convert one legacy file to YAML, with the stem's create lock already held.
 
@@ -1014,21 +1020,22 @@ def _convert_under_stem_lock(
     :param finding: The ``legacy-profile`` or ``legacy-bundle`` finding.
     :param description: The unapplied-action wording for a skip.
     :param stem: The profile/bundle name both kinds share.
+    :param source: The finding's legacy file, under ``config``.
+    :param dest: The finding's YAML destination, under ``config``.
     :returns: The action taken, applied or skipped with a reason.
     """
-    assert finding.path is not None and finding.dest is not None
     # Lstat the source for identity binding.
     try:
-        src_identity_before = finding.path.lstat()
+        src_identity_before = source.lstat()
     except FileNotFoundError:
         return RepairAction(
             finding, description, applied=False,
-            reason=f"{finding.path.name} no longer exists",
+            reason=f"{source.name} no longer exists",
         )
-    if finding.dest.exists():
+    if dest.exists():
         return RepairAction(
             finding, description, applied=False,
-            reason=f"{finding.dest.name} already exists",
+            reason=f"{dest.name} already exists",
         )
     # Cross-kind shadow guard: skip if the opposite kind exists for the stem.
     if finding.kind == "legacy-profile":
@@ -1046,13 +1053,13 @@ def _convert_under_stem_lock(
 
     # Path.rename would silently replace an existing backup on POSIX; a
     # repair pass must never destroy user content, so skip instead.
-    backup = finding.path.with_name(finding.path.name + ".bak")
+    backup = source.with_name(source.name + ".bak")
     if backup.exists():
         return RepairAction(
             finding, description, applied=False,
-            reason=f"{finding.path.name}.bak already exists",
+            reason=f"{source.name}.bak already exists",
         )
-    includes = read_clean_lines(finding.path)
+    includes = read_clean_lines(source)
     # A conversion is a durable writer of human-typed entries, so it owes the
     # same placement rule init, create, and edit enforce on their own writes.
     # Without it the pass reports a fix and leaves a generated YAML that every
@@ -1071,7 +1078,7 @@ def _convert_under_stem_lock(
         return RepairAction(
             finding, description, applied=False,
             reason=(
-                f"{finding.path.name} holds {len(refused)} {noun} uv-stack will "
+                f"{source.name} holds {len(refused)} {noun} uv-stack will "
                 f"not write, starting with {entry!r}: {explanation}. Fix them "
                 "there, then re-run"
             ),
@@ -1079,7 +1086,7 @@ def _convert_under_stem_lock(
     # Publish the YAML with atomic_write_new; capture stat for identity check.
     try:
         dest_stat = atomic_write_new(
-            finding.dest,
+            dest,
             yaml.safe_dump(
                 {"includes": includes}, sort_keys=False, default_flow_style=False
             ),
@@ -1087,25 +1094,25 @@ def _convert_under_stem_lock(
     except FileExistsError:
         return RepairAction(
             finding, description, applied=False,
-            reason=f"{finding.dest.name} already exists",
+            reason=f"{dest.name} already exists",
         )
     # Lstat source again immediately before move to detect replacement.
     try:
-        src_identity_after = finding.path.lstat()
+        src_identity_after = source.lstat()
     except FileNotFoundError:
         # Source vanished after read but before move.
         try:
-            current_stat = finding.dest.lstat()
+            current_stat = dest.lstat()
             if (current_stat.st_dev, current_stat.st_ino) == (
                 dest_stat.st_dev,
                 dest_stat.st_ino,
             ):
-                finding.dest.unlink(missing_ok=True)
+                dest.unlink(missing_ok=True)
         except FileNotFoundError:
             pass
         return RepairAction(
             finding, description, applied=False,
-            reason=f"{finding.path.name} vanished during conversion",
+            reason=f"{source.name} vanished during conversion",
         )
     if (src_identity_before.st_dev, src_identity_before.st_ino) != (
         src_identity_after.st_dev,
@@ -1113,47 +1120,47 @@ def _convert_under_stem_lock(
     ):
         # Source replaced after read: withdraw the YAML.
         try:
-            current_stat = finding.dest.lstat()
+            current_stat = dest.lstat()
             if (current_stat.st_dev, current_stat.st_ino) == (
                 dest_stat.st_dev,
                 dest_stat.st_ino,
             ):
-                finding.dest.unlink(missing_ok=True)
+                dest.unlink(missing_ok=True)
         except FileNotFoundError:
             pass
         return RepairAction(
             finding, description, applied=False,
-            reason=f"{finding.path.name} changed during conversion",
+            reason=f"{source.name} changed during conversion",
         )
     # Move the source to backup with no-replace semantics.
     try:
-        _move_no_replace(finding.path, backup)
+        _move_no_replace(source, backup)
     except OSError as error:
         # Backup appeared after our check OR the source vanished: remove the
         # just-published YAML only if it is still the file we published.
         skip_reason: str
         try:
-            current_stat = finding.dest.lstat()
+            current_stat = dest.lstat()
             if (current_stat.st_dev, current_stat.st_ino) == (
                 dest_stat.st_dev,
                 dest_stat.st_ino,
             ):
-                finding.dest.unlink(missing_ok=True)
+                dest.unlink(missing_ok=True)
             skip_reason = (
-                f"{finding.path.name}.bak already exists"
+                f"{source.name}.bak already exists"
                 if isinstance(error, FileExistsError)
                 else str(error)
             )
         except FileNotFoundError:
             skip_reason = (
-                f"{finding.path.name}.bak already exists"
+                f"{source.name}.bak already exists"
                 if isinstance(error, FileExistsError)
                 else str(error)
             )
         return RepairAction(finding, description, applied=False, reason=skip_reason)
     return RepairAction(
         finding,
-        f"converted {finding.path.name} to {finding.dest.name} "
+        f"converted {source.name} to {dest.name} "
         f"(original saved as {backup.name})",
         applied=True,
     )

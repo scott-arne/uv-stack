@@ -229,7 +229,7 @@ def _update_remotes(
     # Resolve the root once so the lock and the target both resolve through the
     # same tree; a retargeted root link must not leave the writer holding one
     # tree's lock while it updates another tree's file.
-    locked_root = ConfigRoot(os.path.realpath(config.root))
+    locked_root = config.resolved()
     # Where locking is unsupported, name_lock degrades to a no-op as it does
     # for every caller; the re-read before publishing is then the only guard.
     with name_lock(locked_root.remotes_lock_path(), "remotes.yaml", action="updating"):

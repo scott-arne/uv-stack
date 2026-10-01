@@ -220,19 +220,22 @@ def write_profile(
         f"Profile '{name}' would shadow the existing bundle: {config.bundle_path(name)}"
     )
     path = config.profile_path(name)
+    # Messages and the returned path name the root as given; the lock, the
+    # checks and the write all go through one resolution of it.
+    locked = config.resolved()
     # The pre-check, the publish, and _publish_unshadowed's post-check are one
     # operation as far as another create is concerned. Without this the
     # post-check still catches a live competitor, but a competitor killed
     # between its publish and its own post-check leaves the collision on disk.
     # Where the lock is unavailable that is exactly the residual.
-    with name_lock(config.stem_lock_path(name), name):
-        if config.bundle_exists(name):
+    with name_lock(locked.stem_lock_path(name), name):
+        if locked.bundle_exists(name):
             raise ConfigError(shadow_message, hint=_SHADOW_HINT)
         _publish_unshadowed(
-            path,
+            locked.profile_path(name),
             _render_yaml(description, list(tags or []), packages),
             f"Profile '{name}' already exists: {path}",
-            shadowed=lambda: config.bundle_exists(name),
+            shadowed=lambda: locked.bundle_exists(name),
             shadow_message=shadow_message,
         )
     return path
@@ -277,16 +280,17 @@ def write_bundle(
         f"{config.profile_path(name)}"
     )
     path = config.bundle_path(name)
+    locked = config.resolved()
     # Same stem lock as write_profile — the two kinds share one namespace, so
     # they must contend on one file. See write_profile for what it buys.
-    with name_lock(config.stem_lock_path(name), name):
-        if config.profile_exists(name):
+    with name_lock(locked.stem_lock_path(name), name):
+        if locked.profile_exists(name):
             raise ConfigError(shadow_message, hint=_SHADOW_HINT)
         _publish_unshadowed(
-            path,
+            locked.bundle_path(name),
             _render_yaml(description, list(tags or []), tokens),
             f"Bundle '{name}' already exists: {path}",
-            shadowed=lambda: config.profile_exists(name),
+            shadowed=lambda: locked.profile_exists(name),
             shadow_message=shadow_message,
         )
     return path
@@ -404,9 +408,10 @@ def write_env_sources(
     # the stack.txt race, and then lose its interpreter pin when this call's
     # handler withdraws that inode — the inode is byte-identical either way, so
     # nothing in the POSIX file API can tell the two apart after the fact.
-    with name_lock(config.env_lock_path(name), name):
-        stack_path = config.env_stack_path(name)
-        python_path = config.env_python_path(name)
+    locked = config.resolved()
+    with name_lock(locked.env_lock_path(name), name):
+        stack_path = locked.env_stack_path(name)
+        python_path = locked.env_python_path(name)
         python_text = python + "\n" if python is not None else None
 
         # Preflight both targets before writing anything.
@@ -476,7 +481,7 @@ def write_env_sources(
                 f"Environment '{name}' already has a python.txt.",
                 "Edit or delete it, or omit --python to inherit it.",
             )
-            written.append(python_path)
+            written.append(config.env_python_path(name))
         try:
             _publish(
                 stack_path,
@@ -505,7 +510,7 @@ def write_env_sources(
                     # ConfigError would hide the real failure. The residual python.txt
                     # is then an orphan, which adoption already handles.
             raise
-        return [stack_path, *written]
+        return [config.env_stack_path(name), *written]
 
 
 def write_env_python(config: ConfigRoot, name: str, python: str) -> Path:
@@ -523,9 +528,9 @@ def write_env_python(config: ConfigRoot, name: str, python: str) -> Path:
         environment has no ``stack.txt``, or if the per-name lock cannot be used.
     """
     validate_name("environment", name)
-    with name_lock(config.env_lock_path(name), name):
-        stack_path = config.env_stack_path(name)
-        if not stack_path.exists():
+    locked = config.resolved()
+    with name_lock(locked.env_lock_path(name), name):
+        if not locked.env_stack_path(name).exists():
             raise ConfigError(
                 f"Environment '{name}' has no stack.txt.",
                 hint=(
@@ -533,9 +538,8 @@ def write_env_python(config: ConfigRoot, name: str, python: str) -> Path:
                     f"{render_positional_arg(name)} TOKENS"
                 ),
             )
-        python_path = config.env_python_path(name)
-        atomic_write(python_path, python + "\n")
-    return python_path
+        atomic_write(locked.env_python_path(name), python + "\n")
+    return config.env_python_path(name)
 
 
 _STARTER_PROFILE = """\
@@ -566,16 +570,17 @@ def write_starter_profile(config: ConfigRoot) -> Path:
         f"{config.bundle_path('starter')}"
     )
     path = config.profile_path("starter")
+    locked = config.resolved()
     # Same lock coverage as write_profile — pre-check, publish, and post-check
     # are one operation. See write_profile for what it buys.
-    with name_lock(config.stem_lock_path("starter"), "starter"):
-        if config.bundle_exists("starter"):
+    with name_lock(locked.stem_lock_path("starter"), "starter"):
+        if locked.bundle_exists("starter"):
             raise ConfigError(shadow_message, hint=_SHADOW_HINT)
         _publish_unshadowed(
-            path,
+            locked.profile_path("starter"),
             _STARTER_PROFILE,
             f"Profile 'starter' already exists: {path}",
-            shadowed=lambda: config.bundle_exists("starter"),
+            shadowed=lambda: locked.bundle_exists("starter"),
             shadow_message=shadow_message,
         )
     return path

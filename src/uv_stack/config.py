@@ -248,6 +248,16 @@ class ConfigRoot:
             return cls(env)
         return cls(DEFAULT_ROOT)
 
+    def resolved(self) -> ConfigRoot:
+        """Return this root with every symbolic link on the way to it resolved.
+
+        A writer that takes a lock under the root and writes through the
+        result keeps both in one tree, even if a link to the root is
+        retargeted while it runs. Through the unresolved root, each path
+        resolves anew, so the lock and the write can land in different trees.
+        """
+        return ConfigRoot(os.path.realpath(self.root))
+
     # -- directories -----------------------------------------------------
     @property
     def profiles_dir(self) -> Path:
