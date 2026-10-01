@@ -480,6 +480,21 @@ def _appended_variables(current: str, missing: list[str]) -> str:
     return current + "".join(f"{name}\n" for name in missing)
 
 
+def _refuse_non_directory_root(config: ConfigRoot) -> None:
+    """Refuse when the root, or a directory above it, exists but is not a directory.
+
+    :raises ConfigError: When such a path, a dangling link among them, exists.
+    """
+    # Resolving the root follows a dangling link to its missing target, which
+    # the write would then create; checked on the root as given instead.
+    for path in (config.root, *config.root.parents):
+        if os.path.lexists(path) and not path.is_dir():
+            raise ConfigError(
+                f"Not a directory: {path}",
+                hint="Remove or rename whatever is at that path.",
+            )
+
+
 def _refuse_non_directory_blockers(config: ConfigRoot, document: ExportDocument) -> None:
     """Refuse when a file exists where the import needs a directory.
 
@@ -1222,12 +1237,10 @@ def prepared_import(
     """
     with document_root(document) as doc_root:
         referenced = check_document(document, doc_root)
+        _refuse_non_directory_root(config)
         if dry_run:
             yield plan_import(config, document, doc_root, referenced, options, build=build)
             return
-        # Resolving a root link to a missing directory would create that
-        # directory; refused here instead, as the dry run refuses it.
-        _refuse_non_directory_blockers(config, document)
         # One resolution serves the locks, the reads, the writes and the
         # caller's build, so a root symlink retargeted mid-import cannot split
         # them across two trees. What the user reads names the root as given.

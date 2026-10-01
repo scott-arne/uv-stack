@@ -1289,19 +1289,41 @@ def test_a_held_lock_through_a_linked_root_names_the_root_as_given(
 
 
 @pytest.mark.parametrize("dry_run", [False, True])
-def test_a_root_link_to_a_missing_directory_is_refused(
-    config_tree: ConfigRoot, tmp_path: Path, dry_run: bool
+@pytest.mark.parametrize("below", ["", "python-envs"])
+def test_a_root_reached_through_a_link_to_a_missing_directory_is_refused(
+    config_tree: ConfigRoot, tmp_path: Path, below: str, dry_run: bool
 ) -> None:
-    """A dangling root link is refused, not resolved into a directory to create."""
+    """A dangling link at or above the root is refused, not resolved into a directory to create.
+
+    The link above the root is a ``~/.config`` linked to a dotfiles checkout
+    that is not there yet, under the default root ``~/.config/python-envs``.
+    """
     missing = tmp_path / "missing"
     link = tmp_path / "root"
     link.symlink_to(missing)
     document = _load(_raw(config_tree, "profile:utils"))
     pattern = f"^Not a directory: {re.escape(str(link))}$"
     with pytest.raises(ConfigError, match=pattern):
-        with prepared_import(ConfigRoot(link), document, ImportOptions(), dry_run=dry_run):
+        with prepared_import(
+            ConfigRoot(link / below), document, ImportOptions(), dry_run=dry_run
+        ):
             pass
     assert not os.path.lexists(missing)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_a_shadowed_name_is_refused_before_a_blocker_below_the_root(
+    config_tree: ConfigRoot, tmp_path: Path, dry_run: bool
+) -> None:
+    """The dry run and the import name the same refusal when two apply."""
+    target = ConfigRoot(tmp_path / "target")
+    target.bundles_dir.mkdir(parents=True)
+    target.bundle_path("utils").write_text("includes:\n  - rich\n")
+    target.profiles_dir.write_text("")
+    document = _load(_raw(config_tree, "profile:utils"))
+    with pytest.raises(ConfigError, match="would shadow the existing bundle"):
+        with prepared_import(target, document, ImportOptions(), dry_run=dry_run):
+            pass
 
 
 def _probe(python: str | None) -> Callable[[Command], CommandResult]:

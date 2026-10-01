@@ -18,6 +18,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   another, where nothing serialized it with a concurrent import or writer. Its
   warnings and refusals still name the root as given; an error panel from a
   build may name the tree the link resolved to.
+- `stack import --dry-run` refuses a config root reached through a broken
+  symbolic link above it, such as a `~/.config` linked to a checkout that is
+  not there, as the import itself does. Before, the dry run planned an import
+  the real run refused.
 
 ## 0.7.1 - 2026-09-30
 
