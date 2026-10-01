@@ -882,3 +882,19 @@ def test_a_root_link_retargeted_just_after_locking_is_refused(
         set_remote(ConfigRoot(link), "a", root="/r")
     assert (first / "remotes.yaml").read_text() == "a: {}\n"
     assert (second / "remotes.yaml").read_text() == "a: {}\n"
+
+
+@pytest.mark.parametrize("update", ["set", "remove"])
+def test_updating_remotes_refuses_a_root_through_a_dangling_link(
+    tmp_path: Path, update: str
+) -> None:
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    config = ConfigRoot(link)
+    with pytest.raises(ConfigError, match="which does not exist"):
+        if update == "set":
+            set_remote(config, "gpu-box", root="/data")
+        else:
+            remove_remote(config, "gpu-box")
+    assert not os.path.lexists(target)

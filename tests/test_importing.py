@@ -1320,13 +1320,31 @@ def test_a_root_reached_through_a_link_to_a_missing_directory_is_refused(
     link = tmp_path / "root"
     link.symlink_to(missing)
     document = _load(_raw(config_tree, "profile:utils"))
-    pattern = f"^Not a directory: {re.escape(str(link))}$"
-    with pytest.raises(ConfigError, match=pattern):
+    where = f"is under {link}, a link to" if below else "is a link to"
+    message = f"Config root {link / below} {where} {missing}, which does not exist."
+    with pytest.raises(ConfigError) as caught:
         with prepared_import(
             ConfigRoot(link / below), document, ImportOptions(), dry_run=dry_run
         ):
             pass
+    assert caught.value.message == message
     assert not os.path.lexists(missing)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("below", ["", "python-envs"])
+def test_a_root_at_or_under_a_file_is_refused(
+    config_tree: ConfigRoot, tmp_path: Path, below: str, dry_run: bool
+) -> None:
+    blocker = tmp_path / "root"
+    blocker.write_text("")
+    document = _load(_raw(config_tree, "profile:utils"))
+    pattern = f"^Not a directory: {re.escape(str(blocker))}$"
+    with pytest.raises(ConfigError, match=pattern):
+        with prepared_import(
+            ConfigRoot(blocker / below), document, ImportOptions(), dry_run=dry_run
+        ):
+            pass
 
 
 @pytest.mark.parametrize("dry_run", [False, True])

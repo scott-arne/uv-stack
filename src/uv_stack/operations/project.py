@@ -682,7 +682,10 @@ def _project_lock(config: ConfigRoot, cwd: Path) -> AbstractContextManager[None]
     each write back their own view, and the last one drops whatever the other
     added. Where :func:`uv_stack.fsutil.name_lock` degrades to no locking,
     that is the residual.
+
+    :raises ConfigError: As :meth:`ConfigRoot.refuse_broken_root` does.
     """
+    config.refuse_broken_root()
     return name_lock(config.project_lock_path(cwd), str(cwd), action="updating project")
 
 

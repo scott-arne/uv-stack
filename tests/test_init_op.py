@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
+import pytest
+
 from uv_stack.config import ConfigRoot
+from uv_stack.errors import ConfigError
 from uv_stack.operations.init import init_config_root
 
 
@@ -35,3 +39,24 @@ def test_init_only_creates_missing(tmp_path: Path):
     created = init_config_root(cfg)
     assert cfg.profiles_dir not in created
     assert set(created) == {cfg.bundles_dir, cfg.envs_dir, cfg.locks_dir}
+
+
+@pytest.mark.parametrize("below", ["", "python-envs"])
+def test_init_creates_the_missing_target_of_a_dangling_root_link(tmp_path: Path, below: str):
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    cfg = ConfigRoot(link / below)
+    created = init_config_root(cfg)
+    assert created[0] == target
+    assert set(created[1:]) == {cfg.profiles_dir, cfg.bundles_dir, cfg.envs_dir, cfg.locks_dir}
+    assert link.is_symlink()
+    assert (target / below / "profiles").is_dir()
+
+
+@pytest.mark.parametrize("below", ["", "python-envs"])
+def test_init_refuses_a_root_at_or_under_a_file(tmp_path: Path, below: str):
+    blocker = tmp_path / "root"
+    blocker.write_text("")
+    with pytest.raises(ConfigError, match=f"^Not a directory: {re.escape(str(blocker))}$"):
+        init_config_root(ConfigRoot(blocker / below))

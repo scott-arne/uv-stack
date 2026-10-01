@@ -7,6 +7,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) with
 one addition, a `Breaking` section for changes that alter existing behavior, and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- Commands that write under the config root refuse one reached through a
+  symbolic link to a directory that does not exist, such as a
+  `~/.config/python-envs` linked to a checkout or mount that is not there yet.
+  The refusal names the link and its target, and says how to restore or create
+  it. That covers `stack create profile`, `bundle`, `env` and `project`,
+  `stack refresh`, `stack config remote set` and `remove`,
+  `stack config portable`, and `stack edit` for everything but `project`.
+  Before, `stack create profile`, `bundle` and `env` and
+  `stack config remote set` created the missing directory and wrote into it,
+  leaving a near-empty tree where the checkout belonged, and
+  `stack config portable` failed with "File exists". A file at
+  or above the root is refused as "Not a directory", naming it.
+- `stack config init` creates the missing target of such a link and says so,
+  and `stack init` offers to create it, with `--yes` accepting. `stack doctor`
+  reports the link and its missing target with both ways out, and
+  `doctor --fix` leaves that choice to you. Before, `stack config init` and
+  `stack init` failed with "File exists", and `stack doctor` reported the root
+  as missing with a fix that failed the same way.
+
 ## 0.7.2 - 2026-09-30
 
 ### Fixed

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -669,3 +670,100 @@ def test_load_env_from_dir_rejects_a_directory_named_stack_txt(tmp_path):
     with pytest.raises(ConfigError) as excinfo:
         load_env_from_dir(source, "copied")
     assert "stack.txt" in str(excinfo.value)
+
+
+# -- a root reached through a dangling link ----------------------------------
+
+_DANGLING_HINT = (
+    "Restore it there (for example, clone or mount it), or run 'stack config init' "
+    "to create it."
+)
+
+
+def test_a_root_that_is_a_link_to_a_missing_directory_is_dangling(tmp_path):
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    found = ConfigRoot(link).dangling_link()
+    assert found is not None
+    assert (found.link, found.target) == (link, target)
+    assert found.describe() == f"Config root {link} is a link to {target}, which does not exist."
+
+
+def test_a_relative_dangling_link_reports_its_target_in_full(tmp_path):
+    link = tmp_path / "root"
+    link.symlink_to("checkout")
+    found = ConfigRoot(link).dangling_link()
+    assert found is not None
+    assert found.target == tmp_path / "checkout"
+
+
+def test_a_root_under_a_dangling_link_names_the_link(tmp_path):
+    # The default root ~/.config/python-envs under a ~/.config linked to a
+    # dotfiles checkout that is not there yet.
+    target = tmp_path / "dotfiles"
+    link = tmp_path / "config"
+    link.symlink_to(target)
+    root = link / "python-envs"
+    found = ConfigRoot(root).dangling_link()
+    assert found is not None
+    assert (found.link, found.target) == (link, target)
+    assert found.describe() == (
+        f"Config root {root} is under {link}, a link to {target}, which does not exist."
+    )
+
+
+@pytest.mark.parametrize("shape", ["missing", "link-to-directory", "loop", "dangling-inside"])
+def test_a_root_with_no_dangling_link_on_its_path_has_none(tmp_path, shape):
+    root = tmp_path / "root"
+    if shape == "link-to-directory":
+        (tmp_path / "real").mkdir()
+        root.symlink_to(tmp_path / "real")
+    elif shape == "loop":
+        root.symlink_to(tmp_path / "other")
+        (tmp_path / "other").symlink_to(root)
+    elif shape == "dangling-inside":
+        # Below the root, not on the way to it: a blocker for whichever write
+        # needs that path, not a root that is missing.
+        root.mkdir()
+        (root / "profiles").symlink_to(tmp_path / "gone")
+    assert ConfigRoot(root).dangling_link() is None
+
+
+@pytest.mark.parametrize("below", ["", "python-envs"])
+def test_refusing_a_dangling_root_names_the_link_and_the_way_out(tmp_path, below):
+    link = tmp_path / "root"
+    link.symlink_to(tmp_path / "checkout")
+    config = ConfigRoot(link / below)
+    with pytest.raises(ConfigError) as caught:
+        config.refuse_broken_root()
+    found = config.dangling_link()
+    assert found is not None
+    assert caught.value.message == found.describe()
+    assert caught.value.hint == _DANGLING_HINT
+
+
+@pytest.mark.parametrize("below", ["", "python-envs"])
+def test_refusing_a_root_at_or_under_a_file_names_the_file(tmp_path, below):
+    blocker = tmp_path / "root"
+    blocker.write_text("")
+    with pytest.raises(ConfigError, match=f"^Not a directory: {re.escape(str(blocker))}$"):
+        ConfigRoot(blocker / below).refuse_broken_root()
+
+
+@pytest.mark.parametrize("shape", ["missing", "directory", "link-to-directory"])
+def test_a_root_a_write_can_reach_is_not_refused(tmp_path, shape):
+    root = tmp_path / "root"
+    if shape == "directory":
+        root.mkdir()
+    elif shape == "link-to-directory":
+        (tmp_path / "real").mkdir()
+        root.symlink_to(tmp_path / "real")
+    ConfigRoot(root).refuse_broken_root()
+
+
+def test_resolving_a_dangling_root_refuses_rather_than_return_the_missing_target(tmp_path):
+    link = tmp_path / "root"
+    link.symlink_to(tmp_path / "checkout")
+    with pytest.raises(ConfigError, match="which does not exist"):
+        ConfigRoot(link).resolved()

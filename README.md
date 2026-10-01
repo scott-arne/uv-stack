@@ -584,6 +584,12 @@ All state lives under one directory, resolved in this order:
         └── requirements.lock.txt # generated
 ```
 
+The root, or a directory above it, can be a symbolic link, for example to a
+checkout kept elsewhere. If the link's target is missing, commands that write
+refuse rather than create an empty tree in its place. Restore the target (clone
+or mount it), or run `stack config init` to create it; `stack init` offers to
+create it as well.
+
 ### Shell environment variables
 
 | Variable | Purpose |

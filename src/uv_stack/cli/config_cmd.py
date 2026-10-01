@@ -28,7 +28,11 @@ def config() -> None:
 @click.pass_obj
 def config_init(config_root: ConfigRoot) -> None:
     """Create missing config directories (profiles/, bundles/, envs/, .locks/)."""
+    link = config_root.dangling_link()
     created = init_config_root(config_root)
+    if link is not None:
+        echo(f"Created {link.target} (the missing target of {link.link})")
+        created = [path for path in created if path != link.target]
     if not created:
         echo("Nothing to do — all config directories already exist.")
         return

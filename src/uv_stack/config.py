@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
@@ -26,6 +27,39 @@ from uv_stack.variables import NAME_RE, Variables
 _ModelT = TypeVar("_ModelT", Profile, Bundle)
 
 DEFAULT_ROOT = Path.home() / ".config" / "python-envs"
+
+DANGLING_ROOT_HINT = (
+    "Restore it there (for example, clone or mount it), or run 'stack config init' "
+    "to create it."
+)
+
+
+@dataclass(frozen=True)
+class DanglingRootLink:
+    """A symbolic link at or above a config root whose target does not exist.
+
+    :param root: The config root as given.
+    :param link: The link: the root itself, or a directory above it.
+    :param target: Where the link points, with every link on the way resolved.
+    """
+
+    root: Path
+    link: Path
+    target: Path
+
+    def describe(self) -> str:
+        """One sentence naming the link and its missing target."""
+        if self.link == self.root:
+            return f"Config root {self.root} is a link to {self.target}, which does not exist."
+        return (
+            f"Config root {self.root} is under {self.link}, a link to {self.target}, "
+            "which does not exist."
+        )
+
+
+def _nearest_existing(path: Path) -> Path | None:
+    """``path`` or its nearest ancestor that exists, a dangling link counting as existing."""
+    return next((p for p in (path, *path.parents) if os.path.lexists(p)), None)
 
 
 def _numbered_clean_lines(path: Path) -> list[tuple[int, str]]:
@@ -255,8 +289,54 @@ class ConfigRoot:
         result keeps both in one tree, even if a link to the root is
         retargeted while it runs. Through the unresolved root, each path
         resolves anew, so the lock and the write can land in different trees.
+
+        :raises ConfigError: As :meth:`refuse_broken_root` does. Resolving a
+            dangling link yields its missing target, which the write would
+            then create.
         """
+        self.refuse_broken_root()
         return ConfigRoot(os.path.realpath(self.root))
+
+    def dangling_link(self) -> DanglingRootLink | None:
+        """Find a symbolic link at or above the root whose target does not exist.
+
+        :returns: The link, or ``None`` when the way to the root has none.
+        """
+        # Only the nearest existing path can be one: every path above it
+        # resolved, or the nearest could not have been found.
+        nearest = _nearest_existing(self.root)
+        if nearest is None or not os.path.islink(nearest):
+            return None
+        try:
+            os.stat(nearest)
+        except FileNotFoundError:
+            return DanglingRootLink(self.root, nearest, Path(os.path.realpath(nearest)))
+        except OSError:
+            # A loop or an unsearchable target: there is nothing to restore
+            # or create, so it is not this case.
+            return None
+        return None
+
+    def refuse_broken_root(self) -> None:
+        """Refuse a root that a write would reach only by creating the wrong thing.
+
+        An absent root is fine: writers create it. A dangling link at or above
+        it is not, because the link usually stands for a checkout or a mount
+        that is not there yet, and writing would create an empty tree in its
+        place. Nor is a file in the way, where no write can succeed.
+
+        :raises ConfigError: On a dangling link at or above the root, or when
+            the root or the nearest existing path above it is not a directory.
+        """
+        link = self.dangling_link()
+        if link is not None:
+            raise ConfigError(link.describe(), hint=DANGLING_ROOT_HINT)
+        nearest = _nearest_existing(self.root)
+        if nearest is not None and not os.path.isdir(nearest):
+            raise ConfigError(
+                f"Not a directory: {nearest}",
+                hint="Remove or rename whatever is at that path.",
+            )
 
     # -- directories -----------------------------------------------------
     @property

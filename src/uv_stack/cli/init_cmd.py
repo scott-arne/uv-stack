@@ -7,6 +7,7 @@ import rich_click as click
 from uv_stack.cli._render import echo, print_activation_hint, render_warnings
 from uv_stack.cli.upgrade import _run_upgrade
 from uv_stack.config import ConfigRoot
+from uv_stack.errors import ConfigError
 from uv_stack.hints import render_positional_arg
 from uv_stack.operations.init import init_config_root
 from uv_stack.operations.scaffold import write_env_sources, write_starter_profile
@@ -27,8 +28,20 @@ from uv_stack.variables import check_placement
 def init(config: ConfigRoot, yes: bool) -> None:
     """Guided first-run setup: config tree, starter profile, first env."""
     echo(f"Config root: {config.root}")
+    link = config.dangling_link()
+    if link is not None:
+        echo(link.describe())
+        if not yes and not click.confirm("Create it?", default=True):
+            raise ConfigError(
+                link.describe(),
+                hint="Restore it there (for example, clone or mount it), then run "
+                "'stack init' again.",
+            )
     for path in init_config_root(config):
-        echo(f"Created {path}")
+        if link is not None and path == link.target:
+            echo(f"Created {path} (the missing target of {link.link})")
+        else:
+            echo(f"Created {path}")
 
     if not config.list_profiles() and (
         yes or click.confirm("Seed a starter profile (profiles/starter.yaml)?", default=True)

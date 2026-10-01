@@ -64,9 +64,15 @@ def _resolve_target(config: ConfigRoot, kind: str, name: str, file: str) -> Path
     the exception — ``channels.txt`` not existing yet is the normal reason to
     open it. An absent ``remotes.yaml`` is opened too.
 
-    :raises ConfigError: When the resource does not exist, or the target is
-        not a regular file.
+    :raises ConfigError: When the resource does not exist, the target is not a
+        regular file, or the root is one :meth:`ConfigRoot.refuse_broken_root`
+        refuses.
     """
+    if kind != "project":
+        # Ahead of the per-kind checks: an absent remotes.yaml would otherwise
+        # be opened and saved into a fresh tree at the link's target, and a
+        # missing profile, bundle or env would point at 'stack create'.
+        config.refuse_broken_root()
     if kind == "profile":
         target = config.profile_path(name)
         require_regular_file(target)

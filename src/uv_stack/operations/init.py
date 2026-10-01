@@ -18,10 +18,23 @@ from uv_stack.config import ConfigRoot
 def init_config_root(config: ConfigRoot) -> list[Path]:
     """Create any missing config directories under the root.
 
+    A root reached through a dangling link gets the link's target created
+    first: asking to initialize the root is asking for it to exist, which no
+    other writer may assume.
+
     :param config: The configuration root to initialize.
-    :returns: The directories actually created (absent ones only).
+    :returns: The directories actually created (absent ones only), the link's
+        target first when there was one to create.
+    :raises ConfigError: When the root, or the nearest existing path above it,
+        is not a directory.
     """
     created: list[Path] = []
+    link = config.dangling_link()
+    if link is None:
+        config.refuse_broken_root()
+    else:
+        link.target.mkdir(parents=True, exist_ok=True)
+        created.append(link.target)
     for directory in (
         config.profiles_dir,
         config.bundles_dir,

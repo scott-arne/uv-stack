@@ -134,6 +134,17 @@ def test_config_init_reports_the_locks_directory(tmp_path: Path):
     assert (root / ".locks").is_dir()
 
 
+def test_config_init_creates_and_names_the_missing_target_of_a_root_link(tmp_path: Path):
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    result = CliRunner().invoke(cli, ["--root", str(link), "config", "init"])
+    assert result.exit_code == 0
+    assert f"Created {target} (the missing target of {link})\n" in result.output
+    assert f"Created 4 directories under {link}:\n" in result.output
+    assert (target / "profiles").is_dir()
+
+
 # ---------------------------------------------------------------------------
 # upgrade
 # ---------------------------------------------------------------------------
@@ -2708,6 +2719,40 @@ def test_init_yes_reports_the_locks_directory(tmp_path: Path, monkeypatch):
     assert (root / ".locks").is_dir()
 
 
+@pytest.mark.parametrize("answer", ["y\n", "\n", None])
+def test_init_offers_to_create_the_missing_target_of_a_root_link(
+    tmp_path: Path, monkeypatch, answer: str | None
+):
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    if answer is None:
+        monkeypatch.setattr("uv_stack.cli.init_cmd._run_upgrade", lambda *a, **kw: None)
+        result = CliRunner().invoke(cli, ["--root", str(link), "init", "--yes"])
+    else:
+        # Accept the link prompt, then decline the starter profile and the env.
+        result = CliRunner().invoke(cli, ["--root", str(link), "init"], input=answer + "n\nn\n")
+    assert result.exit_code == 0, result.output
+    assert f"Config root {link} is a link to {target}, which does not exist." in result.output
+    assert f"Created {target} (the missing target of {link})\n" in result.output
+    assert (target / "profiles").is_dir()
+    assert link.is_symlink()
+
+
+def test_init_declining_to_create_a_root_links_target_writes_nothing(
+    tmp_path: Path, monkeypatch
+):
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    result = CliRunner().invoke(cli, ["--root", str(link), "init"], input="n\n")
+    assert result.exit_code == 1
+    flat = _flat_panel(result)
+    assert "Create it? [Y/n]: n" in flat
+    assert "then run 'stack init' again" in flat
+    assert not os.path.lexists(target)
+
+
 def test_init_interactive_decline_build_prints_next_step(
     tmp_path: Path, monkeypatch
 ):
@@ -3357,6 +3402,23 @@ def test_edit_symlinked_remotes_names_the_real_file(tmp_path: Path, monkeypatch)
     result = CliRunner().invoke(cli, ["--root", str(root), "edit", "remotes"])
     assert result.exit_code == 0
     assert f"Validated {real}" in result.output
+
+
+@pytest.mark.parametrize("what", [["remotes"], ["profile", "ds"], ["env", "main"]])
+def test_edit_refuses_a_root_through_a_dangling_link(
+    tmp_path: Path, monkeypatch, what: list[str]
+):
+    # remotes.yaml is opened even when absent, so the editor would save it into
+    # a fresh target; for the others, "missing profile" points at the wrong fix.
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    fake = _install_editor(monkeypatch, _FakeEditor())
+    result = CliRunner().invoke(cli, ["--root", str(link), "edit", *what])
+    assert result.exit_code == 1
+    assert "which does not exist" in _flat_panel(result)
+    assert fake.commands == []
+    assert not os.path.lexists(target)
 
 
 @pytest.mark.parametrize(

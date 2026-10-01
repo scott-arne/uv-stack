@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import unicodedata
 from collections.abc import Callable
 from pathlib import Path
@@ -1114,3 +1115,29 @@ def test_validate_name_still_accepts_a_plain_name(good: str):
     from uv_stack.operations.scaffold import validate_name
 
     validate_name("profile", good)
+
+
+_ROOT_WRITERS: dict[str, Callable[[ConfigRoot], object]] = {
+    "profile": lambda config: write_profile(config, "viz", ["numpy"]),
+    "bundle": lambda config: write_bundle(config, "kit", ["numpy"]),
+    "env sources": lambda config: write_env_sources(config, "main", ["numpy"]),
+    "env python": lambda config: write_env_python(config, "main", "3.13"),
+    "starter profile": write_starter_profile,
+}
+
+
+@pytest.mark.parametrize("writer", sorted(_ROOT_WRITERS))
+@pytest.mark.parametrize("below", ["", "python-envs"])
+def test_a_writer_refuses_a_root_through_a_dangling_link(
+    tmp_path: Path, writer: str, below: str
+) -> None:
+    """The link's missing target is usually a checkout or mount that is not there yet.
+
+    Writing through the link would create it as an empty tree holding one file.
+    """
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    with pytest.raises(ConfigError, match="which does not exist"):
+        _ROOT_WRITERS[writer](ConfigRoot(link / below))
+    assert not os.path.lexists(target)

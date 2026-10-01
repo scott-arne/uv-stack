@@ -418,12 +418,14 @@ def write_portable_ignore(
     :raises ConfigError: When the existing file is a symlink, has an illegal
         marker topology, is not valid UTF-8, is not a regular file, carries a
         second hard link, or stands at the path on a platform whose missing
-        open guards make reading it unsafe.
+        open guards make reading it unsafe; and as
+        :meth:`ConfigRoot.refuse_broken_root` does.
     :raises OSError: When the ignore file cannot be opened, or the write cannot
         be published — a permission denied on the root, a filesystem with no
         space left. Left to the group edge, which renders an OSError with its
         path rather than a traceback.
     """
+    config.refuse_broken_root()
     path = config.root / ".gitignore"
     block = render_block(config)
     repository_root = enclosing_repository(config.root)

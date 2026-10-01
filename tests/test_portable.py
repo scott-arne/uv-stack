@@ -1267,3 +1267,13 @@ def test_an_empty_bundles_directory_survives_a_clone(
     _git("clone", "-q", str(root), str(clone))
 
     assert (clone / "bundles").is_dir()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_a_root_through_a_dangling_link_is_refused(tmp_path: Path, dry_run: bool) -> None:
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    with pytest.raises(ConfigError, match="which does not exist"):
+        write_portable_ignore(ConfigRoot(link), dry_run=dry_run)
+    assert not os.path.lexists(target)

@@ -4756,3 +4756,21 @@ def test_validate_name_hint_explains_why_a_listed_resource_is_refused():
     # the profile and bundle kinds, whose resource is a .yaml file. Naming a
     # directory would be wrong for both.
     assert "directory" not in hint.lower()
+
+
+@pytest.mark.parametrize("command", ["init", "refresh"])
+def test_a_project_run_refuses_a_root_through_a_dangling_link(tmp_path, command):
+    from uv_stack.operations.project import RefreshOptions, refresh_project
+
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    config = ConfigRoot(link)
+    with pytest.raises(ConfigError, match="which does not exist"):
+        if command == "init":
+            init_project(config, RecordingRunner(), ["numpy"], ProjectOptions(), cwd=project_dir)
+        else:
+            refresh_project(config, RecordingRunner(), RefreshOptions(), cwd=project_dir)
+    assert not os.path.lexists(target)

@@ -38,6 +38,36 @@ def test_missing_root_reports_error(tmp_path: Path):
     assert str(cfg.root) in finding.message
 
 
+@pytest.mark.parametrize("below", ["", "python-envs"])
+def test_a_root_through_a_dangling_link_names_the_link(tmp_path: Path, below: str):
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    cfg = ConfigRoot(link / below)
+    findings = diagnose(cfg)
+    assert [f.kind for f in findings] == ["dangling-root"]
+    where = f"is under {link}, a link to" if below else "is a link to"
+    assert findings[0].level == "error"
+    assert findings[0].message == (
+        f"Config root {cfg.root} {where} {target}, which does not exist."
+    )
+    assert findings[0].fix == (
+        "Restore it there (for example, clone or mount it), or run "
+        "'stack config init' to create it."
+    )
+
+
+def test_fix_leaves_a_dangling_root_link_to_the_user(tmp_path: Path):
+    # Creating the target is one of two fixes, and the other, restoring a
+    # checkout or mount, needs the path left empty.
+    target = tmp_path / "checkout"
+    link = tmp_path / "root"
+    link.symlink_to(target)
+    cfg = ConfigRoot(link)
+    assert repair(cfg, diagnose(cfg)) == []
+    assert not os.path.lexists(target)
+
+
 def test_legacy_profile_in_file_flagged(config_tree: ConfigRoot):
     (config_tree.profiles_dir / "old.in").write_text("numpy\n")
     messages = [f.message for f in diagnose(config_tree)]

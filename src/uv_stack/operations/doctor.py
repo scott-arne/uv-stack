@@ -28,7 +28,7 @@ from pathlib import Path
 
 import yaml
 
-from uv_stack.config import ConfigRoot
+from uv_stack.config import DANGLING_ROOT_HINT, ConfigRoot
 from uv_stack.errors import ConfigError, UvStackError
 from uv_stack.fsutil import (
     _LINK_FALLBACK_ERRNOS,
@@ -313,6 +313,22 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
     # below, nothing else in the run would name an unstattable root: the early
     # return is there because no later check can say anything useful, so the
     # imprecise error is the only report there is, and it carries a fix.
+    #
+    # A dangling link gets its own kind, which --fix has no handler for:
+    # creating the target is one of two fixes, and the other, restoring the
+    # checkout or mount the link stands for, needs the path left empty.
+    link = config.dangling_link()
+    if link is not None:
+        findings.append(
+            Finding(
+                "error",
+                link.describe(),
+                fix=DANGLING_ROOT_HINT,
+                kind="dangling-root",
+                path=link.link,
+            )
+        )
+        return findings
     if not os.path.isdir(config.root):
         findings.append(
             Finding(
