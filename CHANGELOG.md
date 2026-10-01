@@ -26,6 +26,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   acts on it. The note under `stack status`, those upgrade and sync lines,
   and `doctor --fix` outcomes spell a newline too, since each names an
   environment listed from disk on a single line it could otherwise break.
+- `stack import` no longer refuses a shipped file that is a hard link, or a
+  symbolic link, on this machine. The write replaces that name alone, so the
+  file's other names keep their content. Before, it was refused as "the same
+  file" as another definition file, with a hint about directory links. Shipping
+  the file a symbolic link points at is still refused, since the link would
+  read the new content, and the refusal now says the other file is a symbolic
+  link. An environment that uses a hard link to a shipped profile or bundle is
+  no longer listed as one of its users.
 
 ## 0.7.0 - 2026-09-30
 

@@ -499,10 +499,23 @@ def _refuse_non_directory_blockers(config: ConfigRoot, document: ExportDocument)
 _Identity = tuple[int, int, tuple[str, ...]]
 
 
-def _physical_identity(path: Path) -> _Identity:
-    # Identifies a path by the deepest part of it that exists, so two keys the
-    # target's own directory links route to one place compare equal before
-    # either file is written.
+def _entry_identity(path: Path) -> _Identity:
+    # Identifies the directory entry a write to path replaces. atomic_write's
+    # os.replace swaps the final component without following it, so a symbolic
+    # link or hard link there is separated from its other names, while the
+    # target's directory links still route two keys to one entry. A file with
+    # one link is identified by its inode, which also merges the spellings a
+    # folding filesystem gives it; a shared inode would merge distinct entries,
+    # so a file with more links is identified by its directory and name.
+    if os.path.lexists(path):
+        info = os.lstat(path)
+        if info.st_nlink == 1:
+            return info.st_dev, info.st_ino, ()
+        parent = os.stat(path.parent)
+        return parent.st_dev, parent.st_ino, (path.name,)
+    # A key that does not exist yet is identified by the deepest part of it
+    # that does, so two keys the directory links route to one place compare
+    # equal before either file is written.
     tail: list[str] = []
     while not os.path.exists(path):
         tail.append(path.name)
@@ -511,32 +524,59 @@ def _physical_identity(path: Path) -> _Identity:
     return info.st_dev, info.st_ino, tuple(reversed(tail))
 
 
-def _by_identity(config: ConfigRoot, keys: Iterable[str]) -> dict[_Identity, list[str]]:
-    """Group keys by the file each names under the root, keeping their order."""
+def _read_identities(path: Path) -> list[_Identity]:
+    """Return every entry a read of ``path`` passes through, ``path``'s own first.
+
+    A write that replaces any of them changes what ``path`` reads. A cycle of
+    links ends the walk at its first repeated entry.
+    """
+    identities = [_entry_identity(path)]
+    while os.path.islink(path):
+        path = path.parent / os.readlink(path)
+        identity = _entry_identity(path)
+        if identity in identities:
+            break
+        identities.append(identity)
+    return identities
+
+
+def _by_identity(
+    config: ConfigRoot, keys: Iterable[str], *, read: bool = False
+) -> dict[_Identity, list[str]]:
+    """Group keys by the entry each names under the root, keeping their order.
+
+    :param read: Also group each key under every entry a read of it passes
+        through, so a symbolic link is found under its target's entry.
+    """
     grouped: dict[_Identity, list[str]] = {}
     for key in keys:
-        grouped.setdefault(_physical_identity(config.root / key), []).append(key)
+        path = config.root / key
+        for identity in _read_identities(path) if read else [_entry_identity(path)]:
+            grouped.setdefault(identity, []).append(key)
     return grouped
 
 
 def _refuse_linked_keys(config: ConfigRoot, document: ExportDocument) -> None:
-    """Refuse a shipped key that the target's directory links make another key's file.
+    """Refuse a shipped key whose write would change what another key reads.
 
-    The other key may be shipped too, or be one of the target's own definition
-    files, which the staged view would model apart from the write that changes
-    it. An existing key that differs only in letter case or Unicode
-    normalization names the same item on a folding filesystem, and is
-    overwritten like any existing file.
+    The target's directory links can make two keys one entry, and a symbolic
+    link reads whatever its target holds. The other key may be shipped too,
+    or be one of the target's own definition files, which the staged view
+    would model apart from the write that changes it. A shipped key that is
+    itself a symbolic link or a hard link is not refused: the write replaces
+    that entry alone. An existing key that differs only in letter case or
+    Unicode normalization names the same item on a folding filesystem, and
+    is overwritten like any existing file.
 
-    :raises ConfigError: When a shipped key would be written to another key's file.
+    :raises ConfigError: When a shipped key's write would change another key.
     """
     keys = [file_key("profile", name) for name in config.list_profiles()]
     keys += [file_key("bundle", name) for name in config.list_bundles()]
     keys += [file_key("env", name, f) for name in config.list_envs() for f in ENV_FILES]
-    existing = _by_identity(config, keys)
+    existing = _by_identity(config, keys, read=True)
     seen: dict[_Identity, str] = {}
     for key in sorted(document.files):
-        identity = _physical_identity(config.root / key)
+        identity = _entry_identity(config.root / key)
         if identity in seen:
             raise ConfigError(
                 f"The document ships {seen[identity]} and {key}, "
@@ -549,7 +589,7 @@ def _refuse_linked_keys(config: ConfigRoot, document: ExportDocument) -> None:
         others = [
             other for other in existing.get(identity, []) if _caseless(other) != _caseless(key)
         ]
-        if others:
+        if others and _entry_identity(config.root / others[0]) == identity:
             raise ConfigError(
                 f"The document ships {key}, which on this machine is the same file "
                 f"as {others[0]}.",
@@ -557,6 +597,14 @@ def _refuse_linked_keys(config: ConfigRoot, document: ExportDocument) -> None:
                     "The target root's directory links make them one file, so writing "
                     "one would change the other; remove the link or leave the item out "
                     "of the export."
+                ),
+            )
+        if others:
+            raise ConfigError(
+                f"The document ships {key}, which {others[0]} links to on this machine.",
+                hint=(
+                    f"{others[0]} is a symbolic link, so writing {key} would change what "
+                    "it reads; remove the link or leave the item out of the export."
                 ),
             )
         seen[identity] = key
@@ -725,7 +773,10 @@ def used_by(config: ConfigRoot, keys: Iterable[str]) -> tuple[dict[str, list[str
     Keys match by the file they name here, not by spelling: on a filesystem
     that folds letter case, a shipped ``profiles/Foo.yaml`` replaces
     ``profiles/foo.yaml``, so whatever reaches ``foo``, under any spelling, is
-    reported under the shipped key.
+    reported under the shipped key. An environment that reaches a symbolic
+    link to a shipped key is reported under it too, but one that reaches a
+    hard link to it, or the target of a shipped link, is not: the write
+    replaces only the shipped key's own entry.
 
     :param config: The unmodified target root.
     :param keys: Document file keys.
@@ -734,7 +785,7 @@ def used_by(config: ConfigRoot, keys: Iterable[str]) -> tuple[dict[str, list[str
         the user should see).
     """
     wanted = _by_identity(config, keys)
-    identities: dict[str, _Identity] = {}
+    identities: dict[str, list[_Identity]] = {}
     found: dict[str, list[str]] = {}
     warnings: list[str] = []
     for env in config.list_envs():
@@ -758,8 +809,9 @@ def used_by(config: ConfigRoot, keys: Iterable[str]) -> tuple[dict[str, list[str
         hits: set[str] = set()
         for key in reached:
             if key not in identities:
-                identities[key] = _physical_identity(config.root / key)
-            hits.update(wanted.get(identities[key], []))
+                identities[key] = _read_identities(config.root / key)
+            for identity in identities[key]:
+                hits.update(wanted.get(identity, []))
         for key in sorted(hits):
             found.setdefault(key, []).append(env)
     return found, warnings
@@ -822,11 +874,11 @@ def check_meanings(
             for token in _bare_tokens(doc_root, parsed):
                 _refuse_change(token, config.root / key, _meaning(doc_root, token),
                                _meaning(staged.root, token), incoming=True)
-        # Compared by filesystem identity, not spelling: on a target that folds
-        # letter case, envs/Main/stack.txt is the file a shipped
+        # Compared by the entry a write replaces, not spelling: on a target that
+        # folds letter case, envs/Main/stack.txt is the file a shipped
         # envs/main/stack.txt replaces, and its old tokens are gone after the
-        # import.
-        shipped = {_physical_identity(config.root / key) for key in document.files}
+        # import. A hard link's other name keeps them, so it is still checked.
+        shipped = {_entry_identity(config.root / key) for key in document.files}
         # Built from the listed names directly, not through parse_file_key: a
         # target bundle whose stem validate_name rejects is still reachable by
         # '@stem', so its tokens need the check as much as any other file's.
@@ -834,7 +886,7 @@ def check_meanings(
         target += [FileKey("bundle", n, None) for n in config.list_bundles()]
         for parsed in target:
             key = file_key(parsed.kind, parsed.name, parsed.filename)
-            if _physical_identity(config.root / key) in shipped:
+            if _entry_identity(config.root / key) in shipped:
                 continue
             # A target file this check cannot read propagates its ConfigError:
             # the import cannot show that file's tokens keep their meaning, so

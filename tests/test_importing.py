@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -638,6 +639,72 @@ def test_a_single_linked_directory_still_stages(config_tree: ConfigRoot, tmp_pat
     _stage(target, _raw(config_tree, "profile:utils"))
 
 
+@pytest.mark.parametrize(
+    ("shipped", "linked", "item", "content"),
+    [
+        ("profiles/utils.yaml", "profiles/spare.yaml", "profile:utils", "includes:\n  - typer\n"),
+        ("envs/main/stack.txt", "envs/work/stack.txt", "main", "pkg:typer\n"),
+    ],
+)
+def test_a_hard_linked_target_file_is_replaced_alone(
+    config_tree: ConfigRoot, tmp_path: Path, shipped: str, linked: str, item: str, content: str
+) -> None:
+    """A write publishes a new file, so the other name of a hard link keeps its content."""
+    target = ConfigRoot(tmp_path / "target")
+    for key in (shipped, linked):
+        (target.root / key).parent.mkdir(parents=True, exist_ok=True)
+    (target.root / shipped).write_text(content)
+    os.link(target.root / shipped, target.root / linked)
+    _plan(target, _raw(config_tree, item), overwrite=True)
+    assert (target.root / shipped).read_text() == (config_tree.root / shipped).read_text()
+    assert (target.root / linked).read_text() == content
+
+
+def test_shipping_a_symlinked_file_replaces_only_the_link(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.profiles_dir.mkdir(parents=True)
+    target.profile_path("spare").write_text("includes:\n  - typer\n")
+    target.profile_path("utils").symlink_to("spare.yaml")
+    _plan(target, _raw(config_tree, "profile:utils"), overwrite=True)
+    assert not target.profile_path("utils").is_symlink()
+    assert target.profile_path("utils").read_text() == "includes:\n  - rich\n"
+    assert target.profile_path("spare").read_text() == "includes:\n  - typer\n"
+
+
+def test_shipping_the_file_a_target_symlink_reads_is_refused(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    target = ConfigRoot(tmp_path / "target")
+    target.profiles_dir.mkdir(parents=True)
+    target.profile_path("utils").write_text("includes:\n  - typer\n")
+    target.profile_path("alias").symlink_to("utils.yaml")
+    pattern = (
+        r"^The document ships profiles/utils\.yaml, which profiles/alias\.yaml links to "
+        r"on this machine\.$"
+    )
+    with pytest.raises(ConfigError, match=pattern) as caught:
+        _stage(target, _raw(config_tree, "profile:utils"))
+    assert caught.value.hint is not None and "symbolic link" in caught.value.hint
+
+
+def test_a_symlink_cycle_in_a_target_env_ends_the_link_walk(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    """The cycle is entered after one hop, so it repeats an entry other than the first."""
+    target = ConfigRoot(tmp_path / "target")
+    env = target.env_dir("main")
+    env.mkdir(parents=True)
+    (env / "stack.txt").write_text("pkg:rich\n")
+    (env / "python.txt").symlink_to("micromamba.txt")
+    (env / "micromamba.txt").symlink_to("channels.txt")
+    (env / "channels.txt").symlink_to("micromamba.txt")
+    pattern = f"^Broken symlink: {re.escape(str(env))}/"
+    with pytest.raises(ConfigError, match=pattern):
+        _stage(target, _raw(config_tree, "profile:utils"))
+
+
 def test_classify_new_identical_different(config_tree: ConfigRoot, tmp_path: Path) -> None:
     target = ConfigRoot(tmp_path / "target")
     (target.root / "profiles").mkdir(parents=True)
@@ -697,6 +764,19 @@ def test_used_by_warns_about_an_environment_it_cannot_read(config_tree: ConfigRo
     assert len(warnings) == 1
     assert warnings[0].startswith("Cannot tell what environment 'work' uses: ")
     assert str(config_tree.profiles_dir) in warnings[0]
+
+
+def test_used_by_follows_a_symlink_but_not_a_hard_link(config_tree: ConfigRoot) -> None:
+    """An environment is a user of a key only if a write to that key changes what it reads."""
+    os.link(config_tree.profile_path("utils"), config_tree.profile_path("spare"))
+    config_tree.profile_path("alias").symlink_to("utils.yaml")
+    for env, token in (("hard", "spare"), ("soft", "alias")):
+        config_tree.env_dir(env).mkdir()
+        config_tree.env_stack_path(env).write_text(f"{token}\n")
+    assert used_by(config_tree, ["profiles/utils.yaml"]) == (
+        {"profiles/utils.yaml": ["main", "soft"]}, []
+    )
+    assert used_by(config_tree, ["profiles/alias.yaml"]) == ({"profiles/alias.yaml": ["soft"]}, [])
 
 
 def _folds_case(directory: Path) -> bool:
@@ -769,6 +849,21 @@ def test_a_replaced_env_old_token_is_not_checked(config_tree: ConfigRoot, tmp_pa
     target.env_dir("main").mkdir(parents=True)
     target.env_stack_path("main").write_text("utils\n")
     _meanings(target, _raw(config_tree, "main", "profile:utils"))
+
+
+def test_the_unshipped_name_of_a_hard_link_is_still_checked(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    """Replacing envs/main/stack.txt leaves envs/work/stack.txt holding the old tokens."""
+    target = ConfigRoot(tmp_path / "target")
+    for env in ("main", "work"):
+        target.env_dir(env).mkdir(parents=True)
+    target.env_stack_path("work").write_text("utils\n")
+    os.link(target.env_stack_path("work"), target.env_stack_path("main"))
+    pattern = "on this machine but would mean profile 'utils'"
+    with pytest.raises(ConfigError, match=pattern) as caught:
+        _meanings(target, _raw(config_tree, "main"))
+    assert str(target.env_stack_path("work")) in caught.value.message
 
 
 def test_a_folded_replaced_env_old_token_is_not_checked(
