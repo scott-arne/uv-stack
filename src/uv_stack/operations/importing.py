@@ -1225,6 +1225,9 @@ def prepared_import(
         if dry_run:
             yield plan_import(config, document, doc_root, referenced, options, build=build)
             return
+        # Resolving a root link to a missing directory would create that
+        # directory; refused here instead, as the dry run refuses it.
+        _refuse_non_directory_blockers(config, document)
         # One resolution serves the locks, the reads, the writes and the
         # caller's build, so a root symlink retargeted mid-import cannot split
         # them across two trees. What the user reads names the root as given.

@@ -1284,6 +1284,24 @@ def test_a_held_lock_through_a_linked_root_names_the_root_as_given(
     ) as caught:
         _plan(ConfigRoot(link), _raw(config_tree, "main"))
     assert f"importing into '{link}'" in caught.value.message
+    assert caught.value.hint is not None
+    assert str(ConfigRoot(link).import_lock_path()) in caught.value.hint
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_a_root_link_to_a_missing_directory_is_refused(
+    config_tree: ConfigRoot, tmp_path: Path, dry_run: bool
+) -> None:
+    """A dangling root link is refused, not resolved into a directory to create."""
+    missing = tmp_path / "missing"
+    link = tmp_path / "root"
+    link.symlink_to(missing)
+    document = _load(_raw(config_tree, "profile:utils"))
+    pattern = f"^Not a directory: {re.escape(str(link))}$"
+    with pytest.raises(ConfigError, match=pattern):
+        with prepared_import(ConfigRoot(link), document, ImportOptions(), dry_run=dry_run):
+            pass
+    assert not os.path.lexists(missing)
 
 
 def _probe(python: str | None) -> Callable[[Command], CommandResult]:
