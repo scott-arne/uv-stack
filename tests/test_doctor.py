@@ -2922,6 +2922,21 @@ def test_a_marker_the_filesystem_will_not_resolve_is_still_a_misplaced_env(
     assert _kinds(diagnose(config_tree)) == ["misplaced-env"]
 
 
+def test_a_repeated_setting_in_remotes_yaml_is_a_warning(config_tree: ConfigRoot) -> None:
+    path = config_tree.remotes_path()
+    path.write_text("gpu-box:\n  root: /a\n  root: /b\nlaptop:\n  root: /c\n")
+    findings = [f for f in diagnose(config_tree) if f.path == path]
+    assert findings == [
+        Finding(
+            "warn",
+            f"Host 'gpu-box' sets 'root' twice in {path}: lines 2 and 3. Only line 3 is used.",
+            fix="Remove all but one of them; YAML uses only the last.",
+            kind="repeated-setting",
+            path=path,
+        )
+    ]
+
+
 def test_invalid_remotes_yaml_is_unparseable(config_tree: ConfigRoot) -> None:
     config_tree.remotes_path().write_text("gpu-box: [1, 2]\n")
     finding = next(f for f in diagnose(config_tree) if f.kind == "unparseable-source")

@@ -152,6 +152,74 @@ def test_a_merge_key_is_not_a_host_listed_twice(tmp_path: Path) -> None:
     assert remotes == {"a": RemoteSettings(root="/y")}
 
 
+@pytest.mark.parametrize(("text", "warning", "settings"), [
+    ("gpu-box:\n  root: /a\n  root: /b\n",
+     "sets 'root' twice in {path}: lines 2 and 3. Only line 3 is used.",
+     RemoteSettings(root="/b")),
+    ('gpu-box:\n  root: /a\n  "root": /b\n',
+     "sets 'root' twice in {path}: lines 2 and 3. Only line 3 is used.",
+     RemoteSettings(root="/b")),
+    ("gpu-box:\n  root: /a\n  stack: s\n  root: /b\n  root: /c\n",
+     "sets 'root' 3 times in {path}: lines 2, 4 and 5. Only line 5 is used.",
+     RemoteSettings(stack="s", root="/c")),
+    ("gpu-box: {root: /a, root: /b}\n",
+     "sets 'root' twice in {path}: line 1. Only the last one is used.",
+     RemoteSettings(root="/b")),
+])
+def test_a_setting_written_twice_warns_and_the_last_is_used(
+    tmp_path: Path, text: str, warning: str, settings: RemoteSettings
+) -> None:
+    path = tmp_path / "remotes.yaml"
+    warnings: list[str] = []
+    assert parse_remotes(text, path, warnings=warnings) == {"gpu-box": settings}
+    assert warnings == ["Host 'gpu-box' " + warning.format(path=path)]
+
+
+def test_each_host_with_a_repeated_setting_gets_its_own_warning(tmp_path: Path) -> None:
+    path = tmp_path / "remotes.yaml"
+    warnings: list[str] = []
+    parse_remotes("a:\n  stack: x\n  stack: y\nb:\n  root: /p\n  root: /q\n", path,
+                  warnings=warnings)
+    assert warnings == [
+        f"Host 'a' sets 'stack' twice in {path}: lines 2 and 3. Only line 3 is used.",
+        f"Host 'b' sets 'root' twice in {path}: lines 5 and 6. Only line 6 is used.",
+    ]
+
+
+@pytest.mark.parametrize("text", [
+    "a:\n  root: /x\nb:\n  root: /y\n",                      # one each, in two hosts
+    "a:\n  <<: {root: /x}\n  root: /y\n",                    # a merge key
+    "base: &b {root: /x}\na:\n  <<: *b\n  root: /y\n",       # a merged anchor
+    "a:\n  <<: {root: /x}\n  <<: {stack: s}\n",              # two merge keys, both used
+])
+def test_a_setting_written_once_per_host_does_not_warn(tmp_path: Path, text: str) -> None:
+    warnings: list[str] = []
+    parse_remotes(text, tmp_path / "remotes.yaml", warnings=warnings)
+    assert warnings == []
+
+
+def test_a_refused_file_adds_no_warning(tmp_path: Path) -> None:
+    warnings: list[str] = []
+    with pytest.raises(ConfigError):
+        parse_remotes("a:\n  root: /x\n  root: /y\n  host: z\n", tmp_path / "remotes.yaml",
+                      warnings=warnings)
+    assert warnings == []
+
+
+def test_loading_and_resolving_collect_the_repeated_setting_warning(
+    config_tree: ConfigRoot,
+) -> None:
+    path = config_tree.remotes_path()
+    path.write_text("box:\n  root: /a\n  root: /b\n")
+    expected = [f"Host 'box' sets 'root' twice in {path}: lines 2 and 3. Only line 3 is used."]
+    loaded: list[str] = []
+    assert load_remotes(config_tree, warnings=loaded) == {"box": RemoteSettings(root="/b")}
+    resolved: list[str] = []
+    assert resolve_settings(config_tree, "box", stack_flag=None, root_flag=None,
+                            warnings=resolved) == ResolvedRemote("stack", "/b")
+    assert loaded == resolved == expected
+
+
 @pytest.mark.parametrize("text", [
     "# c\na: {}\n",                              # full line
     "a:\n  stack: x # c\n",                      # trailing
@@ -340,6 +408,22 @@ def test_sync_remote_takes_its_command_and_root_from_remotes_yaml(
     # root arrives quoted, so only the remote's own expanduser reads its '~'.
     assert runner.commands[0].args == [
         "ssh", "box", "PATH=$HOME/.local/bin:$PATH stack --root '~/envs' import -"]
+
+
+def test_sync_remote_warns_of_a_repeated_setting_and_uses_the_last(
+    config_tree: ConfigRoot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = config_tree.remotes_path()
+    path.write_text("box:\n  root: /a\n  root: /b\n")
+    runner = RecordingRunner(input_responder=lambda cmd, text: (0, ""))
+    monkeypatch.setattr(uv_stack.cli.sync_cmd, "SubprocessRunner", lambda: runner)
+    result = CliRunner().invoke(cli, ["--root", str(config_tree.root), "sync", "remote",
+                                      "main", "box"])
+    assert result.exit_code == 0, result.output
+    assert result.stderr == (
+        f"warning: Host 'box' sets 'root' twice in {path}: lines 2 and 3. "
+        "Only line 3 is used.\n")
+    assert runner.commands[0].args == ["ssh", "box", "stack --root /b import -"]
 
 
 def test_sync_remote_refuses_recreate_with_no_build_before_connecting(
@@ -574,6 +658,36 @@ def test_a_rewrite_refuses_a_host_listed_twice(config_tree: ConfigRoot) -> None:
     with pytest.raises(ConfigError, match="listed twice"):
         remove_remote(config_tree, "b")
     assert config_tree.remotes_path().read_text() == original
+
+
+def test_a_rewrite_warns_of_a_repeated_setting_and_keeps_the_used_one(
+    config_tree: ConfigRoot,
+) -> None:
+    path = config_tree.remotes_path()
+    path.write_text("a:\n  root: /x\n  root: /y\nb: {}\n")
+    expected = [f"Host 'a' sets 'root' twice in {path}: lines 2 and 3. Only line 3 is used."]
+    set_warnings: list[str] = []
+    set_remote(config_tree, "b", stack="/s", warnings=set_warnings)
+    assert set_warnings == expected
+    assert path.read_text() == "a:\n  root: /y\nb:\n  stack: /s\n"
+
+    path.write_text("a:\n  root: /x\n  root: /y\nb: {}\n")
+    remove_warnings: list[str] = []
+    remove_remote(config_tree, "b", warnings=remove_warnings)
+    assert remove_warnings == expected
+    assert path.read_text() == "a:\n  root: /y\n"
+
+
+def test_a_removal_with_nothing_to_write_still_warns(config_tree: ConfigRoot) -> None:
+    path = config_tree.remotes_path()
+    original = "a:\n  root: /x\n  root: /y\n"
+    path.write_text(original)
+    warnings: list[str] = []
+    removal = remove_remote(config_tree, "a", ["stack"], warnings=warnings)
+    assert removal.not_set == ("stack",)
+    assert warnings == [
+        f"Host 'a' sets 'root' twice in {path}: lines 2 and 3. Only line 3 is used."]
+    assert path.read_text() == original
 
 
 def test_set_remote_refuses_a_non_regular_file(config_tree: ConfigRoot) -> None:

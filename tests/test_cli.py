@@ -3393,6 +3393,25 @@ def test_edit_remotes_names_the_next_sync(tmp_path: Path, monkeypatch):
     assert "Used by the next 'stack sync remote'." in result.output
 
 
+def test_edit_remotes_warns_of_a_repeated_setting(tmp_path: Path, monkeypatch):
+    root = _seeded_root(tmp_path)
+    path = ConfigRoot(root).remotes_path()
+
+    def _write(target: Path) -> None:
+        target.write_text("gpu-box:\n  root: /a\n  root: /b\n", encoding="utf-8")
+
+    _install_editor(monkeypatch, _FakeEditor(_write))
+    result = CliRunner().invoke(
+        cli, ["--root", str(root), "edit", "remotes"], env={"COLUMNS": "500"}
+    )
+    assert result.exit_code == 0
+    assert f"Validated {path}" in result.stdout
+    assert result.stderr == (
+        f"warning: Host 'gpu-box' sets 'root' twice in {path}: lines 2 and 3. "
+        "Only line 3 is used.\n"
+    )
+
+
 def test_edit_symlinked_remotes_names_the_real_file(tmp_path: Path, monkeypatch):
     root = _seeded_root(tmp_path)
     real = tmp_path / "real-remotes.yaml"
@@ -4165,6 +4184,20 @@ def test_complete_remote_hosts_lists_the_configured_hosts(config_tree: ConfigRoo
     ctx.params = {"root": str(config_tree.root)}
     assert complete_remote_hosts(ctx, None, "") == ["gpu-box", "laptop"]
     assert complete_remote_hosts(ctx, None, "g") == ["gpu-box"]
+
+
+def test_complete_remote_hosts_is_silent_about_a_repeated_setting(
+    config_tree: ConfigRoot, capsys: pytest.CaptureFixture[str]
+):
+    import click as _click
+
+    from uv_stack.cli._complete import complete_remote_hosts
+
+    config_tree.remotes_path().write_text("gpu-box:\n  root: /a\n  root: /b\n")
+    ctx = _click.Context(cli)
+    ctx.params = {"root": str(config_tree.root)}
+    assert complete_remote_hosts(ctx, None, "") == ["gpu-box"]
+    assert capsys.readouterr() == ("", "")
 
 
 def test_complete_remote_hosts_survives_an_invalid_file(config_tree: ConfigRoot):
@@ -6010,6 +6043,29 @@ def _config_remote(config_tree: ConfigRoot, *args: str, color: bool = False):
     return CliRunner().invoke(
         cli, ["--root", str(config_tree.root), "config", "remote", *args], color=color
     )
+
+
+@pytest.mark.parametrize(("args", "stdout_tail"), [
+    (["list"], "  root: /b\n"),
+    (["list", "--json"], '"root": "/b"\n  }\n}\n'),
+    (["set", "gpu-box", "--stack", "/s"], "  root: /b\n"),
+    (["remove", "gpu-box", "stack"], "  root: /b\n"),
+])
+def test_config_remote_warns_of_a_repeated_setting(
+    config_tree: ConfigRoot, args: list[str], stdout_tail: str
+):
+    path = config_tree.remotes_path()
+    path.write_text("gpu-box:\n  stack: /s\n  root: /a\n  root: /b\n")
+    result = CliRunner().invoke(
+        cli, ["--root", str(config_tree.root), "config", "remote", *args],
+        env={"COLUMNS": "500"},
+    )
+    assert result.exit_code == 0, result.output
+    assert result.stderr == (
+        f"warning: Host 'gpu-box' sets 'root' twice in {path}: lines 3 and 4. "
+        "Only line 4 is used.\n"
+    )
+    assert result.stdout.endswith(stdout_tail)
 
 
 def test_config_remote_list_fills_in_defaults(config_tree: ConfigRoot):

@@ -21,10 +21,14 @@ from uv_stack.models import RemoteSettings
 from uv_stack.runner import Command
 
 
-def load_remotes(config: ConfigRoot) -> dict[str, RemoteSettings]:
+def load_remotes(
+    config: ConfigRoot, *, warnings: list[str] | None = None
+) -> dict[str, RemoteSettings]:
     """Load ``remotes.yaml``; an absent file has no entries.
 
     :param config: The local root holding ``remotes.yaml``.
+    :param warnings: Collects the warnings :func:`parse_remotes` gives, when
+        given.
     :returns: Each host name, exactly as written, mapped to its settings.
     :raises ConfigError: When the file is not regular, is not valid UTF-8, or
         does not parse or validate.
@@ -36,14 +40,19 @@ def load_remotes(config: ConfigRoot) -> dict[str, RemoteSettings]:
     require_regular_file(path)
     # Read outside the broad except: a decode failure is already a ConfigError
     # naming the file, and an unreadable file is an OSError, not bad YAML.
-    return parse_remotes(read_text_utf8(path), path)
+    return parse_remotes(read_text_utf8(path), path, warnings=warnings)
 
 
-def parse_remotes(text: str, path: Path) -> dict[str, RemoteSettings]:
+def parse_remotes(
+    text: str, path: Path, *, warnings: list[str] | None = None
+) -> dict[str, RemoteSettings]:
     """Parse ``remotes.yaml`` text; an empty document has no entries.
 
     :param text: The file's text.
     :param path: The file the text came from, named in errors.
+    :param warnings: Collects a warning for each setting written more than once
+        in one host's entry, when given. Nothing is collected when the text is
+        refused.
     :returns: Each host name, exactly as written, mapped to its settings, in
         file order.
     :raises ConfigError: When the text does not parse or validate.
@@ -75,6 +84,8 @@ def parse_remotes(text: str, path: Path) -> dict[str, RemoteSettings]:
                 hint="Quote the host name in remotes.yaml, for example \"yes\":",
                 path=path)
         remotes[host] = _settings({} if entry is None else entry, path)
+    if warnings is not None:
+        warnings.extend(_repeated_settings(text, path))
     return remotes
 
 
@@ -102,6 +113,44 @@ def _refuse_repeated_hosts(text: str, path: Path) -> None:
                 hint="Remove or merge one of them; YAML would keep only the last.",
                 path=path)
         first_lines[key.value] = line
+
+
+def _repeated_settings(text: str, path: Path) -> list[str]:
+    """Warn of each setting written more than once in one host's entry.
+
+    YAML keeps only the last of them, so the others are silently ignored.
+
+    :param text: Text that :func:`parse_remotes` accepted.
+    :param path: The file the text came from, named in the warnings.
+    :returns: One warning per repeated setting, in file order.
+    """
+    root = yaml.compose(text, Loader=yaml.SafeLoader)
+    assert isinstance(root, yaml.MappingNode)
+    warnings: list[str] = []
+    for host, entry in root.value:
+        if host.tag != "tag:yaml.org,2002:str" or not isinstance(entry, yaml.MappingNode):
+            continue
+        found: dict[str, list[int]] = {}
+        for key, _ in entry.value:
+            # As for hosts, a merge key is not a repeat: an explicit key
+            # overrides it by YAML's own rule.
+            if key.tag == "tag:yaml.org,2002:str":
+                found.setdefault(key.value, []).append(key.start_mark.line + 1)
+        for name, lines in found.items():
+            if len(lines) < 2:
+                continue
+            count = "twice" if len(lines) == 2 else f"{len(lines)} times"
+            # A flow mapping can repeat a setting on one line, where naming the
+            # line twice would read as a typo.
+            distinct = list(dict.fromkeys(lines))
+            if len(distinct) == 1:
+                where, used = f"line {distinct[0]}", "the last one"
+            else:
+                where = f"lines {', '.join(map(str, distinct[:-1]))} and {distinct[-1]}"
+                used = f"line {distinct[-1]}"
+            warnings.append(f"Host {host.value!r} sets {name!r} {count} in {path}: {where}. "
+                            f"Only {used} is used.")
+    return warnings
 
 
 def _settings(entry: object, path: Path) -> RemoteSettings:
@@ -208,7 +257,9 @@ def _serialize_remotes(remotes: dict[str, RemoteSettings]) -> str:
 
 
 def _update_remotes(
-    config: ConfigRoot, change: Callable[[dict[str, RemoteSettings]], bool]
+    config: ConfigRoot,
+    change: Callable[[dict[str, RemoteSettings]], bool],
+    warnings: list[str] | None,
 ) -> dict[str, RemoteSettings]:
     """Apply ``change`` to ``remotes.yaml`` and write the result.
 
@@ -219,6 +270,8 @@ def _update_remotes(
     :param config: The local root holding ``remotes.yaml``.
     :param change: Edits the parsed mapping in place and returns False when
         there is nothing to write. It may raise to refuse.
+    :param warnings: Collects the warnings :func:`parse_remotes` gives for the
+        file as read, when given.
     :returns: The mapping after ``change``.
     :raises ConfigError: When the file is not regular or is invalid, holds
         comments, would not read back as the intended settings, or changed
@@ -239,7 +292,7 @@ def _update_remotes(
             raise ConfigError(f"{path} changed while it was being updated; nothing was written.",
                               hint="Run the command again.",
                               path=path)
-        remotes = {} if text is None else parse_remotes(text, path)
+        remotes = {} if text is None else parse_remotes(text, path, warnings=warnings)
         if text is not None and has_comment(text):
             raise ConfigError(f"{path} contains comments, which rewriting would drop.",
                               hint="Edit it with 'stack edit remotes', or remove the comments "
@@ -271,13 +324,15 @@ def _update_remotes(
 
 
 def set_remote(config: ConfigRoot, host: str, *, stack: str | None = None,
-               root: str | None = None) -> RemoteSettings:
+               root: str | None = None, warnings: list[str] | None = None) -> RemoteSettings:
     """Merge the given fields into HOST's entry, creating the entry if absent.
 
     :param config: The local root holding ``remotes.yaml``.
     :param host: The host name, stored exactly as given.
     :param stack: The remote ``stack`` command; ``None`` leaves it as it is.
     :param root: The remote's config root; ``None`` leaves it as it is.
+    :param warnings: Collects the warnings :func:`parse_remotes` gives for the
+        file as it was before the rewrite, when given.
     :returns: HOST's entry as written.
     :raises UvStackError: When HOST begins with ``-``.
     :raises ConfigError: When HOST is empty or holds a control character, a
@@ -298,10 +353,11 @@ def set_remote(config: ConfigRoot, host: str, *, stack: str | None = None,
         remotes[host] = _settings({**current, **given}, path)
         return True
 
-    return _update_remotes(config, change)[host]
+    return _update_remotes(config, change, warnings)[host]
 
 
-def remove_remote(config: ConfigRoot, host: str, fields: Sequence[str] = ()) -> Removal:
+def remove_remote(config: ConfigRoot, host: str, fields: Sequence[str] = (), *,
+                  warnings: list[str] | None = None) -> Removal:
     """Remove HOST's entry, or only the named fields of it.
 
     HOST gets no shape checks beyond existence, so a hand-written entry that
@@ -311,6 +367,8 @@ def remove_remote(config: ConfigRoot, host: str, fields: Sequence[str] = ()) -> 
     :param host: The host name, matched exactly.
     :param fields: Fields to clear (``stack``, ``root``); none removes the
         entry. An entry left with no fields stays, meaning the same as none.
+    :param warnings: Collects the warnings :func:`parse_remotes` gives for the
+        file as it was before the rewrite, when given.
     :returns: HOST's resulting entry, and the named fields it did not have.
         Nothing is written when every named field was unset.
     :raises ConfigError: When HOST is not in the file, or the file cannot be
@@ -339,7 +397,7 @@ def remove_remote(config: ConfigRoot, host: str, fields: Sequence[str] = ()) -> 
         remotes[host] = _settings(stored, path)
         return True
 
-    remotes = _update_remotes(config, change)
+    remotes = _update_remotes(config, change, warnings)
     return Removal(remotes[host] if named else None, not_set)
 
 
@@ -365,19 +423,22 @@ class ResolvedRemote:
 
 
 def resolve_settings(config: ConfigRoot, dest: str, *, stack_flag: str | None,
-                     root_flag: str | None) -> ResolvedRemote:
+                     root_flag: str | None,
+                     warnings: list[str] | None = None) -> ResolvedRemote:
     """Apply flag, then ``remotes.yaml`` entry (DEST exactly as typed), then default.
 
     :param config: The local root holding ``remotes.yaml``.
     :param dest: The destination as typed, looked up without normalizing.
     :param stack_flag: The ``--remote-stack`` value, if given.
     :param root_flag: The ``--remote-root`` value, if given.
+    :param warnings: Collects the warnings :func:`parse_remotes` gives, when
+        given.
     :returns: The remote ``stack`` command and root; the root is ``None`` when
         neither source sets one, leaving the remote's default.
     :raises ConfigError: When ``remotes.yaml`` is invalid, as ``load_remotes``.
     :raises OSError: When ``remotes.yaml`` cannot be read.
     """
-    entry = load_remotes(config).get(dest, RemoteSettings())
+    entry = load_remotes(config, warnings=warnings).get(dest, RemoteSettings())
     return ResolvedRemote(stack_flag or entry.stack or _DEFAULT_STACK, root_flag or entry.root)
 
 

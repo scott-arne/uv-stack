@@ -88,12 +88,14 @@ def validate_remotes(config: ConfigRoot) -> Validation:
     """Validate an edited ``remotes.yaml``.
 
     :param config: Config root.
-    :returns: No warnings; an absent file is valid and has no remotes.
+    :returns: A warning for each setting written more than once in one host's
+        entry; an absent file is valid and has no remotes.
     :raises ConfigError: When the file is not regular, is not valid UTF-8, or
         does not parse or validate, as ``stack sync remote`` would find.
     """
-    load_remotes(config)
-    return Validation([])
+    warnings: list[str] = []
+    load_remotes(config, warnings=warnings)
+    return Validation(warnings)
 
 
 def validate_bundle(config: ConfigRoot, name: str, *, strict: bool = False) -> Validation:

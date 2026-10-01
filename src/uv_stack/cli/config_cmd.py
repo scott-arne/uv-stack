@@ -7,7 +7,7 @@ import json
 import rich_click as click
 
 from uv_stack.cli._complete import complete_remote_hosts
-from uv_stack.cli._render import echo
+from uv_stack.cli._render import echo, render_warnings
 from uv_stack.config import ConfigRoot
 from uv_stack.hints import escape_controls
 from uv_stack.operations.init import init_config_root
@@ -96,7 +96,9 @@ def config_remote_list(config_root: ConfigRoot, as_json: bool) -> None:
 
     --json gives the stored values instead, with null for an unset field.
     """
-    remotes = load_remotes(config_root)
+    warnings: list[str] = []
+    remotes = load_remotes(config_root, warnings=warnings)
+    render_warnings(warnings, styled=not as_json)
     if as_json:
         # Stored values rather than effective ones, so a script can tell an
         # unset field from one set to the default. JSON's own escaping covers
@@ -127,7 +129,9 @@ def config_remote_set(
     # incomplete whatever the host.
     if stack is None and root is None:
         raise click.UsageError("'config remote set' needs --stack, --root, or both.")
-    settings = set_remote(config_root, host, stack=stack, root=root)
+    warnings: list[str] = []
+    settings = set_remote(config_root, host, stack=stack, root=root, warnings=warnings)
+    render_warnings(warnings)
     for line in entry_lines(host, settings):
         echo(line)
 
@@ -141,7 +145,9 @@ def config_remote_remove(config_root: ConfigRoot, host: str, fields: tuple[str, 
 
     An entry left with no fields stays; it means the same as no entry.
     """
-    removal = remove_remote(config_root, host, fields)
+    warnings: list[str] = []
+    removal = remove_remote(config_root, host, fields, warnings=warnings)
+    render_warnings(warnings)
     shown = escape_controls(host)
     if removal.entry is None:
         echo(f"Removed {shown} from {escape_controls(str(config_root.remotes_path()))}.")

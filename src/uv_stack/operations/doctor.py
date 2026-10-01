@@ -1590,15 +1590,21 @@ def _variables_blame(config: ConfigRoot, error: UvStackError | OSError) -> Path:
 def _remotes_findings(config: ConfigRoot) -> list[Finding]:
     """Report a ``remotes.yaml`` that ``stack sync remote`` would refuse to load.
 
+    A file that loads can still write a setting twice in one host's entry,
+    where only the last is used; each such setting is a warning.
+
     :param config: The configuration root to inspect.
-    :returns: One unparseable-source warning, or nothing when the file is
-        absent or loads.
+    :returns: One unparseable-source warning, one warning per repeated
+        setting, or nothing when the file is absent or loads cleanly.
     """
+    warnings: list[str] = []
     try:
-        load_remotes(config)
+        load_remotes(config, warnings=warnings)
     except (ConfigError, OSError) as error:
         return [_unparseable(config.remotes_path(), str(error))]
-    return []
+    return [Finding("warn", warning, fix="Remove all but one of them; YAML uses only the last.",
+                    kind="repeated-setting", path=config.remotes_path())
+            for warning in warnings]
 
 
 def _portability_findings(config: ConfigRoot) -> list[Finding]:

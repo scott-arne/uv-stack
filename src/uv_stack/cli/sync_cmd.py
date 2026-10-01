@@ -322,7 +322,10 @@ def sync_remote(config: ConfigRoot, items: tuple[str, ...], dest: str, remote_ro
     exported = export_items(config, items)
     render_warnings(exported.warnings, styled=False)
     document = serialize_document(exported.document)
-    settings = resolve_settings(config, dest, stack_flag=remote_stack, root_flag=remote_root)
+    remotes_warnings: list[str] = []
+    settings = resolve_settings(config, dest, stack_flag=remote_stack, root_flag=remote_root,
+                                warnings=remotes_warnings)
+    render_warnings(remotes_warnings, styled=False)
     flags = [flag for flag, on in (("--overwrite", overwrite), ("--no-build", no_build),
              ("--recreate", recreate), ("--dry-run", dry_run), ("--strict", strict)) if on]
     command = remote_command(dest, settings.stack, settings.root, flags)

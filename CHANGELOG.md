@@ -9,6 +9,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## Unreleased
 
+### Added
+
+- A setting written more than once in one host's entry of `remotes.yaml` is
+  warned about, naming its lines and the one that is used, since YAML keeps
+  only the last. `stack config remote list`, `set` and `remove`,
+  `stack sync remote` and `stack edit remotes` print the warning on stderr, and
+  `stack doctor` reports it. `set` and `remove` keep the used value when they
+  rewrite the file. A merge key (`<<`) is not counted. Before, the earlier
+  values were silently ignored.
+
 ### Fixed
 
 - Commands that write under the config root refuse one reached through a

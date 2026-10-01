@@ -1024,6 +1024,10 @@ Each entry allows only `stack` (the command to run on the remote) and `root`
 - **List each host once.** YAML would silently keep only the last of two
   entries for one host, so every command that reads the file refuses it and
   names both lines. `"gpu-box"` and `gpu-box` are the same host.
+- **Write each setting once per entry.** YAML uses only the last of two
+  `root:` lines in one entry, so commands that read the file warn and name
+  both lines. `stack config remote set` and `remove` keep the used one when
+  they rewrite the file.
 
 Two commands change the file. `stack edit remotes` opens it in your editor and
 validates it on exit (see [Editing configuration](#editing-configuration)).
