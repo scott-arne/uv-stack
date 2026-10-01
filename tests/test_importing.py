@@ -1257,6 +1257,24 @@ def test_an_import_through_a_linked_root_warns_with_the_root_as_given(
     assert plan.warnings == [f"{given.profile_path('utils')} was checked"]
 
 
+def test_a_dry_run_through_a_linked_root_plans_in_the_root_as_given(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def naming(config: ConfigRoot, name: str, *, strict: bool = False) -> Validation:
+        return Validation([f"{config.profile_path(name)} was checked"])
+
+    monkeypatch.setattr(importing, "validate_profile", naming)
+    first = tmp_path / "first"
+    first.mkdir()
+    link = tmp_path / "root"
+    link.symlink_to(first)
+    given = ConfigRoot(link)
+    plan = _plan(given, _raw(config_tree, "profile:utils"), dry_run=True)
+    assert plan.root.root == link
+    assert plan.warnings == [f"{given.profile_path('utils')} was checked"]
+    assert list(first.iterdir()) == []
+
+
 def test_an_import_through_a_linked_root_refuses_with_the_root_as_given(
     config_tree: ConfigRoot, tmp_path: Path
 ) -> None:
