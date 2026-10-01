@@ -7,6 +7,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) with
 one addition, a `Breaking` section for changes that alter existing behavior, and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.7.2
+
+### Fixed
+
+- `stack import` takes its locks, reads the target, writes the files, and
+  builds the environments in one tree when the config root is reached through
+  a symbolic link. Before, a link retargeted while an import ran could leave
+  the locks held in one tree while the import read, wrote, and built in
+  another, where nothing serialized it with a concurrent import or writer. Its
+  warnings and refusals still name the root as given; an error panel from a
+  build may name the tree the link resolved to.
+
 ## 0.7.1 - 2026-09-30
 
 ### Fixed

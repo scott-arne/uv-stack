@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,7 @@ from click.testing import CliRunner, Result
 
 import uv_stack.cli.transfer_cmd
 import uv_stack.cli.upgrade
+import uv_stack.operations.importing
 from tests.test_operations import _compile_output
 from uv_stack import __version__, fsutil
 from uv_stack.cli import cli
@@ -262,6 +265,40 @@ def test_import_builds_under_the_locks_and_reports_pins(
     assert state["locked"] is True
     assert state["candidate"] == "numpy==1.26.4\npandas==2.2.0\nrich==13.7.0\n"
     assert "main: 1 pins kept, 1 changed, 1 dropped, 0 added" in result.output
+
+
+@pytest.mark.skipif(not fsutil._LOCK_AVAILABLE, reason="requires fcntl")
+def test_import_builds_in_the_tree_it_resolved(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The link is retargeted as the import locks are taken and stays that way,
+    # so a build or pin report through the unresolved root would find no
+    # environment.
+    config_tree.env_requirements_lock("main").write_text(
+        "numpy==1.26.4\npandas==2.2.0\nrich==13.7.0\n")
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    link = tmp_path / "root"
+    link.symlink_to(first)
+    real = uv_stack.operations.importing.name_lock
+
+    @contextmanager
+    def retargeting(*args: Any, **kwargs: Any) -> Iterator[None]:
+        link.unlink()
+        link.symlink_to(second)
+        with real(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(uv_stack.operations.importing, "name_lock", retargeting)
+    resolved = ConfigRoot(first)
+    _fake_build(monkeypatch, resolved)
+    doc = _export(config_tree, "main")
+    result = _run_import(ConfigRoot(link), doc, build=True)
+    assert result.exit_code == 0, result.output
+    assert resolved.env_requirements_lock("main").read_text() == "numpy==1.26.4\nrich==14.0.0\n"
+    assert "main: 1 pins kept, 1 changed, 1 dropped, 0 added" in result.output
+    assert list(second.iterdir()) == []
 
 
 def test_import_without_a_seed_prints_no_pin_report(

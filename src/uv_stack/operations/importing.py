@@ -1074,6 +1074,9 @@ class ImportPlan:
     warnings: list[str]
     used_by: dict[str, list[str]]
     dependents: list[str]
+    # The root the plan was decided in, and written through unless a dry run:
+    # the caller's build must use it to stay in the tree the locks cover.
+    root: ConfigRoot
     builds: list[BuildStep] = field(default_factory=list)
 
 
@@ -1112,21 +1115,28 @@ def plan_import(
         variables_text=staged.variables_text,
         # An environment both calls cannot read would otherwise warn twice.
         warnings=list(dict.fromkeys(warnings + used_warnings + extra_warnings)),
-        used_by=found, dependents=sorted(users - set(_env_items(document))), builds=builds,
+        used_by=found, dependents=sorted(users - set(_env_items(document))), root=config,
+        builds=builds,
     )
 
 
 @contextmanager
-def import_locks(config: ConfigRoot, document: ExportDocument) -> Iterator[None]:
+def import_locks(
+    config: ConfigRoot, document: ExportDocument, *, label: str | None = None
+) -> Iterator[None]:
     """Hold the root import lock, then stem locks, then env locks, in sorted order.
 
     One fixed order across every import keeps two imports from deadlocking;
     a profile and a bundle of one name share one stem lock, taken once.
+
+    :param label: The root as the timeout message names it; defaults to
+        ``config.root``.
     """
     stems = sorted(set(_shipped(document, "profile")) | set(_shipped(document, "bundle")))
+    label = str(config.root) if label is None else label
     with ExitStack() as stack:
         stack.enter_context(
-            name_lock(config.import_lock_path(), str(config.root), action="importing into")
+            name_lock(config.import_lock_path(), label, action="importing into")
         )
         for stem in stems:
             stack.enter_context(name_lock(config.stem_lock_path(stem), stem, action="importing"))
@@ -1215,9 +1225,18 @@ def prepared_import(
         if dry_run:
             yield plan_import(config, document, doc_root, referenced, options, build=build)
             return
-        with import_locks(config, document):
-            plan = plan_import(config, document, doc_root, referenced, options, build=build)
-            write_plan(config, plan)
+        # One resolution serves the locks, the reads, the writes and the
+        # caller's build, so a root symlink retargeted mid-import cannot split
+        # them across two trees. What the user reads names the root as given.
+        locked = config.resolved()
+        resolved, given = str(locked.root) + os.sep, str(config.root) + os.sep
+        with (
+            _relabeled(locked.root, given),
+            import_locks(locked, document, label=str(config.root)),
+        ):
+            plan = plan_import(locked, document, doc_root, referenced, options, build=build)
+            write_plan(locked, plan)
+            plan.warnings = [_relabel_text(w, resolved, given) for w in plan.warnings]
             yield plan
 
 

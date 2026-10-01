@@ -157,7 +157,7 @@ def import_cmd(config: ConfigRoot, source: str, overwrite: bool, dry_run: bool,
                     for step in plan.builds:
                         _echo(f"  build: {step.name} ({step.action})")
                 elif plan.builds:
-                    _build(config, plan, recreate=recreate, strict=strict)
+                    _build(plan, recreate=recreate, strict=strict)
             finally:
                 if plan.dependents:
                     _echo(dependents_line(plan.dependents))
@@ -171,7 +171,7 @@ def import_cmd(config: ConfigRoot, source: str, overwrite: bool, dry_run: bool,
         _echo("Dry run: nothing written.")
 
 
-def _build(config: ConfigRoot, plan: ImportPlan, *, recreate: bool, strict: bool) -> None:
+def _build(plan: ImportPlan, *, recreate: bool, strict: bool) -> None:
     """Build the imported environments through the ``stack sync`` batch.
 
     Each environment is created if missing and compiled without upgrading, so
@@ -180,8 +180,8 @@ def _build(config: ConfigRoot, plan: ImportPlan, *, recreate: bool, strict: bool
     is interrupted, the environments it did not build are named with the
     command that retries them.
 
-    :param config: The target root, already holding the imported files.
-    :param plan: The written plan; its ``builds`` name the environments.
+    :param plan: The written plan; its ``builds`` name the environments and
+        its ``root``, the target resolved once for the import, holds them.
     :param recreate: Wipe and rebuild each environment from the shipped pins.
     :param strict: Refuse unqualified stack names, as ``--strict`` does.
     :raises SystemExit: With status 1 when any build fails, from the batch.
@@ -193,12 +193,12 @@ def _build(config: ConfigRoot, plan: ImportPlan, *, recreate: bool, strict: bool
         built.append(name)
         seed = plan.document.seeds.get(name)
         if seed is not None:
-            for line in pin_report(name, seed, config.env_requirements_lock(name)):
+            for line in pin_report(name, seed, plan.root.env_requirements_lock(name)):
                 _echo(line)
 
     options = UpgradeOptions(create=True, recreate=recreate, no_upgrade=True, strict=strict)
     try:
-        _run_upgrade(config, names, options, seeds=plan.document.seeds, on_success=report,
+        _run_upgrade(plan.root, names, options, seeds=plan.document.seeds, on_success=report,
                      rule_verb="Building", all_succeeded="All imported environments built.")
     finally:
         failed = [n for n in names if n not in built]

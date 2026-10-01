@@ -1203,6 +1203,89 @@ def test_locks_are_taken_in_one_order_and_held_through_the_block(
                       *(("release", p) for p in reversed(order))]
 
 
+@pytest.mark.skipif(not fsutil._LOCK_AVAILABLE, reason="requires fcntl")
+def test_an_import_locks_plans_and_writes_in_the_tree_it_resolved(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root symlink retargeted as the locks are taken must not split the import.
+
+    The retarget lands before the first lock opens, so a lock, read or write
+    that goes through the unresolved root reaches the second tree, whose
+    differing copy of the profile would refuse the import as a conflict.
+    """
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    (second / "profiles").mkdir(parents=True)
+    (second / "profiles" / "utils.yaml").write_text("includes:\n  - scipy\n")
+
+    def snapshot(root: Path) -> dict[Path, str | None]:
+        return {p: p.read_text() if p.is_file() else None for p in root.rglob("*")}
+
+    before = snapshot(second)
+    link = tmp_path / "root"
+    link.symlink_to(first)
+    real = importing.name_lock
+
+    @contextmanager
+    def retargeting(*args: Any, **kwargs: Any) -> Iterator[None]:
+        link.unlink()
+        link.symlink_to(second)
+        with real(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(importing, "name_lock", retargeting)
+    plan = _plan(ConfigRoot(link), _raw(config_tree, "profile:utils"))
+    assert plan.root.root == first
+    assert (first / "profiles" / "utils.yaml").read_text() == (
+        config_tree.profile_path("utils").read_text())
+    assert (first / ".locks").is_dir()
+    assert snapshot(second) == before
+
+
+def test_an_import_through_a_linked_root_warns_with_the_root_as_given(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def naming(config: ConfigRoot, name: str, *, strict: bool = False) -> Validation:
+        return Validation([f"{config.profile_path(name)} was checked"])
+
+    monkeypatch.setattr(importing, "validate_profile", naming)
+    (tmp_path / "first").mkdir()
+    link = tmp_path / "root"
+    link.symlink_to(tmp_path / "first")
+    given = ConfigRoot(link)
+    plan = _plan(given, _raw(config_tree, "profile:utils"))
+    assert plan.warnings == [f"{given.profile_path('utils')} was checked"]
+
+
+def test_an_import_through_a_linked_root_refuses_with_the_root_as_given(
+    config_tree: ConfigRoot, tmp_path: Path
+) -> None:
+    first = tmp_path / "first"
+    (first / "bundles").mkdir(parents=True)
+    (first / "bundles" / "utils.yaml").write_text("includes:\n  - rich\n")
+    link = tmp_path / "root"
+    link.symlink_to(first)
+    given = ConfigRoot(link)
+    with pytest.raises(ConfigError, match="would shadow the existing bundle") as caught:
+        _plan(given, _raw(config_tree, "profile:utils"))
+    assert caught.value.message.endswith(f": {given.bundle_path('utils')}")
+
+
+def test_a_held_lock_through_a_linked_root_names_the_root_as_given(
+    config_tree: ConfigRoot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fsutil, "_LOCK_TIMEOUT", 0.05)
+    first = ConfigRoot(tmp_path / "first")
+    first.locks_dir.mkdir(parents=True)
+    link = tmp_path / "root"
+    link.symlink_to(first.root)
+    with _lock_held_by_another_process(first.import_lock_path()), pytest.raises(
+        UvStackError
+    ) as caught:
+        _plan(ConfigRoot(link), _raw(config_tree, "main"))
+    assert f"importing into '{link}'" in caught.value.message
+
+
 def _probe(python: str | None) -> Callable[[Command], CommandResult]:
     def respond(cmd: Command) -> CommandResult:
         if cmd.args == micromamba_python_info("main").args:
