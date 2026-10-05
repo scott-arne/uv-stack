@@ -38,9 +38,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   symbolic link to a directory that does not exist, such as a
   `~/.config/python-envs` linked to a checkout or mount that is not there yet.
   The refusal names the link and its target, and says how to restore or create
-  it. That covers `stack create profile`, `bundle`, `env` and `project`,
-  `stack refresh`, `stack config remote set` and `remove`,
-  `stack config portable`, and `stack edit` for everything but `project`.
+  it. That covers `stack create profile`, `bundle`, `env` and `project`, the
+  `stack delete` forms, `stack refresh`, `stack config remote set` and
+  `remove`, `stack config portable`, and `stack edit` for everything but
+  `project`.
   Before, `stack create profile`, `bundle` and `env` and
   `stack config remote set` created the missing directory and wrote into it,
   leaving a near-empty tree where the checkout belonged, and
