@@ -187,6 +187,7 @@ inside a single directory alongside the code that uses them.
 | Enter it with | `micromamba activate <name>` | `uv run ...` |
 | Update with | `stack upgrade <name>` | `stack refresh` |
 | Inspect with | `stack show env <name>`, `stack status` | `stack show project` |
+| Remove with | `stack delete env <name>` | `stack delete project` |
 | Reach for it when | notebooks, ad-hoc work, tooling spanning many repos | one codebase, dependencies versioned and shipped with the code |
 
 Shared environments are registered centrally under the config root, so
@@ -278,6 +279,9 @@ project — `uv add`, `uv sync`, and `uv run` all work as usual.
 | `stack create env NAME [TOKENS]...` | Scaffold (optional) and build a shared environment (`--recreate` wipes and rebuilds it: the lock is compiled first, and the conda layer is destroyed only if that succeeds) |
 | `stack create profile NAME PKG...` | Write a new profile YAML (`--description`, `--tag`) |
 | `stack create bundle NAME TOKEN...` | Write a new bundle YAML (`--description`, `--tag`) |
+| `stack delete env NAME` | Remove a shared environment: its micromamba environment, then `envs/NAME/` |
+| `stack delete profile NAME` / `stack delete bundle NAME` | Delete the YAML; refused while something still refers to it (`--force` overrides) |
+| `stack delete project` | Withdraw uv-stack from the project in this directory: `uv remove` what it applied, drop `[tool.uv-stack]` |
 | `stack edit KIND [NAME]` | Open a profile, bundle, env source, project file, or `remotes.yaml` in your editor and validate it when the editor exits |
 | `stack upgrade [NAMES]...` | Re-render, re-lock, and sync shared environments |
 | `stack sync` | Create, build, and recompile every environment the root declares (no prompt, keeps existing pins) |
@@ -375,6 +379,43 @@ prematurely. This cannot be fixed from uv-stack's side; the fix is the flag:
 ```bash
 stack edit profile ds --editor 'code -w'
 ```
+
+### Deleting
+
+`stack delete` is the inverse of `stack create`. Every form asks before it acts;
+`-y` answers yes, and a declined or unanswered prompt exits 1 with nothing
+touched.
+
+```bash
+stack delete profile ds            # profiles/ds.yaml
+stack delete bundle standard       # bundles/standard.yaml
+stack delete env chem              # the micromamba env, then envs/chem/
+stack delete project               # withdraw from ./pyproject.toml
+```
+
+A profile or bundle is refused while an environment's `stack.txt` or another
+bundle still refers to it, and the refusal lists each place. The reason is the
+same one `stack import` enforces: a bare token that named a profile would
+silently start meaning the pip package of that name on the next upgrade, and a
+qualified one (`profile:ds`, `@standard`) would stop resolving. Edit the
+references out first, or pass `--force` to delete anyway; a forced delete
+prints one warning per reference it leaves behind. A source the check cannot
+read counts as a possible reference and is refused the same way.
+
+`stack delete env` removes only an environment uv-stack manages — one with a
+`stack.txt` under the config root. The micromamba environment goes first, so if
+`micromamba remove` fails the sources are still there and the command can be
+run again. If no micromamba environment is built, that step is skipped, and
+the prompt says so.
+
+`stack delete project` does not delete your project. It runs `uv remove` for
+the packages uv-stack applied — the table's `applied` list, the same ownership
+rule `stack refresh` uses — and drops the `[tool.uv-stack]` table, leaving a
+plain `uv` project with only the dependencies you added yourself.
+`pyproject.toml`, `uv.lock`, and `.venv/` stay. The prompt lists what will be
+removed. A final plain `uv sync` prunes the removed packages from `.venv/`
+(`--no-sync` skips it); it is not pinned to the recorded interpreter, since
+that choice is no longer uv-stack's once the table is gone.
 
 ### Upgrading
 

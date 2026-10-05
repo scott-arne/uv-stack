@@ -36,9 +36,31 @@ def _config_from_ctx(ctx: click.Context) -> ConfigRoot:
 def complete_env_names(
     ctx: click.Context, param: Any, incomplete: str
 ) -> list[str]:
-    """Complete environment names for upgrade/sync/status/show."""
+    """Complete environment names for upgrade/sync/status/show/delete."""
     try:
         names = _config_from_ctx(ctx).list_envs()
+    except Exception:
+        return []
+    return [name for name in names if name.startswith(incomplete)]
+
+
+def complete_profile_names(
+    ctx: click.Context, param: Any, incomplete: str
+) -> list[str]:
+    """Complete profile names for ``stack delete profile``."""
+    try:
+        names = _config_from_ctx(ctx).list_profiles()
+    except Exception:
+        return []
+    return [name for name in names if name.startswith(incomplete)]
+
+
+def complete_bundle_names(
+    ctx: click.Context, param: Any, incomplete: str
+) -> list[str]:
+    """Complete bundle names for ``stack delete bundle``."""
+    try:
+        names = _config_from_ctx(ctx).list_bundles()
     except Exception:
         return []
     return [name for name in names if name.startswith(incomplete)]

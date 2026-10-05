@@ -184,10 +184,11 @@ click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.COMMAND_GROUPS = {
     "stack": [
-        # 'create' is cross-cutting — it makes environments, projects,
-        # profiles, and bundles — so it gets its own panel rather than being
-        # filed under a destination it only partly serves.
-        {"name": "Create", "commands": ["create"]},
+        # 'create' and 'delete' are cross-cutting — they make and remove
+        # environments, projects, profiles, and bundles — so they get their own
+        # panel rather than being filed under a destination they only partly
+        # serve.
+        {"name": "Create and delete", "commands": ["create", "delete"]},
         {"name": "Edit", "commands": ["edit"]},
         {"name": "Environments", "commands": ["upgrade"]},
         {"name": "Projects", "commands": ["refresh"]},
@@ -252,6 +253,7 @@ def _register() -> None:
         completion_cmd,
         config_cmd,
         create,
+        delete,
         diff_cmd,
         doctor,
         init_cmd,
@@ -271,6 +273,7 @@ def _register() -> None:
     cli.add_command(transfer_cmd.export_cmd)
     cli.add_command(transfer_cmd.import_cmd)
     cli.add_command(create.create)
+    cli.add_command(delete.delete)
     cli.add_command(edit_cmd.edit)
     cli.add_command(refresh_cmd.refresh)
     cli.add_command(list_cmd.list_resources)

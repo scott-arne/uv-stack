@@ -11,6 +11,19 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- `stack delete`, the inverse of `stack create`: `delete profile NAME` and
+  `delete bundle NAME` remove the YAML, `delete env NAME` removes the
+  micromamba environment and then `envs/NAME/`, and `delete project` withdraws
+  uv-stack from the project in the current directory, running `uv remove` for
+  the packages it applied and dropping the `[tool.uv-stack]` table while
+  leaving `pyproject.toml`, `uv.lock`, `.venv/` and your own dependencies in
+  place. Each form asks before it acts (`-y` answers yes). A profile or
+  bundle is refused while an environment's `stack.txt` or another bundle
+  still refers to it, naming each place, since a bare token would silently
+  start meaning the pip package of that name; `--force` deletes anyway and
+  warns per reference. Only an environment with a `stack.txt` under the
+  config root can be deleted, so a micromamba environment uv-stack does not
+  manage is never removed.
 - A setting written more than once in one host's entry of `remotes.yaml` is
   warned about, naming its lines and the one that is used, since YAML keeps
   only the last. `stack config remote list`, `set` and `remove`,

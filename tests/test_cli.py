@@ -4750,13 +4750,14 @@ def test_command_panels_separate_create_env_and_project_work():
     """Top-level help must not file project work under Environments.
 
     Asserts structurally against COMMAND_GROUPS: 'refresh' only ever operates
-    on projects and gets its own panel; 'create' is cross-cutting (it makes
-    environments, projects, profiles, and bundles) and gets its own panel;
-    'upgrade' is the genuinely environment-only command.
+    on projects and gets its own panel; 'create' and 'delete' are
+    cross-cutting (they make and remove environments, projects, profiles, and
+    bundles) and share a panel; 'upgrade' is the genuinely environment-only
+    command.
     """
     command_groups = rich_click.rich_click.COMMAND_GROUPS.get("stack", [])
     panels = {group["name"]: group["commands"] for group in command_groups}
-    assert panels.get("Create") == ["create"], panels
+    assert panels.get("Create and delete") == ["create", "delete"], panels
     assert panels.get("Environments") == ["upgrade"], panels
     assert panels.get("Sync") == ["sync", "export", "import"], panels
     assert panels.get("Projects") == ["refresh"], panels
