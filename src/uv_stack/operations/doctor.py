@@ -538,8 +538,10 @@ def diagnose(config: ConfigRoot) -> list[Finding]:
             # contradict it -- create the file, against rename the one you
             # have. Report-only for unusable-env's reason: doctor cannot guess
             # what the file was meant to contain.
-            elif not has_profiles_txt and any(
-                os.path.lexists(env_dir / marker) for marker in _ENV_MARKERS
+            elif (
+                not os.path.lexists(stack_txt)
+                and not has_profiles_txt
+                and any(os.path.lexists(env_dir / marker) for marker in _ENV_MARKERS)
             ):
                 findings.append(
                     Finding(

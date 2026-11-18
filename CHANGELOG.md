@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) with
 one addition, a `Breaking` section for changes that alter existing behavior, and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Fixed
+
+- `stack doctor` reported every environment that had been built as an
+  "Env-like directory with no stack.txt" error, telling you to create a
+  `stack.txt` that was already there. The check counted the `requirements.in`
+  and `environment.yml` a build writes as signs of an env, but never looked
+  for `stack.txt` itself. It now reports only a directory that has those files
+  and no `stack.txt`. The false error dates from 0.6.0.
+
 ## 0.8.0 - 2026-10-05
 
 ### Added

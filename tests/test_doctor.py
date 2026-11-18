@@ -226,6 +226,19 @@ def test_an_env_like_directory_with_no_stack_txt_is_reported(config_tree: Config
     assert findings[0].path == env / "stack.txt"
 
 
+def test_a_built_env_with_its_stack_txt_is_not_reported_missing(config_tree: ConfigRoot):
+    # The markers that flag a missing stack.txt are the files every build
+    # writes, so they sit beside a healthy stack.txt in every env that has
+    # been synced. The fixture's main env has never been built, which is why
+    # a check that ignored stack.txt and keyed on the markers alone still
+    # passed test_clean_tree_has_no_errors.
+    env = config_tree.env_dir("main")
+    (env / "requirements.in").write_text("numpy\n")
+    (env / "environment.yml").write_text("name: main\n")
+
+    assert [f for f in diagnose(config_tree) if f.level == "error"] == []
+
+
 def test_a_legacy_profiles_txt_is_not_also_a_missing_stack_txt(config_tree: ConfigRoot):
     # Both findings fit this directory and they disagree: one says rename the
     # file that is there, the other says create the one that is not. The
